@@ -54,13 +54,22 @@ class GenericScheduler:
         self._jobs: dict[str, SchedulerJobDefinition] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         self._stop_event = asyncio.Event()
+
     def register_handler(self, job_type: str, handler: JobHandler) -> None:
         self._handlers[job_type] = handler
+        logger.info("registered scheduler handler: job_type=%s", job_type)
 
     def add_job(self, job: SchedulerJobDefinition) -> None:
         if job.job_type not in self._handlers:
             raise KeyError(f"no handler registered for job_type={job.job_type!r}")
         self._jobs[job.name] = job
+        logger.info(
+            "registered scheduler job: name=%s job_type=%s interval_seconds=%s run_immediately=%s",
+            job.name,
+            job.job_type,
+            job.interval_seconds,
+            job.run_immediately,
+        )
 
     def add_jobs(self, jobs: Iterable[SchedulerJobDefinition]) -> None:
         for job in jobs:
@@ -71,13 +80,28 @@ class GenericScheduler:
         for key in await redis_client.scan_scheduler_jobs():
             payload = await redis_client.get_raw(key)
             if payload is None:
+                logger.warning("scheduler job key disappeared before load: key=%s", key)
                 continue
             if isinstance(payload, bytes):
                 payload = payload.decode("utf-8")
-            job = SchedulerJobDefinition.model_validate_json(payload)
-            if job.enabled:
-                self.add_job(job)
-                jobs.append(job)
+            try:
+                job = SchedulerJobDefinition.model_validate_json(payload)
+            except Exception:
+                logger.exception("invalid scheduler job payload skipped: key=%s", key)
+                continue
+            if not job.enabled:
+                logger.info("disabled scheduler job skipped: name=%s job_type=%s", job.name, job.job_type)
+                continue
+            if job.job_type not in self._handlers:
+                logger.warning(
+                    "scheduler job skipped because no handler is registered: name=%s job_type=%s",
+                    job.name,
+                    job.job_type,
+                )
+                continue
+            self.add_job(job)
+            jobs.append(job)
+        logger.info("loaded %d runnable scheduler job(s) from Redis", len(jobs))
         return jobs
 
     async def start(self) -> None:
@@ -88,6 +112,13 @@ class GenericScheduler:
             task = asyncio.create_task(self._run_job_loop(job), name=f"scheduler:{job.name}")
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
+            logger.info("started scheduler task: name=%s job_type=%s", job.name, job.job_type)
+
+    def request_stop(self) -> None:
+        """Request a graceful shutdown from synchronous signal handlers."""
+
+        logger.info("scheduler stop requested")
+        self._stop_event.set()
 
     async def stop(self, *, drain_timeout: float = 10.0) -> None:
         """Signal all jobs to stop and wait for in-flight work to drain.
@@ -140,7 +171,9 @@ class GenericScheduler:
     async def _run_once(self, job: SchedulerJobDefinition) -> None:
         handler = self._handlers[job.job_type]
         try:
+            logger.info("scheduled job starting: name=%s job_type=%s", job.name, job.job_type)
             await handler(job)
+            logger.info("scheduled job finished: name=%s job_type=%s", job.name, job.job_type)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -160,8 +193,17 @@ class MarketSnapshotJobHandler:
     async def __call__(self, job: SchedulerJobDefinition) -> None:
         request_params = {key: value for key, value in job.params.items() if key not in {"persist", "cache_latest"}}
         request = OHLCVRequest.model_validate(request_params)
-        persist = bool(job.params.get("persist", self.persist))
-        cache_latest = bool(job.params.get("cache_latest", self.cache_latest))
+        persist = _coerce_bool(job.params.get("persist"), default=self.persist)
+        cache_latest = _coerce_bool(job.params.get("cache_latest"), default=self.cache_latest)
+        logger.info(
+            "market snapshot loading: job=%s symbol=%s asset_class=%s bar_size=%s persist=%s cache_latest=%s",
+            job.name,
+            request.symbol,
+            request.asset_class,
+            request.bar_size,
+            persist,
+            cache_latest,
+        )
         await self.loader.load(request, persist=persist, cache_latest=cache_latest)
 
 
@@ -185,4 +227,24 @@ class IndexCompositionReloadJobHandler:
                 "index composition reload requires a configured production provider; "
                 "IBKR does not expose index constituents/weights via TWS API"
             )
+        logger.info(
+            "index composition reload starting: job=%s provider=%s symbols=%s",
+            job.name,
+            params.provider,
+            ",".join(params.index_symbols),
+        )
         await self.composition_service.sync_many(params.index_symbols)
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "t", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "f", "no", "n", "off"}:
+            return False
+    return bool(value)

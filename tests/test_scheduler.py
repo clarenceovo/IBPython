@@ -66,3 +66,54 @@ def test_scheduler_isolates_job_failures() -> None:
         assert calls == 1
 
     asyncio.run(run())
+
+
+def test_scheduler_skips_redis_jobs_without_registered_handler() -> None:
+    async def run() -> None:
+        class FakeRedis:
+            async def scan_scheduler_jobs(self):
+                return ["SchedulerJob::reload_index"]
+
+            async def get_raw(self, key):
+                return b"""{
+                    "name": "reload_index",
+                    "job_type": "index_composition_reload",
+                    "interval_seconds": 60,
+                    "enabled": true,
+                    "params": {"index_symbols": ["SPX"], "provider": "configured_provider"}
+                }"""
+
+        scheduler = GenericScheduler()
+        jobs = await scheduler.load_jobs_from_redis(FakeRedis())
+
+        assert jobs == []
+
+    asyncio.run(run())
+
+
+def test_market_snapshot_handler_parses_string_boolean_flags() -> None:
+    async def run() -> None:
+        loader = FakeLoader()
+        handler = MarketSnapshotJobHandler(loader)
+        job = SchedulerJobDefinition(
+            name="snapshot_spy_1m",
+            job_type="market_snapshot",
+            interval_seconds=60,
+            params={
+                "symbol": "SPY",
+                "asset_class": "equity",
+                "exchange": "SMART",
+                "currency": "USD",
+                "duration": "1 D",
+                "bar_size": "1 min",
+                "persist": "false",
+                "cache_latest": "off",
+            },
+        )
+
+        await handler(job)
+
+        assert loader.calls[0][1] is False
+        assert loader.calls[0][2] is False
+
+    asyncio.run(run())

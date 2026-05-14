@@ -267,6 +267,8 @@ SchedulerJob::<job_name>
 
 Scheduler jobs are JSON payloads stored in Redis. Python code registers handlers for known `job_type` values; Redis stores job configuration, not executable code.
 
+The worker now loads only runnable jobs. Unknown job types or index reload jobs without a configured provider are logged and skipped, so one inactive operational job does not prevent unrelated market snapshot jobs from running. Runtime dependencies are opened only when needed: IBKR for market snapshots, QuestDB only when at least one runnable snapshot persists bars, and Redis for all scheduler state.
+
 Example job:
 
 ```json
@@ -358,6 +360,14 @@ Field meanings:
 - `params.provider`: placeholder marker; replace this when a production constituent provider is implemented and configured.
 
 IBKR does not provide a direct index composition endpoint. The documented IBKR methods can resolve index contracts/security definitions and request market or historical data, but not constituents or index weights. The reload job is therefore provider-neutral and intentionally fails loudly unless a dedicated constituent provider is registered. Use point-in-time constituent data for research; current reloads are not historical membership truth.
+
+The scheduler worker registers `index_composition_reload` only when `INDEX_COMPOSITION_PROVIDER` is a real dynamic provider import path, for example:
+
+```bash
+INDEX_COMPOSITION_PROVIDER=my_package.providers:build_provider
+```
+
+The target may be a provider instance, provider class, or zero-argument factory returning an object with `name` and async `fetch(index_symbol)`. Blank and placeholder values skip index reload jobs at Redis load time, with warnings, instead of creating a repeated failure loop.
 
 ## IBKR Index And Option Chain Capabilities
 

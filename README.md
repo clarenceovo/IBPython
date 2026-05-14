@@ -108,6 +108,14 @@ make services-down
 
 `make run` starts the Redis-backed scheduler worker. `make run-api` starts `IBKRRestApp`.
 
+The scheduler worker is dependency-aware:
+
+- market snapshot jobs connect to IBKR
+- market snapshot jobs with `persist=true` also connect to QuestDB
+- index-composition-only jobs do not connect to IBKR or QuestDB
+- unsupported job types are skipped with a warning instead of crashing the worker
+- SIGINT/SIGTERM request graceful scheduler shutdown
+
 ## Docker
 
 Build and run the API, Redis, and QuestDB:
@@ -205,6 +213,19 @@ make run
 ```
 
 The default G10 reload job is provider-neutral. IBKR does not expose index constituents or weights through the TWS API, so this job intentionally requires a real external constituent provider before production use.
+
+Configure a real index provider with an import path:
+
+```bash
+INDEX_COMPOSITION_PROVIDER=my_package.providers:build_provider
+```
+
+The target may be a provider instance, a provider class, or a zero-argument factory returning an object with:
+
+- `name`
+- async `fetch(index_symbol)`
+
+If `INDEX_COMPOSITION_PROVIDER` is blank, `configured_provider`, `placeholder`, or `todo`, the scheduler will not register the index reload handler and Redis index reload jobs will be skipped with a clear warning.
 
 ## Redis Keys
 
