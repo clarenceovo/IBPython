@@ -1,0 +1,23 @@
+{
+  "name": "reload_g10_index_composition",
+  "job_type": "index_composition_reload",
+  "interval_seconds": 86400,
+  "enabled": true,
+  "run_immediately": true,
+  "params": {
+    "index_symbols": [
+      "SPX",
+      "TSX",
+      "FTSE100",
+      "DAX",
+      "CAC40",
+      "FTSEMIB",
+      "NIKKEI225",
+      "AEX",
+      "BEL20",
+      "OMXS30",
+      "SMI"
+    ],
+    "provider": "configured_provider"
+  }
+}
