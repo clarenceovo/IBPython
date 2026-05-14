@@ -32,7 +32,7 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = load_settings()
 
-    redis = MarketDataRedisClient(settings.redis_url)
+    redis = MarketDataRedisClient(settings.redis_url, password=settings.redis_password)
     questdb = QuestDBClient(
         host=settings.questdb_host,
         port=settings.questdb_port,

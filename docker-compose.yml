@@ -13,6 +13,7 @@ services:
       IBKR_PORT: ${IBKR_PORT:-7497}
       IBKR_CLIENT_ID: ${IBKR_CLIENT_ID:-101}
       REDIS_URL: redis://redis:6379/0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
       QUESTDB_HOST: questdb
       QUESTDB_PORT: 8812
       QUESTDB_USER: ${QUESTDB_USER:-admin}
@@ -26,7 +27,17 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
-    command: ["redis-server", "--appendonly", "yes"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    command:
+      - sh
+      - -c
+      - |
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+        else
+          redis-server --appendonly yes
+        fi
     volumes:
       - redis-data:/data
 

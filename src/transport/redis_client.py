@@ -25,8 +25,15 @@ def scheduler_job_key(job_name: str) -> str:
 class MarketDataRedisClient:
     """Async Redis transport for latest bars, index composition, and scheduler jobs."""
 
-    def __init__(self, url: str = constants.DEFAULT_REDIS_URL, *, client: Any | None = None) -> None:
+    def __init__(
+        self,
+        url: str = constants.DEFAULT_REDIS_URL,
+        *,
+        password: str = constants.DEFAULT_REDIS_PASSWORD,
+        client: Any | None = None,
+    ) -> None:
         self.url = url
+        self.password = password
         self._client = client
 
     async def connect(self) -> None:
@@ -36,7 +43,11 @@ class MarketDataRedisClient:
             from redis import asyncio as redis_async
         except ImportError as exc:
             raise RuntimeError("redis is required for MarketDataRedisClient") from exc
-        self._client = redis_async.from_url(self.url, decode_responses=False)
+        self._client = redis_async.from_url(
+            self.url,
+            decode_responses=False,
+            password=self.password or None,
+        )
 
     async def close(self) -> None:
         if self._client is not None:

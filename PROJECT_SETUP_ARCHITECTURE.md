@@ -165,6 +165,7 @@ Blank or missing `.env` values are treated as null and skipped, so the correspon
 | `IBKR_REST_MARKET_DATA_TTL_SECONDS` | `5` | Default in-process TTL for REST market data snapshots |
 | `IBKR_REST_MARKET_DATA_CACHE_MAXSIZE` | `512` | Maximum in-process REST market data cache entries |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
+| `REDIS_PASSWORD` | empty | Optional Redis AUTH password; blank keeps unauthenticated local Redis |
 | `QUESTDB_HOST` | `127.0.0.1` | QuestDB PostgreSQL wire host |
 | `QUESTDB_PORT` | `8812` | QuestDB PostgreSQL wire port |
 | `QUESTDB_USER` | `admin` | QuestDB user |

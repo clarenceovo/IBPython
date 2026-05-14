@@ -34,7 +34,7 @@ class IBKRRestAppState:
 
 
 def build_rest_app_state(settings: Settings) -> IBKRRestAppState:
-    redis = MarketDataRedisClient(settings.redis_url)
+    redis = MarketDataRedisClient(settings.redis_url, password=settings.redis_password)
     questdb = QuestDBClient(
         host=settings.questdb_host,
         port=settings.questdb_port,

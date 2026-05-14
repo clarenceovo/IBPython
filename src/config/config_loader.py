@@ -35,6 +35,7 @@ CONFIG_VALUE_SPECS: tuple[ConfigValueSpec, ...] = (
     ConfigValueSpec("ibkr_port", constants.IBKR_PORT_ENV, constants.DEFAULT_IBKR_PORT, int),
     ConfigValueSpec("ibkr_client_id", constants.IBKR_CLIENT_ID_ENV, constants.DEFAULT_IBKR_CLIENT_ID, int),
     ConfigValueSpec("redis_url", constants.REDIS_URL_ENV, constants.DEFAULT_REDIS_URL, parse_str),
+    ConfigValueSpec("redis_password", constants.REDIS_PASSWORD_ENV, constants.DEFAULT_REDIS_PASSWORD, parse_str),
     ConfigValueSpec("questdb_host", constants.QUESTDB_HOST_ENV, constants.DEFAULT_QUESTDB_HOST, parse_str),
     ConfigValueSpec("questdb_port", constants.QUESTDB_PORT_ENV, constants.DEFAULT_QUESTDB_PORT, int),
     ConfigValueSpec("questdb_user", constants.QUESTDB_USER_ENV, constants.DEFAULT_QUESTDB_USER, parse_str),
@@ -86,6 +87,25 @@ CONFIG_VALUE_SPECS: tuple[ConfigValueSpec, ...] = (
 
 _SPECS_BY_FIELD_NAME = {spec.field_name: spec for spec in CONFIG_VALUE_SPECS}
 _FIELD_NAME_BY_ENV_NAME = {spec.env_name: spec.field_name for spec in CONFIG_VALUE_SPECS}
+_CANONICAL_FIELD_NAME_BY_ENV_NAME = {
+    "IBKR_HOST": "ibkr_host",
+    "IBKR_PORT": "ibkr_port",
+    "IBKR_CLIENT_ID": "ibkr_client_id",
+    "REDIS_URL": "redis_url",
+    "REDIS_PASSWORD": "redis_password",
+    "QUESTDB_HOST": "questdb_host",
+    "QUESTDB_PORT": "questdb_port",
+    "QUESTDB_USER": "questdb_user",
+    "QUESTDB_PASSWORD": "questdb_password",
+    "QUESTDB_DATABASE": "questdb_database",
+    "INDEX_SYNC_INTERVAL_SECONDS": "index_sync_interval_seconds",
+    "IBKR_MARKET_DATA_LINES": "ibkr_market_data_lines",
+    "INDEX_COMPOSITION_PROVIDER": "index_composition_provider",
+    "IBKR_REST_APP_NAME": "ibkr_rest_app_name",
+    "IBKR_REST_CONNECT_ON_STARTUP": "ibkr_rest_connect_on_startup",
+    "IBKR_REST_MARKET_DATA_TTL_SECONDS": "ibkr_rest_market_data_ttl_seconds",
+    "IBKR_REST_MARKET_DATA_CACHE_MAXSIZE": "ibkr_rest_market_data_cache_maxsize",
+}
 
 
 class ConfigLoader:
@@ -114,7 +134,7 @@ class ConfigLoader:
     @staticmethod
     def _apply_source(values: dict[str, Any], source: Mapping[str, Any]) -> None:
         for raw_key, raw_value in source.items():
-            field_name = _FIELD_NAME_BY_ENV_NAME.get(raw_key, raw_key)
+            field_name = _FIELD_NAME_BY_ENV_NAME.get(raw_key) or _CANONICAL_FIELD_NAME_BY_ENV_NAME.get(raw_key) or raw_key
             spec = _SPECS_BY_FIELD_NAME.get(field_name)
             if spec is None or not _has_value(raw_value):
                 continue

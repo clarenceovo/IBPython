@@ -81,6 +81,7 @@ Core variables:
 | `IBKR_CLIENT_ID` | `101` | IBKR client ID |
 | `IBKR_MARKET_DATA_LINES` | `100` | Market data entitlement baseline for pacing analysis |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis URL |
+| `REDIS_PASSWORD` | empty | Optional Redis AUTH password |
 | `QUESTDB_HOST` | `127.0.0.1` | QuestDB PostgreSQL wire host |
 | `QUESTDB_PORT` | `8812` | QuestDB PostgreSQL wire port |
 | `QUESTDB_USER` | `admin` | QuestDB user |
