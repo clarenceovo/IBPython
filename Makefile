@@ -33,7 +33,7 @@ run:
 	$(PY) main.py
 
 run-api:
-	$(PY) -m uvicorn src.webapp.app:app --host 0.0.0.0 --port 8000 --reload
+	$(PY) -m uvicorn src.webapp.app:get_app --host 0.0.0.0 --port 8000 --factory --reload
 
 docker-build:
 	docker compose build ibkr-rest-app
