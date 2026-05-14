@@ -75,8 +75,12 @@ def create_app(
 
     @fastapi_app.exception_handler(RuntimeError)
     async def runtime_error_handler(_request: Request, exc: RuntimeError) -> JSONResponse:
+        msg = str(exc)
+        if "IBKR not available" in msg:
+            logger.warning("request failed: %s", msg)
+            return JSONResponse(status_code=503, content={"detail": msg})
         logger.exception("unhandled RuntimeError in request: %s", exc)
-        return JSONResponse(status_code=503, content={"detail": str(exc)})
+        return JSONResponse(status_code=503, content={"detail": msg})
 
     return fastapi_app
 

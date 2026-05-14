@@ -56,6 +56,8 @@ from src.feeds.options import (
 
 logger = logging.getLogger(__name__)
 
+DETECTION_TIMEOUT = 180  # seconds before IBKR reports idle timeout
+
 
 class IBKRFeedClient:
     """Async IBKR market data adapter backed by ib_insync."""
@@ -93,6 +95,15 @@ class IBKRFeedClient:
         except ImportError as exc:
             raise RuntimeError("ib_insync is required to connect to IBKR") from exc
 
+        # ib_insync creates its own event loop by default, which conflicts
+        # with uvicorn's loop. Patch the current loop so ib_insync can reuse it.
+        try:
+            import nest_asyncio
+            nest_asyncio.apply()
+        except ImportError:
+            pass
+
+        # Always create a fresh IB() on the current running loop.
         self._ib = IB()
         self._ib.errorEvent += self._on_ibkr_error
         self._ib.disconnectedEvent += self._on_ibkr_disconnected
@@ -103,15 +114,21 @@ class IBKRFeedClient:
             operation="connect",
         )
         logger.info("connected to IBKR in %.2fs", monotonic_time.monotonic() - t0)
-        self._ib.setTimeout(60)
+        self._ib.setTimeout(DETECTION_TIMEOUT)
 
     # ------------------------------------------------------------------
     # IBKR event handlers
     # ------------------------------------------------------------------
 
+    _DATA_FARM_CODES: ClassVar[frozenset[int]] = frozenset({
+        2103, 2104, 2105, 2106, 2107, 2108, 2158,
+    })
+
     def _on_ibkr_error(self, req_id: int, error_code: int, error_string: str, contract: Any = None) -> None:
         """Log IBKR errors at appropriate severity levels."""
-        if error_code in (404,):
+        if error_code in self._DATA_FARM_CODES:
+            logger.info("IBKR data farm status [%s]: %s", error_code, error_string)
+        elif error_code in (404,):
             logger.warning("IBKR pacing violation [%s]: %s (reqId=%s)", error_code, error_string, req_id)
         elif error_code in (1100, 1101, 1102):
             logger.warning("IBKR connectivity event [%s]: %s (reqId=%s)", error_code, error_string, req_id)
@@ -132,7 +149,12 @@ class IBKRFeedClient:
 
     def _on_ibkr_timeout(self, *_: object) -> None:
         """Handle IB timeout events."""
-        logger.warning("IBKR connection timeout")
+        if self._shutting_down:
+            return
+        if self._ib is not None and self._ib.isConnected():
+            logger.info("IBKR idle timeout (connection still alive)")
+        else:
+            logger.warning("IBKR connection timeout – connection lost")
 
     async def _reconnect(self) -> None:
         """Reconnect with exponential backoff (max 5 attempts)."""
@@ -157,7 +179,7 @@ class IBKRFeedClient:
                         lambda: self._ib.connectAsync(self.host, self.port, clientId=self.client_id),
                         operation="reconnect",
                     )
-                    self._ib.setTimeout(60)
+                    self._ib.setTimeout(DETECTION_TIMEOUT)
                     logger.info("IBKR reconnected successfully on attempt %s", attempt)
                     return
                 except Exception as exc:
@@ -524,7 +546,13 @@ class IBKRFeedClient:
             if self._ib is not None and self._ib.isConnected():
                 return
             logger.info("connection stale or missing; reconnecting")
-            await self.connect()
+            try:
+                await self.connect()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"IBKR not available at {self.host}:{self.port} — "
+                    f"ensure TWS or IB Gateway is running and API connections are enabled"
+                ) from exc
 
     # IBKR error codes that indicate transient / recoverable conditions.
     _TRANSIENT_IBKR_CODES: ClassVar[frozenset[int]] = frozenset({502, 504, 1100, 1101, 1102})
