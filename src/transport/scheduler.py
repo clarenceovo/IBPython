@@ -54,7 +54,6 @@ class GenericScheduler:
         self._jobs: dict[str, SchedulerJobDefinition] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         self._stop_event = asyncio.Event()
-
     def register_handler(self, job_type: str, handler: JobHandler) -> None:
         self._handlers[job_type] = handler
 
@@ -90,12 +89,35 @@ class GenericScheduler:
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
-    async def stop(self) -> None:
+    async def stop(self, *, drain_timeout: float = 10.0) -> None:
+        """Signal all jobs to stop and wait for in-flight work to drain.
+
+        Sets the stop event first so job loops exit naturally.  If any tasks
+        are still running after *drain_timeout* seconds they are cancelled.
+        """
         self._stop_event.set()
-        for task in list(self._tasks):
-            task.cancel()
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+        if not self._tasks:
+            return
+
+        # Wait for tasks to finish naturally.
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*self._tasks, return_exceptions=True),
+                timeout=drain_timeout,
+            )
+            logger.info("all scheduler tasks drained cleanly within %.1fs", drain_timeout)
+        except TimeoutError:
+            remaining = [t for t in self._tasks if not t.done()]
+            if remaining:
+                logger.warning(
+                    "scheduler drain timed out after %.1fs; cancelling %d remaining tasks",
+                    drain_timeout,
+                    len(remaining),
+                )
+                for task in remaining:
+                    task.cancel()
+                await asyncio.gather(*remaining, return_exceptions=True)
+
         self._tasks.clear()
 
     async def run_forever(self) -> None:

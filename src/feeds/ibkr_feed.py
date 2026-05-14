@@ -6,7 +6,7 @@ import time as monotonic_time
 from collections import defaultdict, deque
 from collections.abc import Sequence
 from datetime import date, datetime, time, timezone
-from typing import Any
+from typing import Any, ClassVar
 
 from src.config import config_constant as constants
 from src.feeds.contracts import ContractSpec, OptionChain, OptionChainRequest, build_ibkr_contract
@@ -81,7 +81,10 @@ class IBKRFeedClient:
 
     async def connect(self) -> None:
         if self._ib is not None and self._ib.isConnected():
+            logger.debug("connect skipped – already connected to %s:%d clientId=%d", self.host, self.port, self.client_id)
             return
+
+        logger.info("connecting to IBKR at %s:%d clientId=%d", self.host, self.port, self.client_id)
 
         try:
             from ib_insync import IB
@@ -89,13 +92,71 @@ class IBKRFeedClient:
             raise RuntimeError("ib_insync is required to connect to IBKR") from exc
 
         self._ib = IB()
+        self._ib.errorEvent += self._on_ibkr_error
+        self._ib.disconnectedEvent += self._on_ibkr_disconnected
+        self._ib.timeoutEvent += self._on_ibkr_timeout
+        t0 = monotonic_time.monotonic()
         await self._with_retry(
             lambda: self._ib.connectAsync(self.host, self.port, clientId=self.client_id),
             operation="connect",
         )
+        logger.info("connected to IBKR in %.2fs", monotonic_time.monotonic() - t0)
+        self._ib.setTimeout(60)
+
+    # ------------------------------------------------------------------
+    # IBKR event handlers
+    # ------------------------------------------------------------------
+
+    def _on_ibkr_error(self, req_id: int, error_code: int, error_string: str, contract: Any = None) -> None:
+        """Log IBKR errors at appropriate severity levels."""
+        if error_code in (404,):
+            logger.warning("IBKR pacing violation [%s]: %s (reqId=%s)", error_code, error_string, req_id)
+        elif error_code in (1100, 1101, 1102):
+            logger.warning("IBKR connectivity event [%s]: %s (reqId=%s)", error_code, error_string, req_id)
+        elif error_code in (200, 201, 502, 504):
+            logger.error("IBKR error [%s]: %s (reqId=%s)", error_code, error_string, req_id)
+        elif error_code == 399:
+            logger.debug("IBKR info [%s]: %s (reqId=%s)", error_code, error_string, req_id)
+        else:
+            logger.warning("IBKR unhandled error [%s]: %s (reqId=%s)", error_code, error_string, req_id)
+
+    def _on_ibkr_disconnected(self, *_: object) -> None:
+        """Handle IB disconnection events with automatic reconnection."""
+        logger.warning("IBKR disconnected – attempting reconnection")
+        asyncio.ensure_future(self._reconnect())
+
+    def _on_ibkr_timeout(self, *_: object) -> None:
+        """Handle IB timeout events."""
+        logger.warning("IBKR connection timeout")
+
+    async def _reconnect(self) -> None:
+        """Reconnect with exponential backoff (max 5 attempts)."""
+        max_attempts = 5
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logger.info("IBKR reconnect attempt %s/%s", attempt, max_attempts)
+                if self._ib is not None:
+                    try:
+                        self._ib.disconnect()
+                    except Exception:
+                        pass
+                await self._with_retry(
+                    lambda: self._ib.connectAsync(self.host, self.port, clientId=self.client_id),
+                    operation="reconnect",
+                )
+                logger.info("IBKR reconnected successfully on attempt %s", attempt)
+                return
+            except Exception as exc:
+                delay = 2 ** attempt
+                logger.error("IBKR reconnect attempt %s failed: %s; next retry in %ss", attempt, exc, delay)
+                if attempt >= max_attempts:
+                    logger.critical("IBKR reconnection failed after %s attempts", max_attempts)
+                    break
+                await asyncio.sleep(delay)
 
     async def disconnect(self) -> None:
         if self._ib is not None and self._ib.isConnected():
+            logger.info("disconnecting from IBKR %s:%d clientId=%d", self.host, self.port, self.client_id)
             self._ib.disconnect()
 
     async def __aenter__(self) -> "IBKRFeedClient":
@@ -107,22 +168,27 @@ class IBKRFeedClient:
 
     async def qualify_contract(self, spec: ContractSpec) -> Any:
         await self._ensure_connected()
+        logger.info("qualify_contract: symbol=%s asset_class=%s exchange=%s", spec.symbol, spec.asset_class, spec.exchange)
+        t0 = monotonic_time.monotonic()
         contract = build_ibkr_contract(spec)
         qualified = await self._with_retry(
             lambda: self._ib.qualifyContractsAsync(contract),
             operation=f"qualify_contract:{spec.symbol}",
         )
+        logger.debug("qualify_contract completed in %.2fs for %s", monotonic_time.monotonic() - t0, spec.symbol)
         if not qualified:
             raise RuntimeError(f"IBKR could not qualify contract for {spec.symbol}")
         return qualified[0]
 
     async def load_historical_ohlcv(self, request: OHLCVRequest) -> list[OHLCVBar]:
         await self._ensure_connected()
+        logger.info("load_historical_ohlcv: symbol=%s bar_size=%s duration=%s", request.symbol, request.bar_size, request.duration)
+        t0 = monotonic_time.monotonic()
         contract = await self.qualify_contract(ContractSpec.from_ohlcv_request(request))
         end_datetime = _format_ibkr_end_datetime(request.end_datetime)
 
-        await self._pacing_guard.acquire(request)
         try:
+            await self._pacing_guard.acquire(request)
             bars = await self._with_retry(
                 lambda: self._ib.reqHistoricalDataAsync(
                     contract,
@@ -138,12 +204,16 @@ class IBKRFeedClient:
             )
         finally:
             self._pacing_guard.release()
-        return normalize_ibkr_bars(bars, request)
+        result = normalize_ibkr_bars(bars, request)
+        logger.info("load_historical_ohlcv: %d bars for %s in %.2fs", len(result), request.symbol, monotonic_time.monotonic() - t0)
+        return result
 
     async def load_option_chains(self, request: OptionChainRequest) -> list[OptionChain]:
         """Load option chain metadata for stock or index underlyings via reqSecDefOptParams."""
 
         await self._ensure_connected()
+        logger.info("load_option_chains: symbol=%s asset_class=%s", request.symbol, request.asset_class)
+        t0 = monotonic_time.monotonic()
         underlying_contract = await self.qualify_contract(request.to_contract_spec())
         underlying_con_id = int(getattr(underlying_contract, "conId"))
         chains = await self._with_retry(
@@ -155,12 +225,16 @@ class IBKRFeedClient:
             ),
             operation=f"option_chain:{request.symbol}",
         )
-        return normalize_ibkr_option_chains(chains, request, underlying_con_id)
+        result = normalize_ibkr_option_chains(chains, request, underlying_con_id)
+        logger.info("load_option_chains: %d chains for %s in %.2fs", len(result), request.symbol, monotonic_time.monotonic() - t0)
+        return result
 
     async def load_option_analytics(self, request: OptionAnalyticsRequest) -> OptionAnalyticsSnapshot:
         """Load a market-data snapshot with option Greeks, volume, OI, and volatility fields."""
 
         await self._ensure_connected()
+        logger.info("load_option_analytics: underlying=%s expiry=%s", request.contract.underlying_symbol, request.contract.expiry)
+        t0 = monotonic_time.monotonic()
         contract = build_ibkr_option_contract(request.contract)
         qualified = await self._with_retry(
             lambda: self._ib.qualifyContractsAsync(contract),
@@ -175,26 +249,36 @@ class IBKRFeedClient:
             regulatorySnapshot=request.regulatory_snapshot,
             mktDataOptions=[],
         )
-        await asyncio.sleep(request.snapshot_wait_seconds)
-        return normalize_option_analytics_from_ticker(ticker, request.contract)
+        try:
+            await asyncio.sleep(request.snapshot_wait_seconds)
+            result = normalize_option_analytics_from_ticker(ticker, request.contract)
+            logger.debug("load_option_analytics completed in %.2fs for %s", monotonic_time.monotonic() - t0, request.contract.underlying_symbol)
+            return result
+        finally:
+            try:
+                self._ib.cancelMktData(contract)
+            except Exception:
+                logger.debug("Failed to cancel market data subscription for %s", request.contract.underlying_symbol, exc_info=True)
 
     async def load_bond_yield_history(self, request: BondYieldHistoryRequest) -> list[BondYieldBar]:
         """Load historical bond yield bars for bid, ask, and/or last yield fields."""
 
         await self._ensure_connected()
+        logger.info("load_bond_yield_history: bond=%s fields=%s", request.bond.symbol, [f.value for f in request.yield_fields])
+        t0 = monotonic_time.monotonic()
         contract = await self.qualify_contract(request.bond.to_contract_spec())
         normalized: list[BondYieldBar] = []
         for yield_field in request.yield_fields:
             pacing_request = request.to_pacing_request(yield_field)
-            await self._pacing_guard.acquire(pacing_request)
             try:
+                await self._pacing_guard.acquire(pacing_request)
                 bars = await self._with_retry(
-                    lambda: self._ib.reqHistoricalDataAsync(
+                    lambda yf=yield_field: self._ib.reqHistoricalDataAsync(
                         contract,
                         endDateTime=_format_ibkr_end_datetime(request.end_datetime),
                         durationStr=request.duration,
                         barSizeSetting=request.bar_size,
-                        whatToShow=yield_field.value,
+                        whatToShow=yf.value,
                         useRTH=request.use_rth,
                         formatDate=2,
                         keepUpToDate=False,
@@ -204,18 +288,21 @@ class IBKRFeedClient:
             finally:
                 self._pacing_guard.release()
             normalized.extend(normalize_ibkr_bond_yield_bars(bars, request, yield_field))
+        logger.info("load_bond_yield_history: %d bars for %s in %.2fs", len(normalized), request.bond.symbol, monotonic_time.monotonic() - t0)
         return normalized
 
     async def load_fundamental_data(self, request: FundamentalDataRequest) -> FundamentalDataReport:
         """Load an IBKR fundamental report as raw XML."""
 
         await self._ensure_connected()
+        logger.info("load_fundamental_data: symbol=%s report_type=%s", request.symbol, request.report_type.value)
+        t0 = monotonic_time.monotonic()
         contract = await self.qualify_contract(request.to_contract_spec())
         raw_xml = await self._with_retry(
             lambda: self._ib.reqFundamentalDataAsync(contract, request.report_type.value, []),
             operation=f"fundamental_data:{request.symbol}:{request.report_type.value}",
         )
-        return FundamentalDataReport(
+        report = FundamentalDataReport(
             symbol=request.symbol,
             asset_class=request.asset_class,
             con_id=getattr(contract, "conId", None),
@@ -224,16 +311,21 @@ class IBKRFeedClient:
             source=request.source,
             metadata=request.metadata,
         )
+        logger.info("load_fundamental_data: %d bytes XML for %s in %.2fs", len(raw_xml or ""), request.symbol, monotonic_time.monotonic() - t0)
+        return report
 
     async def load_wsh_metadata(self) -> WSHMetadataReport:
         """Load Wall Street Horizon metadata as raw JSON."""
 
         await self._ensure_connected()
+        logger.info("load_wsh_metadata: starting")
+        t0 = monotonic_time.monotonic()
         raw_json = await self._with_retry(
             lambda: self._ib.getWshMetaDataAsync(),
             operation="wsh_metadata",
         )
         self._wsh_metadata_loaded = True
+        logger.info("load_wsh_metadata: completed in %.2fs", monotonic_time.monotonic() - t0)
         return WSHMetadataReport.from_raw_json(raw_json)
 
     async def load_wsh_event_data(
@@ -245,6 +337,8 @@ class IBKRFeedClient:
         """Load Wall Street Horizon event data as raw JSON."""
 
         await self._ensure_connected()
+        logger.info("load_wsh_event_data: starting")
+        t0 = monotonic_time.monotonic()
         if ensure_metadata and not self._wsh_metadata_loaded:
             await self.load_wsh_metadata()
         request_filter_json = request.to_filter_json()
@@ -253,25 +347,31 @@ class IBKRFeedClient:
             lambda: self._ib.getWshEventDataAsync(wsh_event_data),
             operation="wsh_event_data",
         )
-        return WSHEventDataReport.from_raw_json(
+        report = WSHEventDataReport.from_raw_json(
             raw_json=raw_json,
             request_filter_json=request_filter_json,
         )
+        logger.info("load_wsh_event_data: completed in %.2fs", monotonic_time.monotonic() - t0)
+        return report
 
     async def load_news_providers(self) -> list[NewsProvider]:
         """Load API-entitled IBKR news providers."""
 
         await self._ensure_connected()
+        logger.info("load_news_providers: starting")
         providers = await self._with_retry(
             lambda: self._ib.reqNewsProvidersAsync(),
             operation="news_providers",
         )
-        return normalize_news_providers(providers)
+        result = normalize_news_providers(providers)
+        logger.info("load_news_providers: %d providers loaded", len(result))
+        return result
 
     async def load_historical_news(self, request: HistoricalNewsRequest) -> list[HistoricalNewsHeadline]:
         """Load historical IBKR news headlines for a contract id."""
 
         await self._ensure_connected()
+        logger.info("load_historical_news: con_id=%s provider=%s", request.con_id, request.provider_codes_param)
         headlines = await self._with_retry(
             lambda: self._ib.reqHistoricalNewsAsync(
                 request.con_id,
@@ -283,12 +383,15 @@ class IBKRFeedClient:
             ),
             operation=f"historical_news:{request.con_id}:{request.provider_codes_param}",
         )
-        return normalize_historical_news(headlines)
+        result = normalize_historical_news(headlines)
+        logger.info("load_historical_news: %d headlines for con_id=%s", len(result), request.con_id)
+        return result
 
     async def load_news_article(self, request: NewsArticleRequest) -> NewsArticle:
         """Load the body of an IBKR news article by provider and article id."""
 
         await self._ensure_connected()
+        logger.info("load_news_article: provider=%s article_id=%s", request.provider_code, request.article_id)
         article = await self._with_retry(
             lambda: self._ib.reqNewsArticleAsync(request.provider_code, request.article_id, []),
             operation=f"news_article:{request.provider_code}:{request.article_id}",
@@ -299,38 +402,49 @@ class IBKRFeedClient:
         """Load account summary values grouped by account."""
 
         await self._ensure_connected()
+        logger.info("load_account_summary: account=%s", account or "all")
         values = await self._with_retry(
             lambda: self._ib.accountSummaryAsync(account),
             operation=f"account_summary:{account or 'all'}",
         )
-        return group_account_summary(normalize_account_values(values))
+        result = group_account_summary(normalize_account_values(values))
+        logger.info("load_account_summary: %d accounts for %s", len(result), account or "all")
+        return result
 
     async def load_live_positions(self) -> list[LivePositionDTO]:
         """Load current live positions."""
 
         await self._ensure_connected()
+        logger.info("load_live_positions: starting")
         positions = await self._with_retry(
             lambda: self._ib.reqPositionsAsync(),
             operation="positions",
         )
-        return normalize_positions(positions)
+        result = normalize_positions(positions)
+        logger.info("load_live_positions: %d positions loaded", len(result))
+        return result
 
     async def load_portfolio_items(self, account: str = "") -> list[PortfolioItemDTO]:
         """Expose current portfolio items from ib_insync's local account cache."""
 
         await self._ensure_connected()
-        return normalize_portfolio_items(self._ib.portfolio(account))
+        logger.info("load_portfolio_items: account=%s", account or "all")
+        result = normalize_portfolio_items(self._ib.portfolio(account))
+        logger.info("load_portfolio_items: %d items for %s", len(result), account or "all")
+        return result
 
     async def subscribe_account_pnl(self, account: str, model_code: str = "") -> object:
         """Start a live account PnL subscription and return the ib_insync PnL object."""
 
         await self._ensure_connected()
+        logger.info("subscribe_account_pnl: account=%s model_code=%s", account, model_code)
         return self._ib.reqPnL(account, model_code)
 
     async def subscribe_position_pnl(self, account: str, con_id: int, model_code: str = "") -> object:
         """Start a live position PnL subscription and return the ib_insync PnLSingle object."""
 
         await self._ensure_connected()
+        logger.info("subscribe_position_pnl: account=%s con_id=%d model_code=%s", account, con_id, model_code)
         return self._ib.reqPnLSingle(account, model_code, con_id)
 
     async def load_account_pnl_snapshot(
@@ -342,6 +456,7 @@ class IBKRFeedClient:
     ) -> AccountPnLDTO:
         """Open a short-lived account PnL subscription and return the latest values."""
 
+        logger.info("load_account_pnl_snapshot: account=%s wait=%.1fs", account, wait_seconds)
         subscription = await self.subscribe_account_pnl(account, model_code)
         try:
             if wait_seconds:
@@ -362,6 +477,7 @@ class IBKRFeedClient:
     ) -> PositionPnLDTO:
         """Open a short-lived position PnL subscription and return the latest values."""
 
+        logger.info("load_position_pnl_snapshot: account=%s con_id=%d wait=%.1fs", account, con_id, wait_seconds)
         subscription = await self.subscribe_position_pnl(account, con_id, model_code)
         try:
             if wait_seconds:
@@ -386,7 +502,26 @@ class IBKRFeedClient:
 
     async def _ensure_connected(self) -> None:
         if self._ib is None or not self._ib.isConnected():
+            logger.debug("connection stale or missing; reconnecting")
             await self.connect()
+
+    # IBKR error codes that indicate transient / recoverable conditions.
+    _TRANSIENT_IBKR_CODES: ClassVar[frozenset[int]] = frozenset({502, 504, 1100, 1101, 1102})
+
+    def _is_transient_error(self, exc: BaseException) -> bool:
+        """Return True only for connection-level and IBKR transient errors."""
+        if isinstance(exc, (ConnectionError, OSError)):
+            return True
+        # Walk the exception chain (e.g. RuntimeError wrapping the real cause).
+        chain: BaseException | None = exc
+        while chain is not None:
+            if isinstance(chain, (ConnectionError, OSError)):
+                return True
+            ibkr_code = getattr(chain, "code", None)
+            if isinstance(ibkr_code, int) and ibkr_code in self._TRANSIENT_IBKR_CODES:
+                return True
+            chain = chain.__cause__ or chain.__context__
+        return False
 
     async def _with_retry(self, call: Any, *, operation: str) -> Any:
         last_error: BaseException | None = None
@@ -395,10 +530,10 @@ class IBKRFeedClient:
                 return await call()
             except Exception as exc:  # pragma: no cover - exercised with live gateways.
                 last_error = exc
-                if attempt >= self.retry_attempts:
+                if not self._is_transient_error(exc) or attempt >= self.retry_attempts:
                     break
                 delay = self.retry_base_delay_seconds * (2 ** (attempt - 1))
-                logger.warning("IBKR %s failed on attempt %s; retrying in %.2fs", operation, attempt, delay)
+                logger.warning("IBKR %s failed on attempt %d/%d; retrying in %.2fs", operation, attempt, self.retry_attempts, delay)
                 await asyncio.sleep(delay)
         raise RuntimeError(f"IBKR operation failed after retries: {operation}") from last_error
 
@@ -454,6 +589,10 @@ class IBKRHistoricalPacingGuard:
                     self._identical_last_seen[identical_key] = now
                     self._same_contract_times[same_contract_key].append(now)
                     return
+            logger.warning(
+                "pacing guard: waiting %.2fs for slot – symbol=%s what_to_show=%s",
+                wait_seconds, request.symbol, request.what_to_show,
+            )
             await asyncio.sleep(wait_seconds)
 
     def _prune(self, now: float) -> None:

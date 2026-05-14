@@ -473,7 +473,7 @@ def normalize_ibkr_bond_yield_bars(
     return [
         BondYieldBar(
             bond=request.bond,
-            timestamp=getattr(bar, "date"),
+            timestamp=normalize_utc_datetime(getattr(bar, "date")),
             yield_field=yield_field,
             open=float(getattr(bar, "open")),
             high=float(getattr(bar, "high")),

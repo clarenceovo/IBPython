@@ -48,4 +48,9 @@ def create_app(
     return app
 
 
-app = create_app()
+def get_app() -> FastAPI:
+    """Lazy singleton for uvicorn --factory or module-level use."""
+    global app
+    if app is None:
+        app = create_app()
+    return app

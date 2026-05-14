@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
 from src.config import config_constant as constants
 from src.feeds.models import AssetClass, OHLCVBar
+
+logger = logging.getLogger(__name__)
 
 
 CREATE_MARKET_OHLCV_TABLE_SQL = f"""
@@ -53,6 +57,8 @@ class QuestDBClient:
         self.password = password
         self.database = database
         self._connection = connection
+        self._lock = asyncio.Lock()
+        self._connected = connection is not None
 
     @property
     def dsn(self) -> str:
@@ -65,17 +71,23 @@ class QuestDBClient:
         )
 
     async def connect(self) -> None:
-        if self._connection is not None:
+        if self._connected:
             return
         try:
             from psycopg import AsyncConnection
         except ImportError as exc:
             raise RuntimeError("psycopg is required for QuestDBClient") from exc
+        logger.info("QuestDB connecting to %s:%d db=%s", self.host, self.port, self.database)
         self._connection = await AsyncConnection.connect(self.dsn)
+        self._connected = True
+        logger.info("QuestDB connected")
 
     async def close(self) -> None:
         if self._connection is not None:
+            logger.info("QuestDB closing connection")
             await self._connection.close()
+            self._connection = None
+            self._connected = False
 
     async def __aenter__(self) -> "QuestDBClient":
         await self.connect()
@@ -84,19 +96,39 @@ class QuestDBClient:
     async def __aexit__(self, *_: object) -> None:
         await self.close()
 
+    async def _ensure_connection(self) -> None:
+        """Verify the connection is alive and reconnect if stale."""
+        if self._connection is None or not self._connected:
+            await self.connect()
+            return
+        try:
+            async with self._connection.cursor() as cur:
+                await cur.execute("SELECT 1")
+        except Exception:
+            logger.warning("QuestDB connection stale; reconnecting")
+            try:
+                await self._connection.close()
+            except Exception:
+                pass
+            self._connection = None
+            self._connected = False
+            await self.connect()
+
     async def create_market_ohlcv_table(self) -> None:
-        await self.connect()
-        async with self._connection.cursor() as cur:
-            await cur.execute(CREATE_MARKET_OHLCV_TABLE_SQL)
-        await self._connection.commit()
+        await self._ensure_connection()
+        async with self._lock:
+            async with self._connection.cursor() as cur:
+                await cur.execute(CREATE_MARKET_OHLCV_TABLE_SQL)
+            await self._connection.commit()
 
     async def insert_bars(self, bars: Sequence[OHLCVBar]) -> int:
         if not bars:
             return 0
-        await self.connect()
-        async with self._connection.cursor() as cur:
-            await cur.executemany(INSERT_MARKET_OHLCV_SQL, [bar_to_row(bar) for bar in bars])
-        await self._connection.commit()
+        await self._ensure_connection()
+        async with self._lock:
+            async with self._connection.cursor() as cur:
+                await cur.executemany(INSERT_MARKET_OHLCV_SQL, [bar_to_row(bar) for bar in bars])
+            await self._connection.commit()
         return len(bars)
 
     async def query_historical_bars(
@@ -130,11 +162,12 @@ class QuestDBClient:
         return await self._fetch_dicts(sql, params)
 
     async def _fetch_dicts(self, sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:
-        await self.connect()
-        async with self._connection.cursor() as cur:
-            await cur.execute(sql, params)
-            columns = [col.name for col in cur.description]
-            rows = await cur.fetchall()
+        await self._ensure_connection()
+        async with self._lock:
+            async with self._connection.cursor() as cur:
+                await cur.execute(sql, params)
+                columns = [col.name for col in cur.description]
+                rows = await cur.fetchall()
         return [dict(zip(columns, row, strict=True)) for row in rows]
 
 
