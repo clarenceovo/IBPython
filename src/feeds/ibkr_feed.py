@@ -95,12 +95,21 @@ class IBKRFeedClient:
         except ImportError as exc:
             raise RuntimeError("ib_insync is required to connect to IBKR") from exc
 
-        # ib_insync creates its own event loop by default, which conflicts
-        # with uvicorn's loop. Patch the current loop so ib_insync can reuse it.
+        # ib_insync uses get_event_loop() internally (not get_running_loop()).
+        # In uvicorn with --reload, this can return the wrong loop.
+        # Patch ib_insync.util.getLoop to always return the running loop.
         try:
             import nest_asyncio
-            nest_asyncio.apply()
+            running_loop = asyncio.get_running_loop()
+            nest_asyncio.apply(running_loop)
         except ImportError:
+            pass
+
+        # Force ib_insync to use the current running loop.
+        try:
+            import ib_insync.util as _ib_util
+            _ib_util.getLoop = lambda: asyncio.get_running_loop()
+        except (ImportError, AttributeError):
             pass
 
         # Always create a fresh IB() on the current running loop.
