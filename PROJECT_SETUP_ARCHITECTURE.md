@@ -21,7 +21,12 @@ src/
   feeds/
     models.py               # OHLCVBar, OHLCVRequest, AssetClass
     contracts.py            # Vendor-neutral contract specs -> IBKR mapping
+    account.py              # Account, portfolio, live position, and PnL DTOs
+    bonds.py                # Bond yield, CTD, and yield curve DTOs
+    fundamental_data.py     # IBKR fundamental, WSH event, and forecast/event data contracts
     ibkr_feed.py            # Async IBKR historical feed client
+    news.py                 # IBKR news provider/headline/article/bulletin contracts
+    options.py              # Option analytics DTOs and IBKR option contract mapping
     ohlcv_loader.py         # Feed -> normalize -> persist/cache orchestration
     index_composition.py    # Provider abstraction and Redis-backed sync service
   transport/
@@ -29,8 +34,19 @@ src/
     ibkr_rate_limit.py      # Redis-backed distributed IBKR pacing bookmarks
     questdb_client.py       # PostgreSQL wire client and SQL builders
     scheduler.py            # Generic async scheduler and market snapshot job handler
+  webapp/
+    app.py                  # IBKRRestApp FastAPI application factory
+    dependencies.py         # Shared async clients, loader, and cache state
+    cache.py                # Async TTL cache with per-key single-flight protection
+    routers/
+      account.py            # Account summary, live positions, portfolio, PnL snapshots
+      market_data.py        # OHLCV, latest Redis bar, options analytics, bond yields
+      reference_data.py     # Option chains, fundamentals, WSH events, news
+      system.py             # Health and cache operations
 schedulejob/
   reload_g10_index_composition.json
+Dockerfile
+docker-compose.yml
 tests/
 notebooks/
 ```
@@ -79,10 +95,50 @@ Live trading commonly uses port `7496`. Confirm your TWS or Gateway API settings
 make test
 ```
 
-6. Open notebooks:
+6. Start the REST API locally:
+
+```bash
+make run-api
+```
+
+FastAPI docs: http://localhost:8000/docs
+
+Health check:
+
+```bash
+curl http://localhost:8000/api/v1/system/health
+```
+
+7. Open notebooks:
 
 ```bash
 make notebook
+```
+
+## Docker Setup
+
+Build and run the API with Redis and QuestDB:
+
+```bash
+cp .env.example .env
+docker compose up -d --build ibkr-rest-app
+```
+
+The Compose service exposes:
+
+- FastAPI: http://localhost:8000/docs
+- QuestDB UI: http://localhost:9000
+- Redis: `localhost:6379`
+
+Inside Docker, `IBKR_HOST` defaults to `host.docker.internal` so the container can reach TWS or IB Gateway running on the host machine. If you run IB Gateway in another container or remote host, override `IBKR_HOST` in `.env`.
+
+Useful commands:
+
+```bash
+make docker-build
+make docker-up
+docker compose logs -f ibkr-rest-app
+docker compose down
 ```
 
 ## Configuration
@@ -95,6 +151,10 @@ All central defaults live in `src/config/config_constant.py`. Runtime settings a
 | `IBKR_PORT` | `7497` | IBKR API port |
 | `IBKR_CLIENT_ID` | `101` | IBKR client ID |
 | `IBKR_MARKET_DATA_LINES` | `100` | Entitlement baseline used for pacing analysis |
+| `IBKR_REST_APP_NAME` | `IBKRRestApp` | FastAPI application title |
+| `IBKR_REST_CONNECT_ON_STARTUP` | `false` | Connect to IBKR/Redis/QuestDB during API startup instead of first request |
+| `IBKR_REST_MARKET_DATA_TTL_SECONDS` | `5` | Default in-process TTL for REST market data snapshots |
+| `IBKR_REST_MARKET_DATA_CACHE_MAXSIZE` | `512` | Maximum in-process REST market data cache entries |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
 | `QUESTDB_HOST` | `127.0.0.1` | QuestDB PostgreSQL wire host |
 | `QUESTDB_PORT` | `8812` | QuestDB PostgreSQL wire port |
@@ -103,6 +163,62 @@ All central defaults live in `src/config/config_constant.py`. Runtime settings a
 | `QUESTDB_DATABASE` | `qdb` | QuestDB database |
 | `INDEX_SYNC_INTERVAL_SECONDS` | `86400` | Default index composition sync interval |
 | `INDEX_COMPOSITION_PROVIDER` | empty | Enables an external index composition provider when implemented |
+
+## IBKRRestApp FastAPI Bridge
+
+`IBKRRestApp` is a thin async HTTP bridge over the domain DTOs in `src/feeds`. It does not duplicate trading logic; it validates request bodies with the same Pydantic models used by notebooks, schedulers, and batch workers.
+
+Run locally:
+
+```bash
+uvicorn src.webapp.app:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Router split:
+
+- `GET /api/v1/system/health`
+- `GET /api/v1/system/cache/market-data`
+- `DELETE /api/v1/system/cache/market-data`
+- `POST /api/v1/market-data/ohlcv`
+- `GET /api/v1/market-data/latest-bar`
+- `POST /api/v1/market-data/options/analytics`
+- `POST /api/v1/market-data/bonds/yields/history`
+- `POST /api/v1/reference-data/options/chains`
+- `POST /api/v1/reference-data/fundamentals`
+- `GET /api/v1/reference-data/wsh/metadata`
+- `POST /api/v1/reference-data/wsh/events`
+- `GET /api/v1/reference-data/news/providers`
+- `POST /api/v1/reference-data/news/historical`
+- `POST /api/v1/reference-data/news/article`
+- `GET /api/v1/account/summary`
+- `GET /api/v1/account/positions`
+- `GET /api/v1/account/portfolio`
+- `POST /api/v1/account/pnl/account`
+- `POST /api/v1/account/pnl/position`
+
+The app uses async FastAPI endpoints end-to-end. Market-data endpoints can use the in-process `AsyncTTLCache`; it has per-key single-flight protection so concurrent duplicate requests share one IBKR call. The TTL cache is intentionally short-lived and local to the API process. Redis remains the distributed cache for latest bars, index compositions, and scheduler/rate-limit bookmarks.
+
+Example OHLCV request:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/market-data/ohlcv \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request": {
+      "symbol": "SPY",
+      "asset_class": "equity",
+      "exchange": "SMART",
+      "currency": "USD",
+      "duration": "1 D",
+      "bar_size": "1 min",
+      "what_to_show": "TRADES",
+      "use_rth": true
+    },
+    "persist": false,
+    "cache_latest": true,
+    "use_ttl_cache": true
+  }'
+```
 
 ## Redis Keys
 
@@ -239,6 +355,135 @@ IBKR can qualify index contracts with `secType="IND"` and can load market/histor
 
 This project implements `IBKRFeedClient.load_option_chains(...)` for equity and index underlyings. It deliberately does not use broad `reqContractDetails` sweeps for chains because IBKR documents `reqSecDefOptParams` as the option-chain endpoint and notes that broad option-chain contract-detail requests can be throttled and slow.
 
+## IBKR Options Analytics
+
+Options analytics are represented in `src/feeds/options.py`:
+
+- `OptionContractSpec`: one specific option contract, including underlying, expiry, strike, right, multiplier, trading class, and optional `conId`.
+- `OptionAnalyticsRequest`: snapshot request using IBKR generic ticks `100`, `101`, `104`, `105`, and `106`.
+- `OptionGreekSet`: bid, ask, last, or model Greek payload.
+- `OptionAnalyticsSnapshot`: delta, gamma, theta, vega, implied volatility, historical volatility, open interest, and option volume.
+
+IBKR exposes option Greeks through option computation market data fields such as `bidGreeks`, `askGreeks`, `lastGreeks`, and `modelGreeks` in `ib_insync`. Option volume/open-interest style values require generic ticks. The project default asks for:
+
+| Generic tick | Meaning |
+|---:|---|
+| `100` | Option volume |
+| `101` | Option open interest |
+| `104` | Historical volatility |
+| `105` | Average option volume |
+| `106` | Option implied volatility |
+
+Do not request a full option chain as market data in one shot. Use `load_option_chains(...)` to discover expiries/strikes/trading classes, filter to the slice you need, then call `load_option_analytics(...)` only for selected contracts.
+
+REST endpoint:
+
+```text
+POST /api/v1/market-data/options/analytics
+```
+
+## IBKR Fundamental And Economic Data
+
+IBKR has three relevant API surfaces:
+
+- TWS `reqFundamentalData`: legacy/deprecated company fundamental reports returned as XML. Supported report types in this project are `ReportSnapshot`, `ReportsFinSummary`, `ReportRatios`, `ReportsFinStatements`, `ReportsOwnership`, `CalendarReport`, and `RESC`.
+- TWS Wall Street Horizon: corporate/event calendar metadata and events returned as JSON through `getWshMetaDataAsync` and `getWshEventDataAsync` in `ib_insync`. This requires a Wall Street Horizon subscription, and metadata must be requested before event data.
+- Client Portal Forecast/Event Contracts: economic-indicator-related tradable event contract metadata such as category trees. This is not a macroeconomic time-series endpoint.
+
+This project stores these as explicit data contracts in `src/feeds/fundamental_data.py`:
+
+- `FundamentalDataRequest` and `FundamentalDataReport`
+- `WSHEventDataRequest`, `WSHMetadataReport`, and `WSHEventDataReport`
+- `ForecastEventContractCategory`
+
+Quant caveat: IBKR fundamental reports and WSH events are vendor payloads with their own licensing and revision behavior. Preserve raw XML/JSON and timestamps before deriving factors, and do not treat Forecast/Event Contract metadata as released macroeconomic observations.
+
+## IBKR News Feed
+
+IBKR offers API news, subject to API-specific news subscriptions and provider entitlements. The TWS API supports:
+
+- `reqNewsProviders`: list subscribed news providers.
+- Contract-specific real-time news through `reqMktData` using generic tick `292`.
+- BroadTape news through `NEWS` contracts and generic tick `292`.
+- `tickNews`: real-time headline callback containing timestamp, provider, article id, headline, and extra data.
+- `reqHistoricalNews`: historical headline lookup by contract id and provider codes.
+- `reqNewsArticle`: article body lookup by provider code and article id.
+- `reqNewsBulletins`: IBKR system/news bulletins.
+
+This project stores those wire shapes in `src/feeds/news.py`:
+
+- `NewsProvider`
+- `HistoricalNewsRequest` and `HistoricalNewsHeadline`
+- `NewsArticleRequest` and `NewsArticle`
+- `NewsTick`
+- `NewsBulletin`
+
+`IBKRFeedClient` has one-shot helpers for providers, historical headlines, and article body lookup. Real-time news subscriptions should be added as a separate streaming layer because they are long-lived market data subscriptions and consume the account’s market data/news entitlements.
+
+## Bond Data, CTD, And Yield Curves
+
+Bond and yield-curve DTOs live in `src/feeds/bonds.py`.
+
+Supported DTOs:
+
+- `BondInstrument`: sovereign/corporate bond identity using symbol, ISIN, CUSIP, or IBKR `conId`.
+- `BondYieldQuote`: latest bid, ask, last, and computed mid yield.
+- `BondYieldHistoryRequest` and `BondYieldBar`: historical yield bars for `YIELD_BID`, `YIELD_ASK`, `YIELD_BID_ASK`, and `YIELD_LAST`.
+- `CTDFutureDefinition`, `CTDBondCandidate`, and `CTDBondSnapshot`: CTD delivery-basket analytics for US Treasury, JGB, KTB, and German Bund futures.
+- `YieldCurveBootstrapInstrument`, `YieldCurvePoint`, and `YieldCurveDTO`: par-yield curve inputs and bootstrapped discount/zero curve outputs.
+
+IBKR historical bar documentation lists yield fields for bonds, but the same table notes that yield historical data is only available for corporate bonds. For US Treasury, JGB, KTB, and German Bund CTD capture, IBKR should be treated as a quote/contract source only. The actual deliverable basket, conversion factor, accrued interest, delivery date, financing/carry, and CTD selection require an exchange, vendor, or internally controlled delivery-basket provider.
+
+`YieldCurveDTO.bootstrap()` uses a deterministic par-yield bootstrap with ACT/365F year fractions, regular coupon dates, continuous zero rates, and log-linear discount-factor interpolation. `YieldCurveDTO.bootscrape()` is included as a backward-compatible alias for the requested method name.
+
+REST endpoint:
+
+```text
+POST /api/v1/market-data/bonds/yields/history
+```
+
+## IBKR Account, Position, And PnL Data
+
+Account/risk DTOs live in `src/feeds/account.py`.
+
+Supported DTOs:
+
+- `AccountValueDTO`
+- `AccountSummaryDTO`
+- `LivePositionDTO`
+- `PortfolioItemDTO`
+- `AccountPnLDTO`
+- `PositionPnLDTO`
+
+`IBKRFeedClient` exposes:
+
+- `load_account_summary(...)`
+- `load_live_positions(...)`
+- `load_portfolio_items(...)`
+- `subscribe_account_pnl(...)`
+- `subscribe_position_pnl(...)`
+- `load_account_pnl_snapshot(...)`
+- `load_position_pnl_snapshot(...)`
+
+The REST API uses short-lived PnL snapshot helpers for HTTP calls, then cancels the IBKR PnL subscription. Long-lived streaming PnL should be handled by a dedicated risk-engine service, not by holding open normal REST requests.
+
+IBKR caveats:
+
+- Account Window PnL and Portfolio Window PnL can differ because they use different sources and reset schedules.
+- `reqPnL` and `reqPnLSingle` update roughly once per second, subject to IBKR changes.
+- Some PnL values can be unset max-double sentinels; the DTO normalizers convert those to `None`.
+- Virtual FX PnL behavior depends on TWS Account Window configuration.
+
+REST endpoints:
+
+```text
+GET  /api/v1/account/summary
+GET  /api/v1/account/positions
+GET  /api/v1/account/portfolio
+POST /api/v1/account/pnl/account
+POST /api/v1/account/pnl/position
+```
+
 ## IBKR Pacing And Rate-Limit Standard
 
 This section caches the IBKR rate-limit assumptions used by this project as of the documentation reviewed on 2026-05-14.
@@ -249,6 +494,13 @@ Primary sources:
 - [IBKR Campus Web API v1.0 Documentation](https://ibkrcampus.com/campus/ibkr-api-page/cpapi-v1/)
 - [IBKR Campus Market Data Subscriptions](https://ibkrcampus.com/campus/ibkr-api-page/market-data-subscriptions/)
 - [Legacy TWS API Historical Data Limitations](https://interactivebrokers.github.io/tws-api/historical_limitations.html)
+- [Legacy TWS API Historical Bar Data](https://interactivebrokers.github.io/tws-api/historical_bars.html)
+- [Legacy TWS API Options](https://interactivebrokers.github.io/tws-api/options.html)
+- [Legacy TWS API Profit And Loss](https://interactivebrokers.github.io/tws-api/pnl.html)
+- [Legacy TWS API Available Tick Types](https://interactivebrokers.github.io/tws-api/tick_types.html)
+- [Legacy TWS API News](https://interactivebrokers.github.io/tws-api/news.html)
+- [Legacy TWS API EClient Reference](https://interactivebrokers.github.io/tws-api/classIBApi_1_1EClient.html)
+- [ib_insync API Reference](https://ib-insync.readthedocs.io/api.html)
 
 Documented standards:
 

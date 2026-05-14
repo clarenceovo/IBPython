@@ -1,0 +1,12 @@
+.git
+.idea
+.pytest_cache
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+notebooks/.ipynb_checkpoints
+questdb-data
+redis-data

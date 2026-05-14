@@ -3,7 +3,7 @@ VENV ?= .venv
 PIP := $(VENV)/bin/pip
 PY := $(VENV)/bin/python
 
-.PHONY: venv install install-dev test services-up services-down notebook run
+.PHONY: venv install install-dev test services-up services-down notebook run run-api docker-build docker-up
 
 venv:
 	$(PYTHON) -m venv $(VENV)
@@ -31,3 +31,12 @@ notebook:
 
 run:
 	$(PY) main.py
+
+run-api:
+	$(PY) -m uvicorn src.webapp.app:app --host 0.0.0.0 --port 8000 --reload
+
+docker-build:
+	docker compose build ibkr-rest-app
+
+docker-up:
+	docker compose up -d redis questdb ibkr-rest-app

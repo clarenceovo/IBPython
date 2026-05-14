@@ -20,6 +20,8 @@ class ContractSpec(BaseModel):
     last_trade_date_or_contract_month: str | None = None
     multiplier: str | None = None
     local_symbol: str | None = None
+    sec_id_type: str | None = None
+    sec_id: str | None = None
     con_id: int | None = Field(default=None, gt=0)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -158,6 +160,9 @@ def ibkr_contract_kwargs(spec: ContractSpec) -> dict[str, Any]:
             "exchange": exchange,
             "currency": currency,
         }
+        if spec.sec_id_type and spec.sec_id:
+            kwargs["secIdType"] = spec.sec_id_type.upper()
+            kwargs["secId"] = spec.sec_id.upper()
     elif spec.asset_class is AssetClass.CRYPTO:
         kwargs = {
             "secType": "CRYPTO",

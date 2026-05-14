@@ -1,4 +1,27 @@
 services:
+  ibkr-rest-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ibpython-ibkr-rest-app:latest
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      IBKR_HOST: ${IBKR_HOST:-host.docker.internal}
+      IBKR_PORT: ${IBKR_PORT:-7497}
+      IBKR_CLIENT_ID: ${IBKR_CLIENT_ID:-101}
+      REDIS_URL: redis://redis:6379/0
+      QUESTDB_HOST: questdb
+      QUESTDB_PORT: 8812
+      QUESTDB_USER: ${QUESTDB_USER:-admin}
+      QUESTDB_PASSWORD: ${QUESTDB_PASSWORD:-quest}
+      QUESTDB_DATABASE: ${QUESTDB_DATABASE:-qdb}
+    depends_on:
+      - redis
+      - questdb
+
   redis:
     image: redis:7-alpine
     ports:

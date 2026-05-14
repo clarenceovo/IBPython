@@ -36,6 +36,26 @@ except ImportError:  # pragma: no cover - fallback keeps tests importable before
                     constants.INDEX_COMPOSITION_PROVIDER_ENV,
                     constants.DEFAULT_INDEX_COMPOSITION_PROVIDER,
                 ),
+                "ibkr_rest_app_name": os.getenv(
+                    constants.IBKR_REST_APP_NAME_ENV,
+                    constants.DEFAULT_IBKR_REST_APP_NAME,
+                ),
+                "ibkr_rest_connect_on_startup": _env_bool(
+                    constants.IBKR_REST_CONNECT_ON_STARTUP_ENV,
+                    constants.DEFAULT_IBKR_REST_CONNECT_ON_STARTUP,
+                ),
+                "ibkr_rest_market_data_ttl_seconds": float(
+                    os.getenv(
+                        constants.IBKR_REST_MARKET_DATA_TTL_SECONDS_ENV,
+                        constants.DEFAULT_IBKR_REST_MARKET_DATA_TTL_SECONDS,
+                    )
+                ),
+                "ibkr_rest_market_data_cache_maxsize": int(
+                    os.getenv(
+                        constants.IBKR_REST_MARKET_DATA_CACHE_MAXSIZE_ENV,
+                        constants.DEFAULT_IBKR_REST_MARKET_DATA_CACHE_MAXSIZE,
+                    )
+                ),
             }
             env_data.update(data)
             super().__init__(**env_data)
@@ -78,6 +98,25 @@ class Settings(BaseSettings):
         default=constants.DEFAULT_INDEX_COMPOSITION_PROVIDER,
         alias=constants.INDEX_COMPOSITION_PROVIDER_ENV,
     )
+    ibkr_rest_app_name: str = Field(
+        default=constants.DEFAULT_IBKR_REST_APP_NAME,
+        alias=constants.IBKR_REST_APP_NAME_ENV,
+        min_length=1,
+    )
+    ibkr_rest_connect_on_startup: bool = Field(
+        default=constants.DEFAULT_IBKR_REST_CONNECT_ON_STARTUP,
+        alias=constants.IBKR_REST_CONNECT_ON_STARTUP_ENV,
+    )
+    ibkr_rest_market_data_ttl_seconds: float = Field(
+        default=constants.DEFAULT_IBKR_REST_MARKET_DATA_TTL_SECONDS,
+        alias=constants.IBKR_REST_MARKET_DATA_TTL_SECONDS_ENV,
+        ge=0,
+    )
+    ibkr_rest_market_data_cache_maxsize: int = Field(
+        default=constants.DEFAULT_IBKR_REST_MARKET_DATA_CACHE_MAXSIZE,
+        alias=constants.IBKR_REST_MARKET_DATA_CACHE_MAXSIZE_ENV,
+        gt=0,
+    )
 
     @property
     def questdb_dsn(self) -> str:
@@ -88,3 +127,10 @@ class Settings(BaseSettings):
             f"password={self.questdb_password} "
             f"dbname={self.questdb_database}"
         )
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}

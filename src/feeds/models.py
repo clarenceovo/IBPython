@@ -16,6 +16,7 @@ class AssetClass(StrEnum):
     BOND = "bond"
     INDEX = "index"
     CRYPTO = "crypto"
+    OPTION = "option"
 
 
 class OHLCVBar(BaseModel):

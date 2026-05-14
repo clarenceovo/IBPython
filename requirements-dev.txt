@@ -6,3 +6,4 @@ pandas
 python-dotenv
 pytest
 pytest-asyncio
+httpx
