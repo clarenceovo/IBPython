@@ -105,15 +105,22 @@ make test
 make notebook
 make run
 make run-api
+make run-api-dev
 make services-down
 ```
 
-`make run` starts the Redis-backed scheduler worker. `make run-api` starts `IBKRRestApp`.
+`make run` starts the Redis-backed scheduler worker. `make run-api` starts `IBKRRestApp` without hot reload, which is the safer default for IBKR client sessions. Use `make run-api-dev` when you explicitly want uvicorn reload during local API development.
 
 Equivalent direct API command:
 
 ```bash
-python -m uvicorn src.webapp.app:get_app --host 0.0.0.0 --port 8000 --factory --reload --loop asyncio
+python -m uvicorn src.webapp.app:get_app --host 0.0.0.0 --port 8000 --factory --loop asyncio --lifespan on
+```
+
+Development reload command:
+
+```bash
+make run-api-dev
 ```
 
 The scheduler worker is dependency-aware:

@@ -181,10 +181,10 @@ Blank or missing `.env` values are treated as null and skipped, so the correspon
 Run locally:
 
 ```bash
-uvicorn src.webapp.app:get_app --host 0.0.0.0 --port 8000 --factory --reload --loop asyncio
+uvicorn src.webapp.app:get_app --host 0.0.0.0 --port 8000 --factory --loop asyncio --lifespan on
 ```
 
-The API runner intentionally uses `--loop asyncio`. `uvicorn[standard]` may otherwise select `uvloop`, and `ib_insync`/`nest_asyncio` can fail before reaching the IBKR socket under uvloop. If notebooks connect but the API reports IBKR unavailable, first confirm the API is running with the standard asyncio loop and a unique `IBKR_CLIENT_ID`.
+The API runner intentionally uses `--loop asyncio`. `uvicorn[standard]` may otherwise select `uvloop`, and `ib_insync`/`nest_asyncio` can fail before reaching the IBKR socket under uvloop. `make run-api` does not use hot reload, which is safer for IBKR client sessions. Use `make run-api-dev` for local reload workflows. If notebooks connect but the API reports IBKR unavailable, first confirm the API is running with the standard asyncio loop and a unique `IBKR_CLIENT_ID`.
 
 Router split:
 

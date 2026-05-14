@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from src.config.settings import Settings
 from src.feeds.account import LivePositionDTO
 from src.feeds.models import AssetClass, OHLCVBar
+import src.webapp.app as app_module
 from src.webapp.app import create_app
 from src.webapp.cache import AsyncTTLCache
 
@@ -101,6 +102,28 @@ def test_webapp_registers_domain_routers() -> None:
     assert "/api/v1/market-data/ohlcv" in paths
     assert "/api/v1/reference-data/options/chains" in paths
     assert "/api/v1/account/positions" in paths
+
+
+def test_webapp_builds_runtime_state_inside_lifespan(monkeypatch) -> None:
+    built = 0
+    state = FakeState()
+
+    def build_state(settings: Settings) -> FakeState:
+        nonlocal built
+        built += 1
+        return state
+
+    monkeypatch.setattr(app_module, "build_rest_app_state", build_state)
+    app = create_app(settings=state.settings)
+
+    assert built == 0
+
+    with TestClient(app) as client:
+        assert built == 1
+        response = client.get("/api/v1/system/health")
+
+    assert response.status_code == 200
+    assert state.closed is True
 
 
 def test_market_data_ohlcv_endpoint_uses_ttl_cache() -> None:

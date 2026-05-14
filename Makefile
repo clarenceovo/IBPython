@@ -5,9 +5,10 @@ PY := $(VENV)/bin/python
 API_HOST ?= 0.0.0.0
 API_PORT ?= 8000
 API_LOOP ?= asyncio
-API_RELOAD ?= --reload
+API_APP ?= src.webapp.app:get_app
+API_LOG_LEVEL ?= info
 
-.PHONY: venv install install-dev test services-up services-down notebook run run-api docker-build docker-up
+.PHONY: venv install install-dev test services-up services-down notebook run run-api run-api-dev docker-build docker-up
 
 venv:
 	$(PYTHON) -m venv $(VENV)
@@ -37,7 +38,12 @@ run:
 	$(PY) main.py
 
 run-api:
-	$(PY) -m uvicorn src.webapp.app:get_app --host $(API_HOST) --port $(API_PORT) --factory $(API_RELOAD) --loop $(API_LOOP)
+	@echo "Starting IBKRRestApp with $(PY) on $(API_HOST):$(API_PORT) using loop=$(API_LOOP)"
+	$(PY) -m uvicorn $(API_APP) --host $(API_HOST) --port $(API_PORT) --factory --loop $(API_LOOP) --lifespan on --log-level $(API_LOG_LEVEL)
+
+run-api-dev:
+	@echo "Starting IBKRRestApp dev server with $(PY) on $(API_HOST):$(API_PORT) using loop=$(API_LOOP)"
+	$(PY) -m uvicorn $(API_APP) --host $(API_HOST) --port $(API_PORT) --factory --reload --loop $(API_LOOP) --lifespan on --log-level $(API_LOG_LEVEL)
 
 docker-build:
 	docker compose build ibkr-rest-app

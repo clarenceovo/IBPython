@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -14,9 +13,6 @@ from src.webapp.routers import account, market_data, reference_data, system
 
 logger = logging.getLogger(__name__)
 
-_app_instance: FastAPI | None = None
-_app_lock = threading.Lock()
-
 
 def create_app(
     *,
@@ -24,11 +20,17 @@ def create_app(
     state: IBKRRestAppState | None = None,
 ) -> FastAPI:
     resolved_settings = settings or load_settings()
-    app_state = state or build_rest_app_state(resolved_settings)
 
     @asynccontextmanager
     async def lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
+        app_state = state or build_rest_app_state(resolved_settings)
         fastapi_app.state.ibkr_rest_state = app_state
+        logger.info(
+            "IBKRRestApp state initialized on active event loop: ibkr=%s:%s clientId=%s",
+            resolved_settings.ibkr_host,
+            resolved_settings.ibkr_port,
+            resolved_settings.ibkr_client_id,
+        )
         if resolved_settings.ibkr_rest_connect_on_startup:
             await app_state.connect()
         try:
@@ -67,7 +69,6 @@ def create_app(
         docs_url="/docs",
         redoc_url="/redoc",
     )
-    fastapi_app.state.ibkr_rest_state = app_state
     fastapi_app.include_router(system.router, prefix="/api/v1")
     fastapi_app.include_router(market_data.router, prefix="/api/v1")
     fastapi_app.include_router(reference_data.router, prefix="/api/v1")
@@ -86,14 +87,13 @@ def create_app(
 
 
 def get_app() -> FastAPI:
-    """Thread-safe lazy singleton for uvicorn --factory or module-level use."""
-    global _app_instance
-    if _app_instance is not None:
-        return _app_instance
-    with _app_lock:
-        if _app_instance is None:
-            _app_instance = create_app()
-        return _app_instance
+    """Uvicorn factory entrypoint.
+
+    Return a fresh FastAPI object and build transport state inside lifespan so
+    ib_insync, locks, and socket futures are owned by uvicorn's active loop.
+    """
+
+    return create_app()
 
 
-app = get_app()
+app = create_app()

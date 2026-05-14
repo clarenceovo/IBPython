@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+from types import ModuleType
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +16,7 @@ from src.feeds.account import (
     normalize_positions,
 )
 from src.feeds.ibkr_feed import IBKRFeedClient
+from src.feeds import ibkr_feed
 
 
 def _contract() -> SimpleNamespace:
@@ -128,5 +131,34 @@ def test_ibkr_ensure_connected_preserves_root_cause_in_error_message() -> None:
         assert "127.0.0.1:4001" in message
         assert "clientId=44" in message
         assert "ValueError: uvloop cannot be patched" in message
+
+    asyncio.run(run())
+
+
+def test_ibkr_loop_getter_patch_uses_running_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    ib_pkg = ModuleType("ib_insync")
+    ib_pkg.__path__ = []
+    util = ModuleType("ib_insync.util")
+    connection = ModuleType("ib_insync.connection")
+    client = ModuleType("ib_insync.client")
+    wrapper = ModuleType("ib_insync.wrapper")
+
+    for module in (util, connection, client, wrapper):
+        module.getLoop = lambda: object()
+
+    monkeypatch.setitem(sys.modules, "ib_insync", ib_pkg)
+    monkeypatch.setitem(sys.modules, "ib_insync.util", util)
+    monkeypatch.setitem(sys.modules, "ib_insync.connection", connection)
+    monkeypatch.setitem(sys.modules, "ib_insync.client", client)
+    monkeypatch.setitem(sys.modules, "ib_insync.wrapper", wrapper)
+
+    async def run() -> None:
+        running_loop = asyncio.get_running_loop()
+        ibkr_feed._patch_ib_insync_loop_getters()
+
+        assert util.getLoop() is running_loop
+        assert connection.getLoop() is running_loop
+        assert client.getLoop() is running_loop
+        assert wrapper.getLoop() is running_loop
 
     asyncio.run(run())

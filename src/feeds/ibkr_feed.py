@@ -59,6 +59,40 @@ logger = logging.getLogger(__name__)
 DETECTION_TIMEOUT = 180  # seconds before IBKR reports idle timeout
 
 
+def _ib_insync_compatible_loop() -> asyncio.AbstractEventLoop:
+    """Return the loop ib_insync should use for socket futures."""
+
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.get_event_loop_policy().get_event_loop()
+
+
+def _patch_ib_insync_loop_getters() -> None:
+    """Force ib_insync internals to use the currently running loop.
+
+    ib_insync 0.9.x uses ``asyncio.get_event_loop_policy().get_event_loop()``
+    through module-level ``getLoop`` aliases. Under ASGI servers this can
+    resolve to a policy/default loop while the request is running on another
+    loop, producing "Future attached to a different loop". Rebinding these
+    aliases keeps socket creation, throttling, and timeout callbacks on the
+    active uvicorn request loop.
+    """
+
+    try:
+        import ib_insync.client as ib_client
+        import ib_insync.connection as ib_connection
+        import ib_insync.util as ib_util
+        import ib_insync.wrapper as ib_wrapper
+    except ImportError:
+        return
+
+    ib_util.getLoop = _ib_insync_compatible_loop
+    ib_connection.getLoop = _ib_insync_compatible_loop
+    ib_client.getLoop = _ib_insync_compatible_loop
+    ib_wrapper.getLoop = _ib_insync_compatible_loop
+
+
 def _maybe_apply_nest_asyncio() -> None:
     """Patch nested event loops only when the current loop supports it.
 
@@ -135,6 +169,7 @@ class IBKRFeedClient:
         except ImportError as exc:
             raise RuntimeError("ib_insync is required to connect to IBKR") from exc
 
+        _patch_ib_insync_loop_getters()
         _maybe_apply_nest_asyncio()
 
         # Always create a fresh IB() on the current running loop.
