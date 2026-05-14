@@ -1,0 +1,18 @@
+[project]
+name = "ibpython-market-data"
+version = "0.1.0"
+description = "Async market data feed and transport foundation for systematic trading research and live workflows."
+requires-python = ">=3.13"
+dependencies = [
+  "pydantic>=2.10",
+  "pydantic-settings>=2.6",
+  "redis>=5.0",
+  "psycopg[binary]>=3.2",
+  "ib-insync>=0.9.86",
+  "pandas>=2.2",
+  "python-dotenv>=1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

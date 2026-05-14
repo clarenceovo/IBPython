@@ -1,0 +1,8 @@
+-r requirements.txt
+jupyterlab
+ipykernel
+matplotlib
+pandas
+python-dotenv
+pytest
+pytest-asyncio
