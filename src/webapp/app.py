@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from src.config.settings import Settings
+from src.config.settings import Settings, load_settings
 from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
 from src.webapp.routers import account, market_data, reference_data, system
 
@@ -16,7 +16,7 @@ def create_app(
     settings: Settings | None = None,
     state: IBKRRestAppState | None = None,
 ) -> FastAPI:
-    resolved_settings = settings or Settings()
+    resolved_settings = settings or load_settings()
     app_state = state or build_rest_app_state(resolved_settings)
 
     @asynccontextmanager

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from src.config.settings import Settings
+from src.config.settings import load_settings
 from src.feeds.index_composition import (
     IndexCompositionProvider,
     IndexCompositionService,
@@ -30,7 +30,7 @@ def build_index_composition_provider(provider_name: str) -> IndexCompositionProv
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    settings = Settings()
+    settings = load_settings()
 
     redis = MarketDataRedisClient(settings.redis_url)
     questdb = QuestDBClient(

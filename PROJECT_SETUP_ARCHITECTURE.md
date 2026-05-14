@@ -17,7 +17,8 @@ Production-oriented async market data foundation for systematic trading, researc
 src/
   config/
     config_constant.py      # Central defaults, env names, Redis key templates, QuestDB table name
-    settings.py             # pydantic-settings loader
+    config_loader.py        # .env/environment/default loader that ignores blank values
+    settings.py             # Pydantic validation over ConfigLoader output
   feeds/
     models.py               # OHLCVBar, OHLCVRequest, AssetClass
     contracts.py            # Vendor-neutral contract specs -> IBKR mapping
@@ -144,6 +145,14 @@ docker compose down
 ## Configuration
 
 All central defaults live in `src/config/config_constant.py`. Runtime settings are loaded by `src/config/settings.py` from `.env` and environment variables.
+
+`src/config/config_loader.py` owns the load order:
+
+```text
+config_constant defaults -> .env values -> process environment -> explicit overrides
+```
+
+Blank or missing `.env` values are treated as null and skipped, so the corresponding `config_constant.py` default remains active. Use `load_settings()` in apps, notebooks, jobs, and scripts instead of calling `python-dotenv` directly.
 
 | Variable | Default | Purpose |
 |---|---:|---|
