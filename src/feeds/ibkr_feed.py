@@ -325,7 +325,7 @@ class IBKRFeedClient:
             logger.warning("IBKR pacing violation [%s]: %s (reqId=%s)", error_code, error_string, req_id)
         elif error_code in (1100, 1101, 1102):
             logger.warning("IBKR connectivity event [%s]: %s (reqId=%s)", error_code, error_string, req_id)
-        elif error_code in (200, 201, 502, 504):
+        elif error_code in (200, 201, 321, 502, 504):
             logger.error("IBKR error [%s]: %s (reqId=%s)", error_code, error_string, req_id)
         elif error_code == 399:
             logger.debug("IBKR info [%s]: %s (reqId=%s)", error_code, error_string, req_id)
@@ -526,7 +526,7 @@ class IBKRFeedClient:
         return result
 
     async def load_option_analytics(self, request: OptionAnalyticsRequest) -> OptionAnalyticsSnapshot:
-        """Load a market-data snapshot with option Greeks, volume, OI, and volatility fields."""
+        """Load short-lived option market data with Greeks, volume, OI, and volatility fields."""
 
         await self._ensure_connected()
         logger.info("load_option_analytics: underlying=%s expiry=%s", request.contract.underlying_symbol, request.contract.expiry)
@@ -538,11 +538,23 @@ class IBKRFeedClient:
         )
         if qualified:
             contract = qualified[0]
+        generic_tick_list = request.generic_tick_list
+        use_snapshot = not generic_tick_list
+        if generic_tick_list and request.regulatory_snapshot:
+            logger.warning(
+                "load_option_analytics: regulatory_snapshot ignored because IBKR snapshot market data "
+                "does not support generic ticks; using short-lived streaming subscription"
+            )
+        logger.debug(
+            "load_option_analytics market data mode: snapshot=%s generic_ticks=%s",
+            use_snapshot,
+            generic_tick_list or "none",
+        )
         ticker = self._ib.reqMktData(
             contract,
-            genericTickList=request.generic_tick_list,
-            snapshot=True,
-            regulatorySnapshot=request.regulatory_snapshot,
+            genericTickList=generic_tick_list,
+            snapshot=use_snapshot,
+            regulatorySnapshot=request.regulatory_snapshot if use_snapshot else False,
             mktDataOptions=[],
         )
         try:

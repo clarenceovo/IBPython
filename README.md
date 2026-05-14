@@ -276,7 +276,7 @@ curl -X POST http://localhost:8000/api/v1/market-data/options/skew \
   }'
 ```
 
-The skew endpoint computes per-expiry `put IV - call IV` using the nearest target-delta contracts when Greeks are available, falls back to symmetric moneyness when they are not, and reports the largest open-interest call and put strike for each maturity. It samples a bounded strike window to avoid accidentally snapshotting an entire listed chain.
+The skew endpoint computes per-expiry `put IV - call IV` using the nearest target-delta contracts when Greeks are available, falls back to symmetric moneyness when they are not, and reports the largest open-interest call and put strike for each maturity. Because IBKR rejects snapshot market data with generic ticks, option skew uses short-lived streaming subscriptions for the sampled contracts, waits briefly, then cancels them.
 
 Example latest-bar request:
 
@@ -379,7 +379,7 @@ Current expected test status:
 - IBKR bond yield historical fields are documented, but yield history is only available for corporate bonds.
 - CTD analytics require exchange/vendor delivery-basket data beyond the IBKR TWS API.
 - Full option chains should not be requested as market data in one shot. Discover the chain, filter contracts, then request selected analytics.
-- Option skew scans sample a bounded set of strikes per maturity. Increase `max_expirations` and `max_strikes_per_expiry` carefully because each strike/right pair consumes a snapshot market-data request.
+- Option skew scans sample a bounded set of strikes per maturity. Increase `max_expirations`, `max_strikes_per_expiry`, and `max_concurrent_requests` carefully because each strike/right pair consumes a temporary market-data line while the short-lived subscription is open.
 - REST PnL endpoints use short-lived subscriptions; durable streaming PnL should live in a dedicated risk-engine process.
 
 ## More Detail

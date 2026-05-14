@@ -83,7 +83,7 @@ class OptionGreekSet(BaseModel):
 
 
 class OptionAnalyticsRequest(BaseModel):
-    """Snapshot request for option analytics from IBKR market data."""
+    """Short-lived option market-data request for Greeks, OI, volume, and volatility."""
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
@@ -97,10 +97,7 @@ class OptionAnalyticsRequest(BaseModel):
     def normalize_generic_ticks(cls, value: Any) -> tuple[str, ...]:
         if not isinstance(value, (list, tuple, set)):
             raise TypeError("generic_ticks must be a sequence")
-        normalized = tuple(str(item).strip() for item in value if str(item).strip())
-        if not normalized:
-            raise ValueError("generic_ticks cannot be empty")
-        return normalized
+        return tuple(str(item).strip() for item in value if str(item).strip())
 
     @property
     def generic_tick_list(self) -> str:

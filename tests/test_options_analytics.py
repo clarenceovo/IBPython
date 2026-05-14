@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
+import src.feeds.ibkr_feed as ibkr_feed_module
+from src.feeds.ibkr_feed import IBKRFeedClient
 from src.feeds.options import (
     DEFAULT_OPTION_ANALYTICS_GENERIC_TICKS,
     OptionAnalyticsRequest,
@@ -25,6 +28,21 @@ def test_option_analytics_request_uses_ibkr_generic_ticks() -> None:
 
     assert request.generic_ticks == DEFAULT_OPTION_ANALYTICS_GENERIC_TICKS
     assert request.generic_tick_list == "100,101,104,105,106"
+
+
+def test_option_analytics_request_allows_empty_generic_ticks_for_true_snapshot() -> None:
+    request = OptionAnalyticsRequest(
+        contract=OptionContractSpec(
+            underlying_symbol="SPY",
+            expiry="20260619",
+            strike=500,
+            right=OptionRight.CALL,
+        ),
+        generic_ticks=[],
+    )
+
+    assert request.generic_ticks == ()
+    assert request.generic_tick_list == ""
 
 
 def test_normalize_option_analytics_snapshot_derives_greeks_oi_and_volume() -> None:
@@ -61,3 +79,121 @@ def test_normalize_option_analytics_snapshot_derives_greeks_oi_and_volume() -> N
     assert snapshot.open_interest == pytest.approx(275)
     assert snapshot.option_volume == pytest.approx(55)
     assert snapshot.implied_volatility == pytest.approx(0.19)
+
+
+def test_option_analytics_uses_streaming_subscription_when_generic_ticks_are_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    fake_contract = SimpleNamespace(conId=123, symbol="TSLA")
+
+    def build_fake_option_contract(_contract_spec: OptionContractSpec) -> object:
+        return fake_contract
+
+    class FakeIB:
+        def isConnected(self) -> bool:
+            return True
+
+        async def qualifyContractsAsync(self, contract: object) -> list[object]:
+            return [contract]
+
+        def reqMktData(
+            self,
+            contract: object,
+            *,
+            genericTickList: str,
+            snapshot: bool,
+            regulatorySnapshot: bool,
+            mktDataOptions: list[object],
+        ) -> object:
+            captured["contract"] = contract
+            captured["genericTickList"] = genericTickList
+            captured["snapshot"] = snapshot
+            captured["regulatorySnapshot"] = regulatorySnapshot
+            captured["mktDataOptions"] = mktDataOptions
+            return SimpleNamespace(
+                modelGreeks=SimpleNamespace(impliedVol=0.42, delta=0.25),
+                callOpenInterest=100,
+                callVolume=10,
+            )
+
+        def cancelMktData(self, contract: object) -> None:
+            captured["cancelled"] = contract
+
+    monkeypatch.setattr(ibkr_feed_module, "build_ibkr_option_contract", build_fake_option_contract)
+    client = IBKRFeedClient()
+    client._ib = FakeIB()
+    request = OptionAnalyticsRequest(
+        contract=OptionContractSpec(
+            underlying_symbol="TSLA",
+            expiry="20260518",
+            strike=270,
+            right=OptionRight.PUT,
+        ),
+        snapshot_wait_seconds=0.001,
+        regulatory_snapshot=True,
+    )
+
+    snapshot = asyncio.run(client.load_option_analytics(request))
+
+    assert captured["genericTickList"] == "100,101,104,105,106"
+    assert captured["snapshot"] is False
+    assert captured["regulatorySnapshot"] is False
+    assert captured["cancelled"] is fake_contract
+    assert snapshot.model_greeks is not None
+    assert snapshot.model_greeks.implied_vol == pytest.approx(0.42)
+
+
+def test_option_analytics_uses_snapshot_subscription_without_generic_ticks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    fake_contract = SimpleNamespace(conId=123, symbol="SPY")
+
+    def build_fake_option_contract(_contract_spec: OptionContractSpec) -> object:
+        return fake_contract
+
+    class FakeIB:
+        def isConnected(self) -> bool:
+            return True
+
+        async def qualifyContractsAsync(self, contract: object) -> list[object]:
+            return [contract]
+
+        def reqMktData(
+            self,
+            contract: object,
+            *,
+            genericTickList: str,
+            snapshot: bool,
+            regulatorySnapshot: bool,
+            mktDataOptions: list[object],
+        ) -> object:
+            captured["genericTickList"] = genericTickList
+            captured["snapshot"] = snapshot
+            captured["regulatorySnapshot"] = regulatorySnapshot
+            return SimpleNamespace(modelGreeks=SimpleNamespace(impliedVol=0.2, delta=0.4))
+
+        def cancelMktData(self, contract: object) -> None:
+            captured["cancelled"] = contract
+
+    monkeypatch.setattr(ibkr_feed_module, "build_ibkr_option_contract", build_fake_option_contract)
+    client = IBKRFeedClient()
+    client._ib = FakeIB()
+    request = OptionAnalyticsRequest(
+        contract=OptionContractSpec(
+            underlying_symbol="SPY",
+            expiry="20260619",
+            strike=500,
+            right=OptionRight.CALL,
+        ),
+        generic_ticks=[],
+        snapshot_wait_seconds=0.001,
+        regulatory_snapshot=True,
+    )
+
+    asyncio.run(client.load_option_analytics(request))
+
+    assert captured["genericTickList"] == ""
+    assert captured["snapshot"] is True
+    assert captured["regulatorySnapshot"] is True

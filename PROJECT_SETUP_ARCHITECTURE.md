@@ -436,7 +436,7 @@ If the app already knows the IBKR underlying `conId`, `underlying_con_id` can be
 Options analytics are represented in `src/feeds/options.py`:
 
 - `OptionContractSpec`: one specific option contract, including underlying, expiry, strike, right, multiplier, trading class, and optional `conId`.
-- `OptionAnalyticsRequest`: snapshot request using IBKR generic ticks `100`, `101`, `104`, `105`, and `106`.
+- `OptionAnalyticsRequest`: short-lived market-data request using IBKR generic ticks `100`, `101`, `104`, `105`, and `106`.
 - `OptionGreekSet`: bid, ask, last, or model Greek payload.
 - `OptionAnalyticsSnapshot`: delta, gamma, theta, vega, implied volatility, historical volatility, open interest, and option volume.
 - `OptionSkewSurfaceRequest`: bounded per-maturity skew scan seeded from the option-chain endpoint.
@@ -454,7 +454,9 @@ IBKR exposes option Greeks through option computation market data fields such as
 
 Do not request a full option chain as market data in one shot. Use `load_option_chains(...)` to discover expiries/strikes/trading classes, filter to the slice you need, then call `load_option_analytics(...)` only for selected contracts.
 
-The skew endpoint follows that same discipline. It samples a bounded strike window around spot, requests call/put snapshots for those strikes, selects the nearest target-delta call and put for each expiry, and reports `skew_put_minus_call_iv = put IV - call IV`. If Greeks are missing, it falls back to a symmetric moneyness selection. Each strike/right pair is a market-data snapshot, so increase `max_expirations` and `max_strikes_per_expiry` carefully.
+IBKR does not allow snapshot market-data requests with generic ticks. When `generic_ticks` is non-empty, this project opens a short-lived streaming market-data subscription, waits `snapshot_wait_seconds`, normalizes the latest fields into a snapshot DTO, and cancels the subscription. If `generic_ticks` is empty, the single-contract analytics endpoint can use true IBKR snapshot mode.
+
+The skew endpoint follows that same discipline. It samples a bounded strike window around spot, requests call/put short-lived market-data subscriptions for those strikes, selects the nearest target-delta call and put for each expiry, and reports `skew_put_minus_call_iv = put IV - call IV`. If Greeks are missing, it falls back to a symmetric moneyness selection. Each strike/right pair consumes a temporary market-data line, so increase `max_expirations`, `max_strikes_per_expiry`, and `max_concurrent_requests` carefully.
 
 REST endpoints:
 
