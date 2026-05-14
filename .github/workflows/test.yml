@@ -1,0 +1,61 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - "codex/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python 3.13 Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Compile source and tests
+        run: python -m compileall -q src tests
+
+      - name: Validate JSON operational files
+        run: |
+          python -m json.tool schedulejob/reload_g10_index_composition.json >/dev/null
+          python -m json.tool notebooks/00_environment_check.ipynb >/dev/null
+          python -m json.tool notebooks/01_ibkr_connection_test.ipynb >/dev/null
+          python -m json.tool notebooks/02_load_ohlcv.ipynb >/dev/null
+          python -m json.tool notebooks/03_redis_test.ipynb >/dev/null
+          python -m json.tool notebooks/04_questdb_test.ipynb >/dev/null
+          python -m json.tool notebooks/05_index_composition_sync.ipynb >/dev/null
+
+      - name: Validate Docker Compose config
+        run: docker compose config

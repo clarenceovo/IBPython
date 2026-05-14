@@ -1,23 +1,30 @@
 # IBPython Market Data Foundation
 
-Async, production-shaped IBKR market data and transport layer for systematic trading research, live risk monitoring, and portfolio analytics.
+Production-oriented IBKR market data, transport, scheduler, and REST API layer for systematic trading research, live risk monitoring, and portfolio analytics.
 
-The project provides:
+## What This Provides
 
-- IBKR TWS / IB Gateway connectivity through `ib_insync`
-- Unified OHLCV DTOs for equities, FX, futures, bonds, indices, crypto, and options
-- Option chain and option analytics DTOs
-- Fundamental, economic event, and news DTOs
+- Async IBKR TWS / IB Gateway adapter through `ib_insync`
+- Unified OHLCV DTOs across equities, FX, futures, bonds, indices, crypto, and options
+- Option-chain discovery and option analytics DTOs
+- Fundamental, economic-event, and news DTOs
 - Bond yield, CTD, and yield-curve bootstrap DTOs
-- Account summary, live position, portfolio, and PnL DTOs
-- Redis latest-data cache, scheduler jobs, and distributed IBKR pacing bookmarks
+- Account summary, live position, portfolio, account PnL, and position PnL DTOs
+- Redis cache for latest bars, index compositions, scheduler jobs, and IBKR pacing bookmarks
 - QuestDB persistence over PostgreSQL wire protocol
+- Generic Redis-defined scheduler jobs
 - FastAPI app: `IBKRRestApp`
-- Notebook workflows for debugging and research
+- Notebook workflows for local debugging and research
+
+## Requirements
+
+- Python 3.13+
+- IBKR TWS or IB Gateway running locally or on a reachable host
+- Redis
+- QuestDB
+- Docker Desktop or Docker Engine, if using Compose
 
 ## Quick Start
-
-Use Python 3.13+.
 
 ```bash
 make install-dev
@@ -26,9 +33,7 @@ make services-up
 make test
 ```
 
-Configuration is loaded through `src.config.settings.load_settings()`. The loader reads defaults from `src/config/config_constant.py`, then `.env`, then process environment variables. Blank `.env` values are ignored and fall back to defaults.
-
-Start IBKR TWS or IB Gateway locally, then run the REST API:
+Start TWS or IB Gateway, confirm API access is enabled, then run the REST API:
 
 ```bash
 make run-api
@@ -40,56 +45,211 @@ Open:
 - Health check: http://localhost:8000/api/v1/system/health
 - QuestDB UI: http://localhost:9000
 
+## Configuration
+
+Configuration is centralized in `src/config/`.
+
+```text
+src/config/
+  config_constant.py   # Defaults, env names, Redis key templates, table names
+  config_loader.py     # Loads defaults, .env, process env, explicit overrides
+  settings.py          # Pydantic validation around ConfigLoader output
+```
+
+Use `load_settings()` everywhere:
+
+```python
+from src.config.settings import load_settings
+
+settings = load_settings()
+```
+
+Load order:
+
+```text
+config_constant defaults -> .env -> process environment -> explicit overrides
+```
+
+Blank `.env` values are ignored. For example, if `.env` contains `IBKR_HOST=`, the loader keeps `DEFAULT_IBKR_HOST` from `config_constant.py`.
+
+Core variables:
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `IBKR_HOST` | `127.0.0.1` | TWS or IB Gateway host |
+| `IBKR_PORT` | `7497` | IBKR API port, paper trading default |
+| `IBKR_CLIENT_ID` | `101` | IBKR client ID |
+| `IBKR_MARKET_DATA_LINES` | `100` | Market data entitlement baseline for pacing analysis |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis URL |
+| `QUESTDB_HOST` | `127.0.0.1` | QuestDB PostgreSQL wire host |
+| `QUESTDB_PORT` | `8812` | QuestDB PostgreSQL wire port |
+| `QUESTDB_USER` | `admin` | QuestDB user |
+| `QUESTDB_PASSWORD` | `quest` | QuestDB password |
+| `QUESTDB_DATABASE` | `qdb` | QuestDB database |
+| `INDEX_SYNC_INTERVAL_SECONDS` | `86400` | Default index reload interval |
+| `INDEX_COMPOSITION_PROVIDER` | empty | External index constituent provider name |
+| `IBKR_REST_APP_NAME` | `IBKRRestApp` | FastAPI title |
+| `IBKR_REST_CONNECT_ON_STARTUP` | `false` | Connect transports during API startup |
+| `IBKR_REST_MARKET_DATA_TTL_SECONDS` | `5` | REST market-data TTL cache default |
+| `IBKR_REST_MARKET_DATA_CACHE_MAXSIZE` | `512` | REST TTL cache max entries |
+
+## Local Commands
+
+```bash
+make install-dev
+make services-up
+make test
+make notebook
+make run
+make run-api
+make services-down
+```
+
+`make run` starts the Redis-backed scheduler worker. `make run-api` starts `IBKRRestApp`.
+
 ## Docker
+
+Build and run the API, Redis, and QuestDB:
 
 ```bash
 cp .env.example .env
 docker compose up -d --build ibkr-rest-app
 ```
 
-The API container uses `host.docker.internal` by default for `IBKR_HOST`, which works for TWS or IB Gateway running on the host machine through Docker Desktop.
-
-## Core Commands
+Useful commands:
 
 ```bash
-make test
-make notebook
-make run
-make run-api
+make docker-build
 make docker-up
+docker compose logs -f ibkr-rest-app
+docker compose down
 ```
 
-## REST API Surface
+The Compose API service defaults `IBKR_HOST` to `host.docker.internal`, which lets the container reach TWS or IB Gateway running on the host machine through Docker Desktop. Override `IBKR_HOST` if IB Gateway runs elsewhere.
+
+## REST API
+
+`IBKRRestApp` is a thin async HTTP bridge over the Pydantic DTOs in `src/feeds`. It keeps business logic in the feed/transport layer and exposes a clean API surface for notebooks, dashboards, services, and internal tools.
 
 Main route groups:
 
+- `/api/v1/system/*`: health and TTL cache controls
 - `/api/v1/market-data/*`: OHLCV, latest Redis bars, option analytics, bond yield history
-- `/api/v1/reference-data/*`: option chains, fundamentals, Wall Street Horizon events, news
-- `/api/v1/account/*`: account summary, live positions, portfolio, account PnL, position PnL
-- `/api/v1/system/*`: health and TTL cache management
+- `/api/v1/reference-data/*`: option chains, fundamentals, WSH events, news
+- `/api/v1/account/*`: account summary, live positions, portfolio, PnL snapshots
 
-The REST app is async and uses a short in-process TTL cache for pacing-sensitive market-data snapshots. Redis remains the distributed cache and scheduler/rate-limit state store.
+Common endpoints:
+
+```text
+GET  /api/v1/system/health
+GET  /api/v1/system/cache/market-data
+POST /api/v1/market-data/ohlcv
+GET  /api/v1/market-data/latest-bar
+POST /api/v1/market-data/options/analytics
+POST /api/v1/market-data/bonds/yields/history
+POST /api/v1/reference-data/options/chains
+POST /api/v1/reference-data/fundamentals
+GET  /api/v1/reference-data/news/providers
+GET  /api/v1/account/summary
+GET  /api/v1/account/positions
+GET  /api/v1/account/portfolio
+POST /api/v1/account/pnl/account
+POST /api/v1/account/pnl/position
+```
+
+Example OHLCV request:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/market-data/ohlcv \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request": {
+      "symbol": "SPY",
+      "asset_class": "equity",
+      "exchange": "SMART",
+      "currency": "USD",
+      "duration": "1 D",
+      "bar_size": "1 min",
+      "what_to_show": "TRADES",
+      "use_rth": true
+    },
+    "persist": false,
+    "cache_latest": true,
+    "use_ttl_cache": true
+  }'
+```
+
+The REST market-data cache is process-local and short-lived. It includes per-key single-flight protection so concurrent duplicate requests share one IBKR call. Redis remains the distributed cache for latest bars and scheduler/rate-limit state.
 
 ## Scheduler Jobs
 
-Operational scheduler JSON lives in `schedulejob/`.
+Redis scheduler jobs are JSON payloads stored under:
 
-Load the default G10 index reload job:
+```text
+SchedulerJob::<job_name>
+```
+
+Operational JSON files live in `schedulejob/`.
+
+Load the default G10 index composition reload job:
 
 ```bash
 redis-cli SET SchedulerJob::reload_g10_index_composition "$(cat schedulejob/reload_g10_index_composition.json)"
 ```
 
-Index composition providers are intentionally placeholder-only until a production constituent vendor is selected. IBKR does not expose current index constituents/weights through the TWS API.
+Then run the scheduler:
 
-## Project Notes
+```bash
+make run
+```
 
-Read [PROJECT_SETUP_ARCHITECTURE.md](PROJECT_SETUP_ARCHITECTURE.md) for the full architecture, IBKR pacing assumptions, Redis key formats, job JSON shape, Docker details, and quant caveats.
+The default G10 reload job is provider-neutral. IBKR does not expose index constituents or weights through the TWS API, so this job intentionally requires a real external constituent provider before production use.
 
-Important caveats:
+## Redis Keys
 
-- IBKR historical pacing is enforced in process and through Redis bookmarks.
-- Current index composition snapshots are not point-in-time historical constituents.
-- IBKR bond yield historical fields are documented for bonds, but yield history is only available for corporate bonds.
+Latest OHLCV bar:
+
+```text
+MarketData::<asset_class>::<bar_size>:latest
+```
+
+Index composition:
+
+```text
+GlobalIndex:<INDEX_SYMBOL>:composition
+```
+
+IBKR historical pacing bookmarks:
+
+```text
+IBKRRateLimit:historical:window
+IBKRRateLimit:historical:identical:<request_hash>
+IBKRRateLimit:historical:same_contract:<contract_hash>
+```
+
+## Verification
+
+```bash
+python3 -m pytest -q
+python3 -m compileall -q src tests
+python3 -m json.tool schedulejob/reload_g10_index_composition.json >/dev/null
+```
+
+Current expected test status:
+
+```text
+64 passed
+```
+
+## Important Quant And IBKR Caveats
+
+- IBKR historical pacing is enforced in-process and through Redis bookmarks.
+- Current index compositions are not point-in-time historical constituents.
+- IBKR bond yield historical fields are documented, but yield history is only available for corporate bonds.
 - CTD analytics require exchange/vendor delivery-basket data beyond the IBKR TWS API.
-- REST PnL endpoints use short-lived subscriptions; durable streaming PnL should run in a dedicated risk-engine process.
+- Full option chains should not be requested as market data in one shot. Discover the chain, filter contracts, then request selected analytics.
+- REST PnL endpoints use short-lived subscriptions; durable streaming PnL should live in a dedicated risk-engine process.
+
+## More Detail
+
+Read [PROJECT_SETUP_ARCHITECTURE.md](PROJECT_SETUP_ARCHITECTURE.md) for the full architecture, IBKR pacing notes, job JSON schema, Docker setup, and implementation caveats.
