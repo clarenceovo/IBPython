@@ -192,8 +192,13 @@ Router split:
 - `GET /api/v1/system/cache/market-data`
 - `DELETE /api/v1/system/cache/market-data`
 - `POST /api/v1/market-data/ohlcv`
+- `POST /api/v1/market-data/ohlcv/equity`
+- `POST /api/v1/market-data/ohlcv/futures`
+- `POST /api/v1/market-data/ohlcv/fx`
+- `POST /api/v1/market-data/ohlcv/bond`
 - `GET /api/v1/market-data/latest-bar`
 - `POST /api/v1/market-data/options/analytics`
+- `POST /api/v1/market-data/options/skew`
 - `POST /api/v1/market-data/bonds/yields/history`
 - `POST /api/v1/reference-data/options/chains`
 - `POST /api/v1/reference-data/fundamentals`
@@ -232,19 +237,50 @@ curl -X POST http://localhost:8000/api/v1/market-data/ohlcv \
   }'
 ```
 
+The generic endpoint accepts a full `OHLCVRequest`. The asset-specific wrappers are for minimal payloads that preset `asset_class` and common IBKR routing defaults:
+
+| Endpoint | Minimal payload | Presets |
+|---|---|---|
+| `POST /api/v1/market-data/ohlcv/equity` | `{"symbol":"SPY"}` | `asset_class=equity`, `exchange=SMART`, `currency=USD`, `what_to_show=TRADES` |
+| `POST /api/v1/market-data/ohlcv/fx` | `{"symbol":"EURUSD"}` | `asset_class=fx`, `exchange=IDEALPRO`, `currency=USD`, `what_to_show=MIDPOINT`, `use_rth=false` |
+| `POST /api/v1/market-data/ohlcv/futures` | `{"symbol":"ES","last_trade_date_or_contract_month":"202606"}` | `asset_class=future`, `exchange=CME`, `currency=USD`, `what_to_show=TRADES` |
+| `POST /api/v1/market-data/ohlcv/bond` | `{"sec_id_type":"CUSIP","sec_id":"91282CJN2"}` | `asset_class=bond`, `exchange=SMART`, `currency=USD`, `what_to_show=TRADES` |
+
+Wrappers also accept optional loader/cache controls: `duration`, `bar_size`, `end_datetime`, `what_to_show`, `use_rth`, `persist`, `cache_latest`, `use_ttl_cache`, `cache_ttl_seconds`, and `metadata`.
+
+Latest-bar query parameters:
+
+| Parameter | Required | Notes |
+|---|---:|---|
+| `asset_class` | yes | Must be one of the `AssetClass` enum values, for example `equity`, `fx`, `future`, `bond`, `index`, `crypto`, or `option`. |
+| `bar_size` | yes | Must match the OHLCV load `bar_size`, for example `1 min`; URL-encode spaces as `%20`. |
+| `symbol` | no | Use this for symbol-scoped cache reads. If omitted, the endpoint reads the legacy asset-class latest key. |
+
+Example:
+
+```bash
+curl "http://localhost:8000/api/v1/market-data/latest-bar?asset_class=equity&bar_size=1%20min&symbol=SPY"
+```
+
+This endpoint reads Redis only. It does not call IBKR or QuestDB. A missing cache entry returns JSON `null` with HTTP 200.
+
 ## Redis Keys
 
 Latest OHLCV bar:
 
 ```text
+MarketData::<asset_class>::<SYMBOL>::<bar_size>:latest
 MarketData::<asset_class>::<bar_size>:latest
 ```
 
 Example:
 
 ```text
+MarketData::equity::SPY::1_min:latest
 MarketData::equity::1_min:latest
 ```
+
+The symbol-scoped key is the primary production key. The asset-class-only key is retained as a legacy pointer to the most recently cached bar for that asset-class/bar-size bucket.
 
 Index composition:
 
@@ -375,7 +411,25 @@ The target may be a provider instance, provider class, or zero-argument factory 
 
 IBKR can qualify index contracts with `secType="IND"` and can load market/historical data for subscribed index instruments. IBKR also exposes option-chain metadata through `reqSecDefOptParams`, which is the preferred method for discovering stock and index option expirations, strikes, trading classes, multipliers, and exchanges after resolving the underlying `conId`.
 
-This project implements `IBKRFeedClient.load_option_chains(...)` for equity and index underlyings. It deliberately does not use broad `reqContractDetails` sweeps for chains because IBKR documents `reqSecDefOptParams` as the option-chain endpoint and notes that broad option-chain contract-detail requests can be throttled and slow.
+This project implements `IBKRFeedClient.load_option_chains(...)` for equity and index underlyings. It uses `qualifyContractsAsync` first, falls back to a narrow underlying `reqContractDetailsAsync` lookup when qualification is empty, and then calls `reqSecDefOptParams`. It deliberately does not use broad option `reqContractDetails` sweeps for chains because IBKR documents `reqSecDefOptParams` as the option-chain endpoint and notes that broad option-chain contract-detail requests can be throttled and slow.
+
+For SMART-routed US equities, pass the primary listing exchange to remove ambiguity. Example TSLA payload:
+
+```json
+{
+  "request": {
+    "symbol": "TSLA",
+    "asset_class": "equity",
+    "exchange": "SMART",
+    "currency": "USD",
+    "primary_exchange": "NASDAQ"
+  },
+  "use_ttl_cache": true,
+  "cache_ttl_seconds": 300
+}
+```
+
+If the app already knows the IBKR underlying `conId`, `underlying_con_id` can be supplied to skip the underlying qualification call entirely.
 
 ## IBKR Options Analytics
 
@@ -385,6 +439,8 @@ Options analytics are represented in `src/feeds/options.py`:
 - `OptionAnalyticsRequest`: snapshot request using IBKR generic ticks `100`, `101`, `104`, `105`, and `106`.
 - `OptionGreekSet`: bid, ask, last, or model Greek payload.
 - `OptionAnalyticsSnapshot`: delta, gamma, theta, vega, implied volatility, historical volatility, open interest, and option volume.
+- `OptionSkewSurfaceRequest`: bounded per-maturity skew scan seeded from the option-chain endpoint.
+- `OptionMaturitySkew`: one expiry's put-minus-call IV skew plus the largest call/put open-interest strikes.
 
 IBKR exposes option Greeks through option computation market data fields such as `bidGreeks`, `askGreeks`, `lastGreeks`, and `modelGreeks` in `ib_insync`. Option volume/open-interest style values require generic ticks. The project default asks for:
 
@@ -398,10 +454,13 @@ IBKR exposes option Greeks through option computation market data fields such as
 
 Do not request a full option chain as market data in one shot. Use `load_option_chains(...)` to discover expiries/strikes/trading classes, filter to the slice you need, then call `load_option_analytics(...)` only for selected contracts.
 
-REST endpoint:
+The skew endpoint follows that same discipline. It samples a bounded strike window around spot, requests call/put snapshots for those strikes, selects the nearest target-delta call and put for each expiry, and reports `skew_put_minus_call_iv = put IV - call IV`. If Greeks are missing, it falls back to a symmetric moneyness selection. Each strike/right pair is a market-data snapshot, so increase `max_expirations` and `max_strikes_per_expiry` carefully.
+
+REST endpoints:
 
 ```text
 POST /api/v1/market-data/options/analytics
+POST /api/v1/market-data/options/skew
 ```
 
 ## IBKR Fundamental And Economic Data

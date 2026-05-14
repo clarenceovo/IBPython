@@ -111,6 +111,13 @@ class OHLCVRequest(BaseModel):
     what_to_show: str = Field(default="TRADES", min_length=1)
     use_rth: bool = True
     source: str = Field(default="ibkr", min_length=1)
+    primary_exchange: str | None = None
+    last_trade_date_or_contract_month: str | None = None
+    multiplier: str | None = None
+    local_symbol: str | None = None
+    sec_id_type: str | None = None
+    sec_id: str | None = None
+    con_id: int | None = Field(default=None, gt=0)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("symbol", "exchange", "currency", mode="before")
@@ -142,3 +149,29 @@ class OHLCVRequest(BaseModel):
         if not normalized:
             raise ValueError("value cannot be empty")
         return normalized
+
+    @field_validator(
+        "primary_exchange",
+        "last_trade_date_or_contract_month",
+        "multiplier",
+        "local_symbol",
+        "sec_id_type",
+        "sec_id",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_text(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized.upper() or None
+
+    @model_validator(mode="after")
+    def validate_contract_identifiers(self) -> Self:
+        if self.asset_class is AssetClass.FUTURE and not (
+            self.last_trade_date_or_contract_month or self.local_symbol or self.con_id
+        ):
+            raise ValueError("future OHLCV requests require last_trade_date_or_contract_month, local_symbol, or con_id")
+        if self.asset_class is AssetClass.BOND and not (self.symbol or self.sec_id or self.con_id):
+            raise ValueError("bond OHLCV requests require symbol, sec_id, or con_id")
+        return self

@@ -50,7 +50,12 @@ from src.feeds.options import (
     OptionContractSpec,
     OptionGreekSource,
     OptionGreekSet,
+    OptionMaturitySkew,
     OptionRight,
+    OptionSkewPoint,
+    OptionSkewSelectionMethod,
+    OptionSkewSurfaceRequest,
+    OptionSkewSurfaceResponse,
 )
 
 __all__ = [
@@ -80,7 +85,12 @@ __all__ = [
     "OptionContractSpec",
     "OptionGreekSource",
     "OptionGreekSet",
+    "OptionMaturitySkew",
     "OptionRight",
+    "OptionSkewPoint",
+    "OptionSkewSelectionMethod",
+    "OptionSkewSurfaceRequest",
+    "OptionSkewSurfaceResponse",
     "PortfolioItemDTO",
     "PositionPnLDTO",
     "SovereignBondMarket",

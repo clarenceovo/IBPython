@@ -27,8 +27,10 @@ class ContractSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_asset_specific_fields(self) -> "ContractSpec":
-        if self.asset_class is AssetClass.FUTURE and not self.last_trade_date_or_contract_month:
-            raise ValueError("futures require last_trade_date_or_contract_month")
+        if self.asset_class is AssetClass.FUTURE and not (
+            self.last_trade_date_or_contract_month or self.local_symbol or self.con_id
+        ):
+            raise ValueError("futures require last_trade_date_or_contract_month, local_symbol, or con_id")
         if self.asset_class is AssetClass.FX and len(self.symbol) not in {3, 6}:
             raise ValueError("fx symbols must be a base currency or a six-character pair")
         return self
@@ -40,6 +42,13 @@ class ContractSpec(BaseModel):
             asset_class=request.asset_class,
             exchange=request.exchange,
             currency=request.currency,
+            primary_exchange=request.primary_exchange,
+            last_trade_date_or_contract_month=request.last_trade_date_or_contract_month,
+            multiplier=request.multiplier,
+            local_symbol=request.local_symbol,
+            sec_id_type=request.sec_id_type,
+            sec_id=request.sec_id,
+            con_id=request.con_id,
             metadata=request.metadata,
         )
 
@@ -49,11 +58,23 @@ class OptionChainRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1)
-    asset_class: AssetClass
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
-    primary_exchange: str | None = None
+    symbol: str = Field(min_length=1, examples=["TSLA"])
+    asset_class: AssetClass = Field(
+        description="Underlying asset class. Use equity for stocks such as TSLA and index for index underlyings such as SPX.",
+        examples=[AssetClass.EQUITY],
+    )
+    exchange: str = Field(default="SMART", min_length=1, examples=["SMART"])
+    currency: str = Field(default="USD", min_length=1, examples=["USD"])
+    primary_exchange: str | None = Field(
+        default=None,
+        description="Primary listing exchange for SMART-routed equities. For TSLA, AAPL, MSFT, and many US growth stocks use NASDAQ.",
+        examples=["NASDAQ"],
+    )
+    underlying_con_id: int | None = Field(
+        default=None,
+        gt=0,
+        description="Optional IBKR underlying conId. When provided, the option-chain request skips underlying qualification.",
+    )
 
     @field_validator("symbol", "exchange", "currency", mode="before")
     @classmethod
@@ -75,6 +96,7 @@ class OptionChainRequest(BaseModel):
             exchange=self.exchange,
             currency=self.currency,
             primary_exchange=self.primary_exchange,
+            con_id=self.underlying_con_id,
         )
 
 
@@ -140,8 +162,9 @@ def ibkr_contract_kwargs(spec: ContractSpec) -> dict[str, Any]:
             "symbol": symbol,
             "exchange": exchange,
             "currency": currency,
-            "lastTradeDateOrContractMonth": spec.last_trade_date_or_contract_month,
         }
+        if spec.last_trade_date_or_contract_month:
+            kwargs["lastTradeDateOrContractMonth"] = spec.last_trade_date_or_contract_month
         if spec.multiplier:
             kwargs["multiplier"] = spec.multiplier
         if spec.local_symbol:

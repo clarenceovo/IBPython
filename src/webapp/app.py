@@ -45,7 +45,7 @@ def create_app(
             "# IBKR REST API\n\n"
             "Async FastAPI bridge for Interactive Brokers TWS/Gateway.\n\n"
             "## Modules\n"
-            "- **Market Data** — OHLCV bars, option analytics, bond yields, latest bars\n"
+            "- **Market Data** — OHLCV bars, option analytics/skew, bond yields, latest bars\n"
             "- **Reference Data** — Option chains, fundamentals, WSH events, news\n"
             "- **Account** — Positions, portfolio, P&L snapshots\n"
             "- **System** — Health check, cache management\n\n"
@@ -61,7 +61,7 @@ def create_app(
         ],
         openapi_tags=[
             {"name": "system", "description": "Health checks and cache management"},
-            {"name": "market-data", "description": "OHLCV bars, option analytics, bond yields, and latest bar queries"},
+            {"name": "market-data", "description": "OHLCV bars, option analytics/skew, bond yields, and latest bar queries"},
             {"name": "reference-data", "description": "Option chains, fundamental data, Wall Street Horizon events, and news"},
             {"name": "account", "description": "Account summary, positions, portfolio items, and P&L snapshots"},
         ],

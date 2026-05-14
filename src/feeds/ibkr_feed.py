@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time as monotonic_time
 from collections import defaultdict, deque
 from collections.abc import Sequence
@@ -50,13 +51,21 @@ from src.feeds.news import (
 from src.feeds.options import (
     OptionAnalyticsRequest,
     OptionAnalyticsSnapshot,
+    OptionSkewSurfaceRequest,
+    OptionSkewSurfaceResponse,
     build_ibkr_option_contract,
+    build_skew_option_contracts,
+    calculate_maturity_skew,
     normalize_option_analytics_from_ticker,
+    select_option_chain,
+    select_skew_expirations,
+    select_skew_strikes,
 )
 
 logger = logging.getLogger(__name__)
 
 DETECTION_TIMEOUT = 180  # seconds before IBKR reports idle timeout
+US_EQUITY_PRIMARY_EXCHANGE_PREFERENCE: tuple[str, ...] = ("NASDAQ", "NYSE", "ARCA", "AMEX", "BATS")
 
 
 def _ib_insync_compatible_loop() -> asyncio.AbstractEventLoop:
@@ -130,6 +139,99 @@ def _last_ibkr_error_message(value: tuple[int, str] | None) -> str:
     if code == 326:
         hint = " Hint: choose a unique IBKR_CLIENT_ID for the API; notebooks and TWS API clients cannot share one."
     return f"last_ibkr_error={code}: {message}.{hint}"
+
+
+def _contract_text(contract: Any, *attribute_names: str) -> str:
+    for attribute_name in attribute_names:
+        value = getattr(contract, attribute_name, None)
+        if value is not None and str(value).strip():
+            return str(value).strip().upper()
+    return ""
+
+
+def _contract_int(contract: Any, attribute_name: str) -> int | None:
+    value = getattr(contract, attribute_name, None)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _contract_details_contract(detail: Any) -> Any:
+    return getattr(detail, "contract", detail)
+
+
+def _is_contract_details_candidate(contract: Any, requested_contract: Any) -> bool:
+    for attribute_name in ("secType", "symbol", "currency"):
+        expected = _contract_text(requested_contract, attribute_name)
+        actual = _contract_text(contract, attribute_name)
+        if expected and actual and expected != actual:
+            return False
+    return True
+
+
+def _contract_detail_score(contract: Any, spec: ContractSpec, requested_contract: Any) -> int:
+    score = 0
+    requested_exchange = _contract_text(requested_contract, "exchange")
+    contract_exchange = _contract_text(contract, "exchange")
+    primary_exchange = _contract_text(contract, "primaryExchange", "primaryExch")
+    con_id = _contract_int(contract, "conId")
+
+    if spec.con_id and con_id == spec.con_id:
+        score += 10_000
+    if _contract_text(contract, "symbol") == _contract_text(requested_contract, "symbol"):
+        score += 100
+    if _contract_text(contract, "secType") == _contract_text(requested_contract, "secType"):
+        score += 80
+    if _contract_text(contract, "currency") == _contract_text(requested_contract, "currency"):
+        score += 60
+
+    if spec.primary_exchange:
+        target_primary = spec.primary_exchange.upper()
+        if primary_exchange == target_primary:
+            score += 500
+        if contract_exchange == target_primary:
+            score += 200
+    elif spec.asset_class is AssetClass.EQUITY and primary_exchange in US_EQUITY_PRIMARY_EXCHANGE_PREFERENCE:
+        score += 100 - US_EQUITY_PRIMARY_EXCHANGE_PREFERENCE.index(primary_exchange)
+
+    if requested_exchange and requested_exchange != "SMART":
+        if contract_exchange == requested_exchange:
+            score += 300
+        if primary_exchange == requested_exchange:
+            score += 150
+    elif requested_exchange == "SMART" and contract_exchange == "SMART":
+        score += 20
+
+    if con_id:
+        score += 5
+    return score
+
+
+def _select_contract_from_details(details: Sequence[Any], spec: ContractSpec, requested_contract: Any) -> Any | None:
+    if not details:
+        return None
+    candidates = [
+        _contract_details_contract(detail)
+        for detail in details
+        if _is_contract_details_candidate(_contract_details_contract(detail), requested_contract)
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda contract: _contract_detail_score(contract, spec, requested_contract))
+
+
+def _qualification_hint(spec: ContractSpec) -> str:
+    if spec.con_id:
+        return f" Check that con_id={spec.con_id} is valid for {spec.symbol}."
+    if spec.asset_class is AssetClass.EQUITY and spec.exchange.upper() == "SMART":
+        if spec.symbol.upper() == "TSLA":
+            return " Add primary_exchange='NASDAQ' for TSLA or pass underlying_con_id if you already know the IBKR conId."
+        return " Add primary_exchange for SMART-routed equities, or pass underlying_con_id when available."
+    if spec.asset_class is AssetClass.INDEX:
+        return " Confirm the index exchange, for example CBOE for SPX."
+    return " Confirm symbol, asset_class, exchange, currency, and contract-specific identifiers."
 
 
 class IBKRFeedClient:
@@ -297,17 +399,68 @@ class IBKRFeedClient:
 
     async def qualify_contract(self, spec: ContractSpec) -> Any:
         await self._ensure_connected()
-        logger.info("qualify_contract: symbol=%s asset_class=%s exchange=%s", spec.symbol, spec.asset_class, spec.exchange)
+        logger.info(
+            "qualify_contract: symbol=%s asset_class=%s exchange=%s primary_exchange=%s con_id=%s",
+            spec.symbol,
+            spec.asset_class,
+            spec.exchange,
+            spec.primary_exchange,
+            spec.con_id,
+        )
         t0 = monotonic_time.monotonic()
         contract = build_ibkr_contract(spec)
         qualified = await self._with_retry(
             lambda: self._ib.qualifyContractsAsync(contract),
             operation=f"qualify_contract:{spec.symbol}",
         )
-        logger.debug("qualify_contract completed in %.2fs for %s", monotonic_time.monotonic() - t0, spec.symbol)
-        if not qualified:
-            raise RuntimeError(f"IBKR could not qualify contract for {spec.symbol}")
-        return qualified[0]
+        if qualified:
+            selected = qualified[0]
+            logger.debug(
+                "qualify_contract completed in %.2fs for %s con_id=%s primary_exchange=%s",
+                monotonic_time.monotonic() - t0,
+                spec.symbol,
+                _contract_int(selected, "conId"),
+                _contract_text(selected, "primaryExchange", "primaryExch"),
+            )
+            return selected
+
+        logger.warning(
+            "qualifyContractsAsync returned no contract for %s; requesting contract details fallback",
+            spec.symbol,
+        )
+        try:
+            selected = await self._resolve_contract_from_details(contract, spec)
+        except Exception as exc:
+            raise RuntimeError(
+                f"IBKR could not qualify contract for {spec.symbol}.{_qualification_hint(spec)} "
+                f"contract_details_root_cause={_root_cause_message(exc)}"
+            ) from exc
+        if selected is None:
+            raise RuntimeError(f"IBKR could not qualify contract for {spec.symbol}.{_qualification_hint(spec)}")
+        logger.info(
+            "qualify_contract fallback selected %s con_id=%s exchange=%s primary_exchange=%s in %.2fs",
+            spec.symbol,
+            _contract_int(selected, "conId"),
+            _contract_text(selected, "exchange"),
+            _contract_text(selected, "primaryExchange", "primaryExch"),
+            monotonic_time.monotonic() - t0,
+        )
+        return selected
+
+    async def _resolve_contract_from_details(self, contract: Any, spec: ContractSpec) -> Any | None:
+        details = await self._with_retry(
+            lambda: self._ib.reqContractDetailsAsync(contract),
+            operation=f"contract_details:{spec.symbol}",
+        )
+        selected = _select_contract_from_details(details, spec, contract)
+        if (
+            selected is not None
+            and spec.asset_class is AssetClass.EQUITY
+            and spec.exchange.upper() == "SMART"
+            and _contract_text(selected, "exchange")
+        ):
+            setattr(selected, "exchange", "SMART")
+        return selected
 
     async def load_historical_ohlcv(self, request: OHLCVRequest) -> list[OHLCVBar]:
         await self._ensure_connected()
@@ -341,10 +494,24 @@ class IBKRFeedClient:
         """Load option chain metadata for stock or index underlyings via reqSecDefOptParams."""
 
         await self._ensure_connected()
-        logger.info("load_option_chains: symbol=%s asset_class=%s", request.symbol, request.asset_class)
+        logger.info(
+            "load_option_chains: symbol=%s asset_class=%s exchange=%s primary_exchange=%s underlying_con_id=%s",
+            request.symbol,
+            request.asset_class,
+            request.exchange,
+            request.primary_exchange,
+            request.underlying_con_id,
+        )
         t0 = monotonic_time.monotonic()
-        underlying_contract = await self.qualify_contract(request.to_contract_spec())
-        underlying_con_id = int(getattr(underlying_contract, "conId"))
+        if request.underlying_con_id:
+            underlying_con_id = request.underlying_con_id
+            logger.info("load_option_chains: using provided underlying_con_id=%s for %s", underlying_con_id, request.symbol)
+        else:
+            underlying_contract = await self.qualify_contract(request.to_contract_spec())
+            resolved_con_id = _contract_int(underlying_contract, "conId")
+            if resolved_con_id is None:
+                raise RuntimeError(f"IBKR qualified {request.symbol} but did not return an underlying conId")
+            underlying_con_id = resolved_con_id
         chains = await self._with_retry(
             lambda: self._ib.reqSecDefOptParamsAsync(
                 request.symbol,
@@ -388,6 +555,146 @@ class IBKRFeedClient:
                 self._ib.cancelMktData(contract)
             except Exception:
                 logger.debug("Failed to cancel market data subscription for %s", request.contract.underlying_symbol, exc_info=True)
+
+    async def load_option_skew_surface(self, request: OptionSkewSurfaceRequest) -> OptionSkewSurfaceResponse:
+        """Load bounded per-maturity option skew and open-interest summaries."""
+
+        await self._ensure_connected()
+        logger.info(
+            "load_option_skew_surface: symbol=%s max_expirations=%d max_strikes_per_expiry=%d",
+            request.chain_request.symbol,
+            request.max_expirations,
+            request.max_strikes_per_expiry,
+        )
+        t0 = monotonic_time.monotonic()
+        chains = await self.load_option_chains(request.chain_request)
+        chain = select_option_chain(chains, request)
+        spot_price = request.spot_price
+        if spot_price is None:
+            spot_price = await self._load_underlying_snapshot_price(
+                request.chain_request,
+                wait_seconds=request.snapshot_wait_seconds,
+            )
+        expirations = select_skew_expirations(chain, request)
+        if not expirations:
+            raise RuntimeError(f"IBKR returned no matching expirations for {request.chain_request.symbol}")
+
+        semaphore = asyncio.Semaphore(request.max_concurrent_requests)
+        maturities = []
+        for expiry in expirations:
+            strikes = select_skew_strikes(
+                chain.strikes,
+                spot_price=spot_price,
+                window_pct=request.strike_window_pct,
+                max_count=request.max_strikes_per_expiry,
+            )
+            contracts = build_skew_option_contracts(
+                chain=chain,
+                request=request,
+                expiry=expiry,
+                strikes=strikes,
+            )
+            snapshots, warnings = await self._load_skew_contract_snapshots(
+                contracts,
+                generic_ticks=request.generic_ticks,
+                snapshot_wait_seconds=request.snapshot_wait_seconds,
+                regulatory_snapshot=request.regulatory_snapshot,
+                semaphore=semaphore,
+            )
+            maturities.append(
+                calculate_maturity_skew(
+                    underlying_symbol=request.chain_request.symbol,
+                    expiry=expiry,
+                    spot_price=spot_price,
+                    target_abs_delta=request.target_abs_delta,
+                    fallback_moneyness_pct=request.fallback_moneyness_pct,
+                    snapshots=snapshots,
+                    warnings=tuple(warnings),
+                )
+            )
+
+        logger.info(
+            "load_option_skew_surface: %d maturities for %s in %.2fs",
+            len(maturities),
+            request.chain_request.symbol,
+            monotonic_time.monotonic() - t0,
+        )
+        return OptionSkewSurfaceResponse(
+            underlying_symbol=request.chain_request.symbol,
+            underlying_con_id=chain.underlying_con_id,
+            underlying_asset_class=request.chain_request.asset_class.value,
+            chain_exchange=chain.exchange,
+            trading_class=chain.trading_class,
+            multiplier=chain.multiplier,
+            spot_price=spot_price,
+            maturities=tuple(maturities),
+            metadata={
+                "strike_window_pct": request.strike_window_pct,
+                "max_strikes_per_expiry": request.max_strikes_per_expiry,
+                "target_abs_delta": request.target_abs_delta,
+                "sampled_expirations": expirations,
+            },
+        )
+
+    async def _load_skew_contract_snapshots(
+        self,
+        contracts: Sequence[Any],
+        *,
+        generic_ticks: tuple[str, ...],
+        snapshot_wait_seconds: float,
+        regulatory_snapshot: bool,
+        semaphore: asyncio.Semaphore,
+    ) -> tuple[list[OptionAnalyticsSnapshot], list[str]]:
+        async def load_one(contract: Any) -> OptionAnalyticsSnapshot:
+            async with semaphore:
+                return await self.load_option_analytics(
+                    OptionAnalyticsRequest(
+                        contract=contract,
+                        generic_ticks=generic_ticks,
+                        snapshot_wait_seconds=snapshot_wait_seconds,
+                        regulatory_snapshot=regulatory_snapshot,
+                    )
+                )
+
+        results = await asyncio.gather(*(load_one(contract) for contract in contracts), return_exceptions=True)
+        snapshots: list[OptionAnalyticsSnapshot] = []
+        warnings: list[str] = []
+        for contract, result in zip(contracts, results, strict=True):
+            if isinstance(result, Exception):
+                warnings.append(f"{contract.expiry}:{contract.right.value}:{contract.strike}: {_root_cause_message(result)}")
+            else:
+                snapshots.append(result)
+        return snapshots, warnings
+
+    async def _load_underlying_snapshot_price(
+        self,
+        request: OptionChainRequest,
+        *,
+        wait_seconds: float,
+    ) -> float:
+        spec = request.to_contract_spec()
+        contract = build_ibkr_contract(spec) if request.underlying_con_id else await self.qualify_contract(spec)
+        ticker = self._ib.reqMktData(
+            contract,
+            genericTickList="",
+            snapshot=True,
+            regulatorySnapshot=False,
+            mktDataOptions=[],
+        )
+        try:
+            await asyncio.sleep(wait_seconds)
+            price = _ticker_snapshot_price(ticker)
+            if price is None:
+                raise RuntimeError(
+                    f"IBKR did not return a finite underlying snapshot price for {request.symbol}; "
+                    "pass spot_price in the option skew request"
+                )
+            return price
+        finally:
+            try:
+                self._ib.cancelMktData(contract)
+            except Exception:
+                logger.debug("Failed to cancel underlying snapshot market data for %s", request.symbol, exc_info=True)
 
     async def load_bond_yield_history(self, request: BondYieldHistoryRequest) -> list[BondYieldBar]:
         """Load historical bond yield bars for bid, ask, and/or last yield fields."""
@@ -842,6 +1149,35 @@ def normalize_ibkr_option_chains(
             )
         )
     return normalized
+
+
+def _ticker_snapshot_price(ticker: Any) -> float | None:
+    market_price = getattr(ticker, "marketPrice", None)
+    if callable(market_price):
+        value = _finite_positive(market_price())
+        if value is not None:
+            return value
+
+    bid = _finite_positive(getattr(ticker, "bid", None))
+    ask = _finite_positive(getattr(ticker, "ask", None))
+    if bid is not None and ask is not None:
+        return (bid + ask) / 2
+
+    for attribute_name in ("last", "close", "markPrice"):
+        value = _finite_positive(getattr(ticker, attribute_name, None))
+        if value is not None:
+            return value
+    return None
+
+
+def _finite_positive(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed) or parsed <= 0:
+        return None
+    return parsed
 
 
 def _format_ibkr_end_datetime(value: datetime | None) -> str:

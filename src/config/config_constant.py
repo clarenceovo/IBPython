@@ -68,6 +68,7 @@ IBKR_CONSERVATIVE_HISTORICAL_CONCURRENCY = 8
 
 MARKET_OHLCV_TABLE = "market_ohlcv"
 REDIS_LATEST_BAR_KEY_TEMPLATE = "MarketData::{asset_class}::{bar_size}:latest"
+REDIS_SYMBOL_LATEST_BAR_KEY_TEMPLATE = "MarketData::{asset_class}::{symbol}::{bar_size}:latest"
 REDIS_INDEX_COMPOSITION_KEY_TEMPLATE = "GlobalIndex:{index_symbol}:composition"
 REDIS_SCHEDULER_JOB_KEY_TEMPLATE = "SchedulerJob::{job_name}"
 REDIS_SCHEDULER_JOB_SCAN_PATTERN = "SchedulerJob::*"

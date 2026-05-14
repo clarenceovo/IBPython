@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from typing import Annotated
+
+from fastapi import APIRouter, Body, Depends
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.feeds.contracts import OptionChain, OptionChainRequest
@@ -24,6 +26,55 @@ from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 router = APIRouter(prefix="/reference-data", tags=["reference-data"])
 
 
+OPTION_CHAIN_REQUEST_EXAMPLES = {
+    "tsla_equity_smart": {
+        "summary": "TSLA equity option chain",
+        "description": "SMART-routed US equities should include primary_exchange to remove IBKR contract ambiguity.",
+        "value": {
+            "request": {
+                "symbol": "TSLA",
+                "asset_class": "equity",
+                "exchange": "SMART",
+                "currency": "USD",
+                "primary_exchange": "NASDAQ",
+            },
+            "use_ttl_cache": True,
+            "cache_ttl_seconds": 300,
+        },
+    },
+    "spx_index_cboe": {
+        "summary": "SPX index option chain",
+        "description": "Index option chains use asset_class=index and the exchange where the index option complex is listed.",
+        "value": {
+            "request": {
+                "symbol": "SPX",
+                "asset_class": "index",
+                "exchange": "CBOE",
+                "currency": "USD",
+            },
+            "use_ttl_cache": True,
+            "cache_ttl_seconds": 300,
+        },
+    },
+    "known_underlying_con_id": {
+        "summary": "Known underlying conId",
+        "description": "If you already know the IBKR underlying conId, pass it to skip underlying qualification. Verify conIds with your own IBKR session before relying on them operationally.",
+        "value": {
+            "request": {
+                "symbol": "TSLA",
+                "asset_class": "equity",
+                "exchange": "SMART",
+                "currency": "USD",
+                "primary_exchange": "NASDAQ",
+                "underlying_con_id": 76792991,
+            },
+            "use_ttl_cache": True,
+            "cache_ttl_seconds": 300,
+        },
+    },
+}
+
+
 class CachedOptionChainRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -34,7 +85,7 @@ class CachedOptionChainRequest(BaseModel):
 
 @router.post("/options/chains", response_model=list[OptionChain])
 async def load_option_chains(
-    payload: CachedOptionChainRequest,
+    payload: Annotated[CachedOptionChainRequest, Body(openapi_examples=OPTION_CHAIN_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[OptionChain]:
     async def load() -> list[OptionChain]:

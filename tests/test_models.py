@@ -72,3 +72,25 @@ def test_ohlcv_request_normalizes_end_datetime() -> None:
 
     assert request.symbol == "AAPL"
     assert request.end_datetime == datetime(2026, 1, 2, 21, 0, tzinfo=timezone.utc)
+
+
+def test_ohlcv_request_accepts_contract_disambiguators() -> None:
+    request = OHLCVRequest(
+        symbol="es",
+        asset_class="future",
+        exchange="cme",
+        currency="usd",
+        last_trade_date_or_contract_month="202606",
+        multiplier="50",
+        local_symbol="esm6",
+    )
+
+    assert request.symbol == "ES"
+    assert request.exchange == "CME"
+    assert request.last_trade_date_or_contract_month == "202606"
+    assert request.local_symbol == "ESM6"
+
+
+def test_future_ohlcv_request_requires_contract_identifier() -> None:
+    with pytest.raises(ValidationError):
+        OHLCVRequest(symbol="ES", asset_class="future", exchange="CME", currency="USD")
