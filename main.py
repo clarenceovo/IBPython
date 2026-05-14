@@ -100,24 +100,38 @@ async def main() -> None:
 
     _install_signal_handlers(scheduler)
 
-    async with redis:
-        logger.info("connected Redis transport")
-        jobs = await scheduler.load_jobs_from_redis(redis)
-        if not jobs:
-            logger.warning("no runnable Redis scheduler jobs found. Add keys like SchedulerJob::snapshot_spy_1m.")
-            return
-
-        needs_ibkr = _jobs_require_ibkr(jobs)
-        needs_questdb = _jobs_require_questdb(jobs)
-        logger.info(
-            "scheduler dependency plan: jobs=%d needs_ibkr=%s needs_questdb=%s job_types=%s",
-            len(jobs),
-            needs_ibkr,
-            needs_questdb,
-            ",".join(sorted({job.job_type for job in jobs})),
-        )
-
+    try:
         async with AsyncExitStack() as stack:
+            await stack.enter_async_context(redis)
+            logger.info("connected Redis transport")
+
+            try:
+                jobs = await scheduler.load_jobs_from_redis(redis)
+            except Exception:
+                logger.exception("failed to load scheduler jobs from Redis")
+                return
+
+            if not jobs:
+                logger.warning("no runnable Redis scheduler jobs found. Add keys like SchedulerJob::snapshot_spy_1m.")
+                return
+
+            needs_ibkr = _jobs_require_ibkr(jobs)
+            needs_questdb = _jobs_require_questdb(jobs)
+            logger.info(
+                "scheduler dependency plan: jobs=%d needs_ibkr=%s needs_questdb=%s job_types=%s",
+                len(jobs),
+                needs_ibkr,
+                needs_questdb,
+                ",".join(sorted({job.job_type for job in jobs})),
+            )
+
+            unknown_types = {job.job_type for job in jobs} - {"market_snapshot", "index_composition_reload"}
+            if unknown_types:
+                logger.warning(
+                    "unknown job types detected that may not receive IBKR/QuestDB connections: %s",
+                    ",".join(sorted(unknown_types)),
+                )
+
             if needs_questdb:
                 await stack.enter_async_context(questdb)
                 logger.info("connected QuestDB transport")
@@ -135,6 +149,9 @@ async def main() -> None:
             logger.info("scheduler entering run loop")
             await scheduler.run_forever()
             logger.info("scheduler run loop exited")
+    except Exception:
+        logger.exception("fatal error in scheduler main loop")
+        raise
 
 
 def _load_provider_from_import_path(import_path: str) -> IndexCompositionProvider:

@@ -78,6 +78,8 @@ class IBKRFeedClient:
         self._ib: Any | None = None
         self._pacing_guard = pacing_guard or IBKRHistoricalPacingGuard()
         self._wsh_metadata_loaded = False
+        self._shutting_down = False
+        self._reconnect_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         if self._ib is not None and self._ib.isConnected():
@@ -122,6 +124,9 @@ class IBKRFeedClient:
 
     def _on_ibkr_disconnected(self, *_: object) -> None:
         """Handle IB disconnection events with automatic reconnection."""
+        if self._shutting_down:
+            logger.info("IBKR disconnected during shutdown – skipping reconnection")
+            return
         logger.warning("IBKR disconnected – attempting reconnection")
         asyncio.ensure_future(self._reconnect())
 
@@ -131,33 +136,44 @@ class IBKRFeedClient:
 
     async def _reconnect(self) -> None:
         """Reconnect with exponential backoff (max 5 attempts)."""
-        max_attempts = 5
-        for attempt in range(1, max_attempts + 1):
-            try:
-                logger.info("IBKR reconnect attempt %s/%s", attempt, max_attempts)
-                if self._ib is not None:
-                    try:
-                        self._ib.disconnect()
-                    except Exception:
-                        pass
-                await self._with_retry(
-                    lambda: self._ib.connectAsync(self.host, self.port, clientId=self.client_id),
-                    operation="reconnect",
-                )
-                logger.info("IBKR reconnected successfully on attempt %s", attempt)
+        async with self._reconnect_lock:
+            # Another coroutine may have already reconnected.
+            if self._ib is not None and self._ib.isConnected():
+                logger.info("IBKR already reconnected by another coroutine")
                 return
-            except Exception as exc:
-                delay = 2 ** attempt
-                logger.error("IBKR reconnect attempt %s failed: %s; next retry in %ss", attempt, exc, delay)
-                if attempt >= max_attempts:
-                    logger.critical("IBKR reconnection failed after %s attempts", max_attempts)
-                    break
-                await asyncio.sleep(delay)
+            max_attempts = 5
+            for attempt in range(1, max_attempts + 1):
+                if self._shutting_down:
+                    logger.info("IBKR reconnect aborted – shutdown in progress")
+                    return
+                try:
+                    logger.info("IBKR reconnect attempt %s/%s", attempt, max_attempts)
+                    if self._ib is not None:
+                        try:
+                            self._ib.disconnect()
+                        except Exception:
+                            pass
+                    await self._with_retry(
+                        lambda: self._ib.connectAsync(self.host, self.port, clientId=self.client_id),
+                        operation="reconnect",
+                    )
+                    self._ib.setTimeout(60)
+                    logger.info("IBKR reconnected successfully on attempt %s", attempt)
+                    return
+                except Exception as exc:
+                    delay = 2 ** attempt
+                    logger.error("IBKR reconnect attempt %s failed: %s; next retry in %ss", attempt, exc, delay)
+                    if attempt >= max_attempts:
+                        logger.critical("IBKR reconnection failed after %s attempts", max_attempts)
+                        break
+                    await asyncio.sleep(delay)
 
     async def disconnect(self) -> None:
+        self._shutting_down = True
         if self._ib is not None and self._ib.isConnected():
             logger.info("disconnecting from IBKR %s:%d clientId=%d", self.host, self.port, self.client_id)
             self._ib.disconnect()
+        self._shutting_down = False
 
     async def __aenter__(self) -> "IBKRFeedClient":
         await self.connect()
@@ -501,8 +517,13 @@ class IBKRFeedClient:
         return normalize_position_pnl(pnl_subscription, account, con_id, model_code)
 
     async def _ensure_connected(self) -> None:
-        if self._ib is None or not self._ib.isConnected():
-            logger.debug("connection stale or missing; reconnecting")
+        if self._ib is not None and self._ib.isConnected():
+            return
+        async with self._reconnect_lock:
+            # Double-check after acquiring lock.
+            if self._ib is not None and self._ib.isConnected():
+                return
+            logger.info("connection stale or missing; reconnecting")
             await self.connect()
 
     # IBKR error codes that indicate transient / recoverable conditions.

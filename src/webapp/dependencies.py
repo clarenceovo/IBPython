@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from typing import Any
 
 from fastapi import Request
 
@@ -11,6 +13,8 @@ from src.transport.ibkr_rate_limit import RedisIBKRHistoricalPacingGuard
 from src.transport.questdb_client import QuestDBClient
 from src.transport.redis_client import MarketDataRedisClient
 from src.webapp.cache import AsyncTTLCache
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -23,14 +27,42 @@ class IBKRRestAppState:
     market_data_cache: AsyncTTLCache
 
     async def connect(self) -> None:
-        await self.redis.connect()
-        await self.questdb.connect()
-        await self.feed.connect()
+        try:
+            await self.redis.connect()
+        except Exception:
+            logger.exception("failed to connect Redis during startup")
+            raise
+        try:
+            await self.questdb.connect()
+        except Exception:
+            logger.exception("failed to connect QuestDB during startup; closing Redis")
+            await self._safe_close(self.redis.close)
+            raise
+        try:
+            await self.feed.connect()
+        except Exception:
+            logger.exception("failed to connect IBKR feed during startup; closing QuestDB and Redis")
+            await self._safe_close(self.questdb.close)
+            await self._safe_close(self.redis.close)
+            raise
 
     async def close(self) -> None:
-        await self.feed.disconnect()
-        await self.questdb.close()
-        await self.redis.close()
+        errors: list[BaseException] = []
+        for closer in (self.feed.disconnect, self.questdb.close, self.redis.close):
+            try:
+                await closer()
+            except Exception as exc:
+                errors.append(exc)
+                logger.warning("error during shutdown: %s", exc)
+        if errors:
+            logger.warning("%d error(s) during shutdown", len(errors))
+
+    @staticmethod
+    async def _safe_close(coro_fn: Any) -> None:
+        try:
+            await coro_fn()
+        except Exception:
+            pass
 
 
 def build_rest_app_state(settings: Settings) -> IBKRRestAppState:
