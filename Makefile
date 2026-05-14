@@ -2,6 +2,10 @@ PYTHON ?= python3.13
 VENV ?= .venv
 PIP := $(VENV)/bin/pip
 PY := $(VENV)/bin/python
+API_HOST ?= 0.0.0.0
+API_PORT ?= 8000
+API_LOOP ?= asyncio
+API_RELOAD ?= --reload
 
 .PHONY: venv install install-dev test services-up services-down notebook run run-api docker-build docker-up
 
@@ -33,7 +37,7 @@ run:
 	$(PY) main.py
 
 run-api:
-	$(PY) -m uvicorn src.webapp.app:get_app --host 0.0.0.0 --port 8000 --factory --reload
+	$(PY) -m uvicorn src.webapp.app:get_app --host $(API_HOST) --port $(API_PORT) --factory $(API_RELOAD) --loop $(API_LOOP)
 
 docker-build:
 	docker compose build ibkr-rest-app

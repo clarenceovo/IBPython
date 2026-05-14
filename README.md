@@ -39,6 +39,8 @@ Start TWS or IB Gateway, confirm API access is enabled, then run the REST API:
 make run-api
 ```
 
+`make run-api` forces uvicorn to use the standard `asyncio` loop. This matters for `ib_insync`; uvicorn's `uvloop` backend can conflict with nested event-loop patching and prevent the API from connecting even when notebooks can.
+
 Open:
 
 - FastAPI docs: http://localhost:8000/docs
@@ -77,8 +79,8 @@ Core variables:
 | Variable | Default | Purpose |
 |---|---:|---|
 | `IBKR_HOST` | `127.0.0.1` | TWS or IB Gateway host |
-| `IBKR_PORT` | `7497` | IBKR API port, paper trading default |
-| `IBKR_CLIENT_ID` | `101` | IBKR client ID |
+| `IBKR_PORT` | `4001` | IBKR API port |
+| `IBKR_CLIENT_ID` | `1` | IBKR client ID; must be unique across notebooks/API clients |
 | `IBKR_MARKET_DATA_LINES` | `100` | Market data entitlement baseline for pacing analysis |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis URL |
 | `REDIS_PASSWORD` | empty | Optional Redis AUTH password |
@@ -107,6 +109,12 @@ make services-down
 ```
 
 `make run` starts the Redis-backed scheduler worker. `make run-api` starts `IBKRRestApp`.
+
+Equivalent direct API command:
+
+```bash
+python -m uvicorn src.webapp.app:get_app --host 0.0.0.0 --port 8000 --factory --reload --loop asyncio
+```
 
 The scheduler worker is dependency-aware:
 

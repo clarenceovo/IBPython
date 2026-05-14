@@ -111,3 +111,22 @@ def test_ibkr_feed_short_lived_pnl_snapshots_cancel_subscriptions() -> None:
     assert position.position == pytest.approx(7)
     assert fake_ib.cancelled_account == ("DU123", "")
     assert fake_ib.cancelled_position == ("DU123", "", 123)
+
+
+def test_ibkr_ensure_connected_preserves_root_cause_in_error_message() -> None:
+    client = IBKRFeedClient(host="127.0.0.1", port=4001, client_id=44)
+
+    async def failing_connect() -> None:
+        raise ValueError("uvloop cannot be patched")
+
+    client.connect = failing_connect  # type: ignore[method-assign]
+
+    async def run() -> None:
+        with pytest.raises(RuntimeError) as exc_info:
+            await client._ensure_connected()
+        message = str(exc_info.value)
+        assert "127.0.0.1:4001" in message
+        assert "clientId=44" in message
+        assert "ValueError: uvloop cannot be patched" in message
+
+    asyncio.run(run())

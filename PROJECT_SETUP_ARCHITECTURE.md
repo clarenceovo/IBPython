@@ -82,13 +82,13 @@ QuestDB UI: http://localhost:9000
 
 4. Start IBKR TWS or IB Gateway locally.
 
-Paper trading defaults usually use:
+Current local defaults:
 
 - `IBKR_HOST=127.0.0.1`
-- `IBKR_PORT=7497`
-- `IBKR_CLIENT_ID=101`
+- `IBKR_PORT=4001`
+- `IBKR_CLIENT_ID=1`
 
-Live trading commonly uses port `7496`. Confirm your TWS or Gateway API settings before running live jobs.
+Confirm your TWS or Gateway API settings before running live jobs. TWS paper/live and IB Gateway paper/live can use different default ports. Also keep `IBKR_CLIENT_ID` unique across notebooks, the REST API, and any other API client.
 
 5. Run tests:
 
@@ -157,8 +157,8 @@ Blank or missing `.env` values are treated as null and skipped, so the correspon
 | Variable | Default | Purpose |
 |---|---:|---|
 | `IBKR_HOST` | `127.0.0.1` | TWS or IB Gateway host |
-| `IBKR_PORT` | `7497` | IBKR API port |
-| `IBKR_CLIENT_ID` | `101` | IBKR client ID |
+| `IBKR_PORT` | `4001` | IBKR API port |
+| `IBKR_CLIENT_ID` | `1` | IBKR client ID; must be unique across API clients |
 | `IBKR_MARKET_DATA_LINES` | `100` | Entitlement baseline used for pacing analysis |
 | `IBKR_REST_APP_NAME` | `IBKRRestApp` | FastAPI application title |
 | `IBKR_REST_CONNECT_ON_STARTUP` | `false` | Connect to IBKR/Redis/QuestDB during API startup instead of first request |
@@ -181,8 +181,10 @@ Blank or missing `.env` values are treated as null and skipped, so the correspon
 Run locally:
 
 ```bash
-uvicorn src.webapp.app:app --host 0.0.0.0 --port 8000 --reload
+uvicorn src.webapp.app:get_app --host 0.0.0.0 --port 8000 --factory --reload --loop asyncio
 ```
+
+The API runner intentionally uses `--loop asyncio`. `uvicorn[standard]` may otherwise select `uvloop`, and `ib_insync`/`nest_asyncio` can fail before reaching the IBKR socket under uvloop. If notebooks connect but the API reports IBKR unavailable, first confirm the API is running with the standard asyncio loop and a unique `IBKR_CLIENT_ID`.
 
 Router split:
 

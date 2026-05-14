@@ -59,6 +59,45 @@ logger = logging.getLogger(__name__)
 DETECTION_TIMEOUT = 180  # seconds before IBKR reports idle timeout
 
 
+def _maybe_apply_nest_asyncio() -> None:
+    """Patch nested event loops only when the current loop supports it.
+
+    Uvicorn with ``uvicorn[standard]`` may default to uvloop, which
+    ``nest_asyncio`` cannot patch.  The API runner forces ``--loop asyncio``,
+    but this guard keeps connection attempts from failing before they even
+    reach the IBKR socket if a different runner is used.
+    """
+
+    try:
+        import nest_asyncio
+    except ImportError:
+        return
+    try:
+        nest_asyncio.apply()
+    except ValueError as exc:
+        logger.info("nest_asyncio not applied to current event loop: %s", exc)
+
+
+def _root_cause_message(exc: BaseException) -> str:
+    root: BaseException = exc
+    while root.__cause__ is not None or root.__context__ is not None:
+        root = root.__cause__ or root.__context__  # type: ignore[assignment]
+    message = str(root).strip()
+    if not message:
+        message = root.__class__.__name__
+    return f"{root.__class__.__name__}: {message}"
+
+
+def _last_ibkr_error_message(value: tuple[int, str] | None) -> str:
+    if value is None:
+        return "last_ibkr_error=none."
+    code, message = value
+    hint = ""
+    if code == 326:
+        hint = " Hint: choose a unique IBKR_CLIENT_ID for the API; notebooks and TWS API clients cannot share one."
+    return f"last_ibkr_error={code}: {message}.{hint}"
+
+
 class IBKRFeedClient:
     """Async IBKR market data adapter backed by ib_insync."""
 
@@ -82,6 +121,7 @@ class IBKRFeedClient:
         self._wsh_metadata_loaded = False
         self._shutting_down = False
         self._reconnect_lock = asyncio.Lock()
+        self._last_ibkr_error: tuple[int, str] | None = None
 
     async def connect(self) -> None:
         if self._ib is not None and self._ib.isConnected():
@@ -95,22 +135,7 @@ class IBKRFeedClient:
         except ImportError as exc:
             raise RuntimeError("ib_insync is required to connect to IBKR") from exc
 
-        # ib_insync uses get_event_loop() internally (not get_running_loop()).
-        # In uvicorn with --reload, this can return the wrong loop.
-        # Patch ib_insync.util.getLoop to always return the running loop.
-        try:
-            import nest_asyncio
-            running_loop = asyncio.get_running_loop()
-            nest_asyncio.apply(running_loop)
-        except ImportError:
-            pass
-
-        # Force ib_insync to use the current running loop.
-        try:
-            import ib_insync.util as _ib_util
-            _ib_util.getLoop = lambda: asyncio.get_running_loop()
-        except (ImportError, AttributeError):
-            pass
+        _maybe_apply_nest_asyncio()
 
         # Always create a fresh IB() on the current running loop.
         self._ib = IB()
@@ -118,12 +143,25 @@ class IBKRFeedClient:
         self._ib.disconnectedEvent += self._on_ibkr_disconnected
         self._ib.timeoutEvent += self._on_ibkr_timeout
         t0 = monotonic_time.monotonic()
-        await self._with_retry(
-            lambda: self._ib.connectAsync(self.host, self.port, clientId=self.client_id),
-            operation="connect",
-        )
-        logger.info("connected to IBKR in %.2fs", monotonic_time.monotonic() - t0)
-        self._ib.setTimeout(DETECTION_TIMEOUT)
+        try:
+            await self._with_retry(
+                lambda: self._ib.connectAsync(self.host, self.port, clientId=self.client_id),
+                operation="connect",
+            )
+            if not self._ib.isConnected():
+                raise RuntimeError("connectAsync returned but IBKR client is not connected")
+            logger.info("connected to IBKR in %.2fs", monotonic_time.monotonic() - t0)
+            self._ib.setTimeout(DETECTION_TIMEOUT)
+        except Exception:
+            logger.exception(
+                "failed to connect to IBKR at %s:%d clientId=%d; last_ibkr_error=%s",
+                self.host,
+                self.port,
+                self.client_id,
+                self._last_ibkr_error,
+            )
+            self._disconnect_stale_client()
+            raise
 
     # ------------------------------------------------------------------
     # IBKR event handlers
@@ -135,8 +173,17 @@ class IBKRFeedClient:
 
     def _on_ibkr_error(self, req_id: int, error_code: int, error_string: str, contract: Any = None) -> None:
         """Log IBKR errors at appropriate severity levels."""
+        self._last_ibkr_error = (error_code, error_string)
         if error_code in self._DATA_FARM_CODES:
             logger.info("IBKR data farm status [%s]: %s", error_code, error_string)
+        elif error_code == 326:
+            logger.error(
+                "IBKR client id already in use [%s]: %s (reqId=%s). "
+                "Use a different IBKR_CLIENT_ID for the API than notebooks/other clients.",
+                error_code,
+                error_string,
+                req_id,
+            )
         elif error_code in (404,):
             logger.warning("IBKR pacing violation [%s]: %s (reqId=%s)", error_code, error_string, req_id)
         elif error_code in (1100, 1101, 1102):
@@ -558,9 +605,20 @@ class IBKRFeedClient:
             try:
                 await self.connect()
             except Exception as exc:
+                root_cause = _root_cause_message(exc)
+                logger.exception(
+                    "IBKR connection unavailable: host=%s port=%d clientId=%d root_cause=%s last_ibkr_error=%s",
+                    self.host,
+                    self.port,
+                    self.client_id,
+                    root_cause,
+                    self._last_ibkr_error,
+                )
                 raise RuntimeError(
                     f"IBKR not available at {self.host}:{self.port} — "
-                    f"ensure TWS or IB Gateway is running and API connections are enabled"
+                    f"ensure TWS or IB Gateway is running and API connections are enabled. "
+                    f"clientId={self.client_id}. root_cause={root_cause}. "
+                    f"{_last_ibkr_error_message(self._last_ibkr_error)}"
                 ) from exc
 
     # IBKR error codes that indicate transient / recoverable conditions.
@@ -594,6 +652,16 @@ class IBKRFeedClient:
                 logger.warning("IBKR %s failed on attempt %d/%d; retrying in %.2fs", operation, attempt, self.retry_attempts, delay)
                 await asyncio.sleep(delay)
         raise RuntimeError(f"IBKR operation failed after retries: {operation}") from last_error
+
+    def _disconnect_stale_client(self) -> None:
+        if self._ib is None:
+            return
+        try:
+            self._ib.disconnect()
+        except Exception:
+            logger.debug("error disconnecting stale IBKR client", exc_info=True)
+        finally:
+            self._ib = None
 
 
 class IBKRHistoricalPacingGuard:

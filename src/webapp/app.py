@@ -94,3 +94,6 @@ def get_app() -> FastAPI:
         if _app_instance is None:
             _app_instance = create_app()
         return _app_instance
+
+
+app = get_app()

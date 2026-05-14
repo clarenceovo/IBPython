@@ -17,6 +17,15 @@ def test_default_config_values_come_from_config_constants() -> None:
     assert values["ibkr_rest_market_data_cache_maxsize"] == constants.DEFAULT_IBKR_REST_MARKET_DATA_CACHE_MAXSIZE
 
 
+def test_env_name_constants_are_canonical_names() -> None:
+    assert constants.IBKR_HOST_ENV == "IBKR_HOST"
+    assert constants.IBKR_PORT_ENV == "IBKR_PORT"
+    assert constants.IBKR_CLIENT_ID_ENV == "IBKR_CLIENT_ID"
+    assert constants.REDIS_URL_ENV == "REDIS_URL"
+    assert constants.REDIS_PASSWORD_ENV == "REDIS_PASSWORD"
+    assert constants.QUESTDB_HOST_ENV == "QUESTDB_HOST"
+
+
 def test_config_loader_uses_defaults_when_env_file_is_missing() -> None:
     values = ConfigLoader(env_file=Path("/tmp/does-not-exist.env"), include_os_environ=False).load()
 
