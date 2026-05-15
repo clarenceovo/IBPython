@@ -25,8 +25,23 @@ logger = logging.getLogger(__name__)
 PLACEHOLDER_INDEX_PROVIDER_NAMES = {"", "configured_provider", "placeholder", "todo"}
 
 
-def configure_logging() -> None:
+def configure_logging(telegram_bot_token: str = "", telegram_chat_id: str = "", telegram_log_level: str = "WARNING") -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
+    # Attach Telegram handler if configured
+    if telegram_bot_token and telegram_chat_id:
+        import logging as _logging
+
+        from src.transport.telegram_client import TelegramLogHandler
+
+        level = getattr(_logging, telegram_log_level.upper(), _logging.WARNING)
+        tg_handler = TelegramLogHandler(
+            bot_token=telegram_bot_token,
+            chat_id=telegram_chat_id,
+            level=level,
+        )
+        _logging.getLogger().addHandler(tg_handler)
+        logger.info("Telegram logging enabled: chat_id=%s level=%s", telegram_chat_id, telegram_log_level)
 
 
 def build_index_composition_provider(provider_name: str) -> IndexCompositionProvider | None:
@@ -57,8 +72,13 @@ def build_index_composition_provider(provider_name: str) -> IndexCompositionProv
 
 
 async def main() -> None:
-    configure_logging()
+    # Load settings first so we can configure telegram logging
     settings = load_settings()
+    configure_logging(
+        telegram_bot_token=settings.telegram_bot_token,
+        telegram_chat_id=settings.telegram_chat_id,
+        telegram_log_level=settings.telegram_log_level,
+    )
     logger.info(
         "starting scheduler worker: ibkr=%s:%s client_id=%s redis_url=%s redis_password_configured=%s "
         "market_store_backend=%s questdb=%s:%s/%s mysql=%s:%s/%s index_provider=%r",
