@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, Query
@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from src.feeds.bonds import BondYieldBar, BondYieldHistoryRequest
 from src.feeds.exchange_resolver import resolve_equity
-from src.feeds.models import AssetClass, OHLCVBar, OHLCVRequest
+from src.feeds.models import AssetClass, FXOHLCVBar, FutureOHLCVBar, OHLCVBar, OHLCVRequest
 from src.feeds.options import OptionAnalyticsRequest, OptionAnalyticsSnapshot, OptionSkewSurfaceRequest, OptionSkewSurfaceResponse
 from src.webapp.cache import stable_cache_key
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
@@ -49,6 +49,19 @@ class MinimalOHLCVLoadControls(BaseModel):
     cache_ttl_seconds: float | None = Field(default=None, ge=0)
     metadata: dict[str, object] = Field(default_factory=dict)
 
+    @field_validator("start_datetime", "end_datetime", mode="before")
+    @classmethod
+    def normalize_datetime_utc(cls, value: object) -> datetime | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if not isinstance(value, datetime):
+            raise TypeError("datetime fields must be datetimes")
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
     @field_validator("duration", "bar_size", "what_to_show", mode="before")
     @classmethod
     def normalize_required_text(cls, value: object) -> str:
@@ -59,11 +72,18 @@ class MinimalOHLCVLoadControls(BaseModel):
             raise ValueError("value cannot be empty")
         return normalized
 
+    @model_validator(mode="after")
+    def validate_datetime_range(self) -> "MinimalOHLCVLoadControls":
+        if self.start_datetime is not None and self.end_datetime is not None and self.start_datetime >= self.end_datetime:
+            raise ValueError("start_datetime must be before end_datetime")
+        return self
+
     def to_ohlcv_request(self, asset_class: AssetClass, **overrides: object) -> OHLCVRequest:
         return OHLCVRequest(
             asset_class=asset_class,
             duration=self.duration,
             bar_size=self.bar_size,
+            start_datetime=self.start_datetime,
             end_datetime=self.end_datetime,
             what_to_show=self.what_to_show,
             use_rth=self.use_rth,
@@ -253,6 +273,8 @@ GENERIC_OHLCV_REQUEST_EXAMPLES = {
                 "asset_class": "equity",
                 "exchange": "SMART",
                 "currency": "USD",
+                "start_datetime": "2026-05-01T13:30:00Z",
+                "end_datetime": "2026-05-01T20:00:00Z",
                 "duration": "1 D",
                 "bar_size": "1 min",
                 "what_to_show": "TRADES",
@@ -293,6 +315,8 @@ EQUITY_OHLCV_REQUEST_EXAMPLES = {
         "value": {
             "symbol": "TSLA",
             "primary_exchange": "NASDAQ",
+            "start_datetime": "2026-05-01T13:30:00Z",
+            "end_datetime": "2026-05-01T20:00:00Z",
             "duration": "1 D",
             "bar_size": "5 mins",
             "cache_latest": True,
@@ -320,6 +344,8 @@ FUTURES_OHLCV_REQUEST_EXAMPLES = {
             "exchange": "CME",
             "currency": "USD",
             "last_trade_date_or_contract_month": "202606",
+            "start_datetime": "2026-05-01T13:30:00Z",
+            "end_datetime": "2026-05-01T20:00:00Z",
             "duration": "1 D",
             "bar_size": "1 min",
         },
@@ -332,6 +358,32 @@ FUTURES_OHLCV_REQUEST_EXAMPLES = {
             "exchange": "CME",
             "local_symbol": "ESM6",
             "multiplier": "50",
+        },
+    },
+    "hsi_hkfe_by_contract_month": {
+        "summary": "Hang Seng Index future",
+        "description": "HKEX Hang Seng Index futures use product code HSI. Use HKFE/HKD for IBKR routing.",
+        "value": {
+            "symbol": "HSI",
+            "exchange": "HKFE",
+            "currency": "HKD",
+            "last_trade_date_or_contract_month": "202606",
+            "duration": "1 D",
+            "bar_size": "1 min",
+            "what_to_show": "TRADES",
+        },
+    },
+    "hstech_hkfe_by_contract_month": {
+        "summary": "Hang Seng TECH Index future",
+        "description": "HKEX Hang Seng TECH Index futures use product code HTI. Use HKFE/HKD for IBKR routing.",
+        "value": {
+            "symbol": "HTI",
+            "exchange": "HKFE",
+            "currency": "HKD",
+            "last_trade_date_or_contract_month": "202606",
+            "duration": "1 D",
+            "bar_size": "1 min",
+            "what_to_show": "TRADES",
         },
     },
 }
@@ -348,6 +400,8 @@ FX_OHLCV_REQUEST_EXAMPLES = {
         "value": {
             "symbol": "USDJPY",
             "currency": "JPY",
+            "start_datetime": "2026-05-01T00:00:00Z",
+            "end_datetime": "2026-05-05T00:00:00Z",
             "duration": "5 D",
             "bar_size": "1 hour",
         },
@@ -362,6 +416,8 @@ BOND_OHLCV_REQUEST_EXAMPLES = {
         "value": {
             "sec_id_type": "CUSIP",
             "sec_id": "91282CJN2",
+            "start_datetime": "2026-05-01T00:00:00Z",
+            "end_datetime": "2026-05-31T00:00:00Z",
             "duration": "1 M",
             "bar_size": "1 day",
         },
@@ -580,6 +636,7 @@ async def load_ohlcv(
 ) -> list[OHLCVBar]:
     return await _load_ohlcv_with_controls(
         request=payload.request,
+        start_datetime=payload.request.start_datetime,
         persist=payload.persist,
         cache_latest=payload.cache_latest,
         use_ttl_cache=payload.use_ttl_cache,
@@ -612,13 +669,13 @@ async def load_equity_ohlcv(
 
 @router.post(
     "/ohlcv/futures",
-    response_model=list[OHLCVBar],
+    response_model=list[FutureOHLCVBar],
     summary="Load futures OHLCV with preset asset_class",
 )
 async def load_futures_ohlcv(
     payload: Annotated[FutureOHLCVLoadRequest, Body(openapi_examples=FUTURES_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[OHLCVBar]:
+) -> list[FutureOHLCVBar]:
     return await _load_ohlcv_with_controls(
         request=payload.to_request(),
         start_datetime=payload.start_datetime,
@@ -633,13 +690,13 @@ async def load_futures_ohlcv(
 
 @router.post(
     "/ohlcv/fx",
-    response_model=list[OHLCVBar],
+    response_model=list[FXOHLCVBar],
     summary="Load FX OHLCV with preset asset_class",
 )
 async def load_fx_ohlcv(
     payload: Annotated[FXOHLCVLoadRequest, Body(openapi_examples=FX_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[OHLCVBar]:
+) -> list[FXOHLCVBar]:
     return await _load_ohlcv_with_controls(
         request=payload.to_request(),
         start_datetime=payload.start_datetime,

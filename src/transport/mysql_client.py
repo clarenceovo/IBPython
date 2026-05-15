@@ -17,14 +17,56 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from typing import Any
 
 from src.config import config_constant as constants
+from src.feeds.models import AssetClass, OHLCVBar
+from src.transport.market_data_store import MarketOHLCVStore
 
 logger = logging.getLogger(__name__)
 
 
-class MySQLClient:
+CREATE_MYSQL_MARKET_OHLCV_TABLE_SQL = f"""
+CREATE TABLE IF NOT EXISTS {constants.MARKET_OHLCV_TABLE} (
+    symbol VARCHAR(64) NOT NULL,
+    asset_class VARCHAR(32) NOT NULL,
+    exchange VARCHAR(64) NOT NULL,
+    currency VARCHAR(16) NOT NULL,
+    timestamp DATETIME(6) NOT NULL,
+    open DOUBLE NOT NULL,
+    high DOUBLE NOT NULL,
+    low DOUBLE NOT NULL,
+    close DOUBLE NOT NULL,
+    volume DOUBLE NOT NULL,
+    bar_size VARCHAR(32) NOT NULL,
+    source VARCHAR(64) NOT NULL,
+    metadata JSON NULL,
+    PRIMARY KEY (symbol, asset_class, bar_size, timestamp),
+    KEY idx_market_ohlcv_latest (asset_class, bar_size, symbol, timestamp),
+    KEY idx_market_ohlcv_symbol_time (symbol, timestamp)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+""".strip()
+
+
+INSERT_MYSQL_MARKET_OHLCV_SQL = f"""
+INSERT INTO {constants.MARKET_OHLCV_TABLE}
+(symbol, asset_class, exchange, currency, timestamp, open, high, low, close, volume, bar_size, source, metadata)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+ON DUPLICATE KEY UPDATE
+    exchange = VALUES(exchange),
+    currency = VALUES(currency),
+    open = VALUES(open),
+    high = VALUES(high),
+    low = VALUES(low),
+    close = VALUES(close),
+    volume = VALUES(volume),
+    source = VALUES(source),
+    metadata = VALUES(metadata)
+""".strip()
+
+
+class MySQLClient(MarketOHLCVStore):
     """Async MySQL client built on ``aiomysql``.
 
     Parameters
@@ -215,3 +257,126 @@ class MySQLClient:
     async def create_table(self, sql: str) -> None:
         """Execute a CREATE TABLE statement."""
         await self.execute(sql)
+
+    # ------------------------------------------------------------------
+    # Market OHLCV store interface
+    # ------------------------------------------------------------------
+
+    async def create_market_ohlcv_table(self) -> None:
+        await self.create_table(CREATE_MYSQL_MARKET_OHLCV_TABLE_SQL)
+
+    async def insert_bars(self, bars: Sequence[OHLCVBar]) -> int:
+        return await self.execute_many(INSERT_MYSQL_MARKET_OHLCV_SQL, [mysql_bar_to_row(bar) for bar in bars])
+
+    async def query_historical_bars(
+        self,
+        *,
+        symbol: str,
+        asset_class: AssetClass | str | None = None,
+        bar_size: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 10_000,
+    ) -> list[dict[str, Any]]:
+        sql, params = build_mysql_historical_query(
+            symbol=symbol,
+            asset_class=asset_class,
+            bar_size=bar_size,
+            start=start,
+            end=end,
+            limit=limit,
+        )
+        return await self.fetch_all(sql, params)
+
+    async def query_latest_bars(
+        self,
+        *,
+        asset_class: AssetClass | str | None = None,
+        bar_size: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        sql, params = build_mysql_latest_query(asset_class=asset_class, bar_size=bar_size, limit=limit)
+        return await self.fetch_all(sql, params)
+
+
+def mysql_bar_to_row(bar: OHLCVBar) -> tuple[Any, ...]:
+    return (
+        bar.symbol,
+        str(bar.asset_class),
+        bar.exchange,
+        bar.currency,
+        _mysql_timestamp(bar.timestamp),
+        bar.open,
+        bar.high,
+        bar.low,
+        bar.close,
+        bar.volume,
+        bar.bar_size,
+        bar.source,
+        bar.metadata_json(),
+    )
+
+
+def build_mysql_historical_query(
+    *,
+    symbol: str,
+    asset_class: AssetClass | str | None = None,
+    bar_size: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: int = 10_000,
+) -> tuple[str, list[Any]]:
+    clauses = ["symbol = %s"]
+    params: list[Any] = [symbol.upper()]
+    if asset_class is not None:
+        clauses.append("asset_class = %s")
+        params.append(str(asset_class))
+    if bar_size is not None:
+        clauses.append("bar_size = %s")
+        params.append(bar_size)
+    if start is not None:
+        clauses.append("timestamp >= %s")
+        params.append(_mysql_timestamp(start))
+    if end is not None:
+        clauses.append("timestamp < %s")
+        params.append(_mysql_timestamp(end))
+    params.append(limit)
+    sql = (
+        f"SELECT * FROM {constants.MARKET_OHLCV_TABLE} "
+        f"WHERE {' AND '.join(clauses)} "
+        "ORDER BY timestamp ASC "
+        "LIMIT %s"
+    )
+    return sql, params
+
+
+def build_mysql_latest_query(
+    *,
+    asset_class: AssetClass | str | None = None,
+    bar_size: str | None = None,
+    limit: int = 100,
+) -> tuple[str, list[Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if asset_class is not None:
+        clauses.append("asset_class = %s")
+        params.append(str(asset_class))
+    if bar_size is not None:
+        clauses.append("bar_size = %s")
+        params.append(bar_size)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    sql = (
+        "SELECT symbol, asset_class, exchange, currency, timestamp, open, high, low, close, volume, bar_size, source, metadata "
+        "FROM ("
+        "SELECT symbol, asset_class, exchange, currency, timestamp, open, high, low, close, volume, bar_size, source, metadata, "
+        f"ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY timestamp DESC) AS rn FROM {constants.MARKET_OHLCV_TABLE} {where}"
+        ") ranked WHERE rn = 1 ORDER BY timestamp DESC LIMIT %s"
+    )
+    return sql, params
+
+
+def _mysql_timestamp(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).replace(tzinfo=None)

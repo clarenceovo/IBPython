@@ -7,7 +7,7 @@ Production-oriented async market data foundation for systematic trading, researc
 - Python target: 3.13+.
 - Timestamp standard: all normalized OHLCV bars use UTC-aware timestamps.
 - Bar semantics: timestamps represent the provider bar timestamp returned by IBKR, normalized to UTC.
-- External systems: IBKR TWS or IB Gateway runs locally; Redis and QuestDB can run through Docker Compose.
+- External systems: IBKR TWS or IB Gateway runs locally; Redis, QuestDB, and optional MySQL can run through Docker Compose.
 - Reliability posture: live connections retry with exponential backoff, scheduled jobs isolate failures, and tests mock external systems.
 - Research caution: index composition snapshots are provider-dependent and can introduce survivorship bias if reused as historical truth without point-in-time history.
 
@@ -16,11 +16,11 @@ Production-oriented async market data foundation for systematic trading, researc
 ```text
 src/
   config/
-    config_constant.py      # Central defaults, env names, Redis key templates, QuestDB table name
+    config_constant.py      # Central defaults, env names, Redis key templates, table names
     config_loader.py        # .env/environment/default loader that ignores blank values
     settings.py             # Pydantic validation over ConfigLoader output
   feeds/
-    models.py               # OHLCVBar, OHLCVRequest, AssetClass
+    models.py               # BaseOHLCVBar, OHLCVBar, FutureOHLCVBar, FXOHLCVBar, OptionOHLCVBar, OHLCVRequest, AssetClass
     contracts.py            # Vendor-neutral contract specs -> IBKR mapping
     account.py              # Account, portfolio, live position, and PnL DTOs
     bonds.py                # Bond yield, CTD, and yield curve DTOs
@@ -33,7 +33,9 @@ src/
   transport/
     redis_client.py         # Latest bar, index composition, scheduler job storage
     ibkr_rate_limit.py      # Redis-backed distributed IBKR pacing bookmarks
-    questdb_client.py       # PostgreSQL wire client and SQL builders
+    market_data_store.py    # Base OHLCV persistence interface
+    questdb_client.py       # QuestDB PostgreSQL wire client and SQL builders
+    mysql_client.py         # MySQL OHLCV store implementation
     scheduler.py            # Generic async scheduler and market snapshot job handler
   webapp/
     app.py                  # IBKRRestApp FastAPI application factory
@@ -72,13 +74,13 @@ make install-dev PYTHON=/path/to/python3.13
 cp .env.example .env
 ```
 
-3. Start Redis and QuestDB:
+3. Start Redis, QuestDB, and MySQL:
 
 ```bash
 make services-up
 ```
 
-QuestDB UI: http://localhost:9000
+QuestDB UI: http://localhost:9000. QuestDB is the default OHLCV store; MySQL is available for `MARKET_DATA_DB_BACKEND=mysql`.
 
 4. Start IBKR TWS or IB Gateway locally.
 
@@ -118,7 +120,7 @@ make notebook
 
 ## Docker Setup
 
-Build and run the API with Redis and QuestDB:
+Build and run the API with Redis, QuestDB, and MySQL:
 
 ```bash
 cp .env.example .env
@@ -130,6 +132,7 @@ The Compose service exposes:
 - FastAPI: http://localhost:8000/docs
 - QuestDB UI: http://localhost:9000
 - Redis: `localhost:6379`
+- MySQL: `localhost:3306`
 
 Inside Docker, `IBKR_HOST` defaults to `host.docker.internal` so the container can reach TWS or IB Gateway running on the host machine. If you run IB Gateway in another container or remote host, override `IBKR_HOST` in `.env`.
 
@@ -161,7 +164,7 @@ Blank or missing `.env` values are treated as null and skipped, so the correspon
 | `IBKR_CLIENT_ID` | `1` | IBKR client ID; must be unique across API clients |
 | `IBKR_MARKET_DATA_LINES` | `100` | Entitlement baseline used for pacing analysis |
 | `IBKR_REST_APP_NAME` | `IBKRRestApp` | FastAPI application title |
-| `IBKR_REST_CONNECT_ON_STARTUP` | `false` | Connect to IBKR/Redis/QuestDB during API startup instead of first request |
+| `IBKR_REST_CONNECT_ON_STARTUP` | `false` | Connect to IBKR, Redis, QuestDB, and the configured OHLCV store during API startup instead of first request |
 | `IBKR_REST_MARKET_DATA_TTL_SECONDS` | `5` | Default in-process TTL for REST market data snapshots |
 | `IBKR_REST_MARKET_DATA_CACHE_MAXSIZE` | `512` | Maximum in-process REST market data cache entries |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
@@ -171,6 +174,12 @@ Blank or missing `.env` values are treated as null and skipped, so the correspon
 | `QUESTDB_USER` | `admin` | QuestDB user |
 | `QUESTDB_PASSWORD` | `quest` | QuestDB password |
 | `QUESTDB_DATABASE` | `qdb` | QuestDB database |
+| `MYSQL_HOST` | `127.0.0.1` | MySQL host for alternate OHLCV persistence |
+| `MYSQL_PORT` | `3306` | MySQL port |
+| `MYSQL_USER` | `root` | MySQL user |
+| `MYSQL_PASSWORD` | empty | MySQL password |
+| `MYSQL_DATABASE` | `trading` | MySQL database |
+| `MARKET_DATA_DB_BACKEND` | `questdb` | OHLCV persistence backend: `questdb` or `mysql` |
 | `INDEX_SYNC_INTERVAL_SECONDS` | `86400` | Default index composition sync interval |
 | `INDEX_COMPOSITION_PROVIDER` | empty | Enables an external index composition provider when implemented |
 
@@ -188,6 +197,7 @@ The API runner intentionally uses `--loop asyncio`. `uvicorn[standard]` may othe
 
 Router split:
 
+- `GET /api/v1/business/getBondCurve`
 - `GET /api/v1/system/health`
 - `GET /api/v1/system/cache/market-data`
 - `DELETE /api/v1/system/cache/market-data`
@@ -215,6 +225,22 @@ Router split:
 
 The app uses async FastAPI endpoints end-to-end. Market-data endpoints can use the in-process `AsyncTTLCache`; it has per-key single-flight protection so concurrent duplicate requests share one IBKR call. The TTL cache is intentionally short-lived and local to the API process. Redis remains the distributed cache for latest bars, index compositions, and scheduler/rate-limit bookmarks.
 
+Business endpoint:
+
+```bash
+curl "http://localhost:8000/api/v1/business/getBondCurve?market=UST&valuation_date=2026-05-16"
+```
+
+`getBondCurve` accepts a minimal query payload:
+
+| Parameter | Required | Notes |
+|---|---:|---|
+| `market` | yes | Sovereign curve alias. Supported examples: `UST`, `JGB`, `KTB`, `BUND`, `GERMAN_BUND`, `UK`, `UK_GILT`, and `GILT`. |
+| `valuation_date` | no | Curve valuation date. Defaults to the current UTC date. |
+| `coupon_frequency` | no | Optional coupon frequency override for par-yield bootstrap. |
+
+The response is a business DTO with `standard_ctd_points`, a bootstrapped `curve`, and chart-ready `render_points`. Each render point includes tenor, maturity date, par yield, continuous zero rate, discount factor, CTD symbol, and futures symbol.
+
 Example OHLCV request:
 
 ```bash
@@ -237,7 +263,7 @@ curl -X POST http://localhost:8000/api/v1/market-data/ohlcv \
   }'
 ```
 
-The generic endpoint accepts a full `OHLCVRequest`. The asset-specific wrappers are for minimal payloads that preset `asset_class` and common IBKR routing defaults:
+The generic endpoint accepts a full `OHLCVRequest`. The asset-specific wrappers are the business-friendly OHLCV surface for minimal payloads that preset `asset_class` and common IBKR routing defaults:
 
 | Endpoint | Minimal payload | Presets |
 |---|---|---|
@@ -246,7 +272,28 @@ The generic endpoint accepts a full `OHLCVRequest`. The asset-specific wrappers 
 | `POST /api/v1/market-data/ohlcv/futures` | `{"symbol":"ES","last_trade_date_or_contract_month":"202606"}` | `asset_class=future`, `exchange=CME`, `currency=USD`, `what_to_show=TRADES` |
 | `POST /api/v1/market-data/ohlcv/bond` | `{"sec_id_type":"CUSIP","sec_id":"91282CJN2"}` | `asset_class=bond`, `exchange=SMART`, `currency=USD`, `what_to_show=TRADES` |
 
-Wrappers also accept optional loader/cache controls: `duration`, `bar_size`, `end_datetime`, `what_to_show`, `use_rth`, `persist`, `cache_latest`, `use_ttl_cache`, `cache_ttl_seconds`, and `metadata`.
+Wrappers also accept optional loader/cache controls: `duration`, `bar_size`, `start_datetime`, `end_datetime`, `what_to_show`, `use_rth`, `persist`, `cache_latest`, `use_ttl_cache`, `cache_ttl_seconds`, and `metadata`.
+
+Explicit range payload:
+
+```json
+{
+  "symbol": "SPY",
+  "start_datetime": "2026-05-01T13:30:00Z",
+  "end_datetime": "2026-05-01T20:00:00Z",
+  "bar_size": "1 min"
+}
+```
+
+If `start_datetime` is present, the API uses the paginated historical range loader and asks IBKR in pacing-aware chunks. If only `end_datetime` and `duration` are supplied, it performs the normal single historical request ending at `end_datetime`.
+
+OHLCV DTO hierarchy:
+
+- `BaseOHLCVBar`: shared `symbol`, `timestamp`, `open`, `high`, `low`, `close`, and `volume`.
+- `OHLCVBar`: base bar plus market metadata such as `asset_class`, `exchange`, `currency`, `bar_size`, `source`, and `metadata`.
+- `FutureOHLCVBar`: futures-specific bar that adds `contract_month` and `is_continuous`. The futures wrapper documents this schema in OpenAPI.
+- `FXOHLCVBar`: FX-specific bar that adds `base_currency` and `quote_currency`. The FX wrapper documents this schema in OpenAPI.
+- `OptionOHLCVBar`: option-specific bar that adds `underlying_symbol`, `expiry`, `strike`, `right`, `multiplier`, `trading_class`, `contract_month`, and optional `con_id`.
 
 Latest-bar query parameters:
 
@@ -305,7 +352,7 @@ SchedulerJob::<job_name>
 
 Scheduler jobs are JSON payloads stored in Redis. Python code registers handlers for known `job_type` values; Redis stores job configuration, not executable code.
 
-The worker now loads only runnable jobs. Unknown job types or index reload jobs without a configured provider are logged and skipped, so one inactive operational job does not prevent unrelated market snapshot jobs from running. Runtime dependencies are opened only when needed: IBKR for market snapshots, QuestDB only when at least one runnable snapshot persists bars, and Redis for all scheduler state.
+The worker loads local `schedulejob/*.json` files first and Redis `SchedulerJob::*` keys second. Redis wins on duplicate job names, so local files are deployable defaults and Redis is the live operational override. Unknown job types or index reload jobs without a configured provider are logged and skipped, so one inactive operational job does not prevent unrelated market snapshot jobs from running. Runtime dependencies are opened only when needed: IBKR for market/OHLCV snapshots, the configured market OHLCV store only when at least one runnable snapshot persists bars, and Redis for all scheduler state.
 
 Example job:
 
@@ -360,6 +407,60 @@ Then run:
 ```bash
 make run
 ```
+
+## OHLCV Persistence Backends
+
+OHLCV snapshots persist through `MarketOHLCVStore`, a base interface implemented by both `QuestDBClient` and `MySQLClient`. The snapshotter and `OHLCVLoader` do not branch on vendor-specific clients; they call `insert_bars(...)` on the configured store.
+
+Backend selection:
+
+```bash
+MARKET_DATA_DB_BACKEND=questdb  # default, main time-series store
+MARKET_DATA_DB_BACKEND=mysql    # alternate relational store
+```
+
+Both backends expose the same operational surface:
+
+- `create_market_ohlcv_table()`
+- `insert_bars(bars)`
+- `query_historical_bars(...)`
+- `query_latest_bars(...)`
+
+QuestDB should remain the default for high-volume time-series capture because the table is timestamped and day-partitioned. MySQL is useful when operators want the snapshotter to land bars beside relational portfolio, strategy, or reporting tables. The MySQL schema uses a deterministic primary key `(symbol, asset_class, bar_size, timestamp)` and `ON DUPLICATE KEY UPDATE`, so repeated snapshots are idempotent.
+
+## OHLCV Snapshot Jobs
+
+`job_type="ohlcv_snapshot"` is the production scheduler path for multi-market OHLCV capture. It supports either interval scheduling or five-field cron expressions. Cron fields support `*`, ranges, lists, steps, and weekday names such as `mon-fri`.
+
+Local job definitions included:
+
+- `schedulejob/ohlcv_us_equity_1m.json`
+- `schedulejob/ohlcv_hk_futures_1m.json`
+- `schedulejob/ohlcv_major_indices_5m.json`
+
+Core JSON fields:
+
+- `interval_seconds`: scheduler cadence; optional when `cron` is supplied.
+- `cron`: optional five-field cron expression, for example `*/5 * * * *`.
+- `timezone`: scheduler cron timezone; OHLCV params also include a market-window timezone.
+- `params.start_time` / `params.end_time`: local daily capture window.
+- `params.snap_interval_seconds`: business cadence; if `interval_seconds` is present it must match.
+- `params.detect_holiday`: when true, fetch/cache IBKR trading schedule and skip symbols with no session.
+- `params.capture_rth`: maps to `OHLCVRequest.use_rth`.
+- `params.defaults`: shared OHLCV request fields plus `persist` and `cache_latest`.
+- `params.symbols`: symbol objects merged over defaults.
+
+Execution state logging uses `src.transport.scheduler.execution` and emits state markers including `evaluating`, `cron_wait`, `started`, `skipped`, `success`, `error`, and `bookmark_updated`.
+
+Redis state keys:
+
+```text
+OhlcvSnapshot::<JOB_NAME>::<SYMBOL>::<BAR_SIZE>:last_ts
+OhlcvSnapshot::<JOB_NAME>::<SYMBOL>::<BAR_SIZE>:status
+OhlcvSnapshotCalendar::<ASSET_CLASS>::<EXCHANGE>::<SYMBOL>::<YYYY-MM-DD>::<true|false>:has_session
+```
+
+The handler updates `last_ts` only after successful load/persist/cache for that symbol. On restart, an existing bookmark is used as `OHLCVRequest.start_datetime` when the job request does not already specify one.
 
 ## Schedule Job Definitions
 
@@ -512,8 +613,9 @@ Supported DTOs:
 - `BondInstrument`: sovereign/corporate bond identity using symbol, ISIN, CUSIP, or IBKR `conId`.
 - `BondYieldQuote`: latest bid, ask, last, and computed mid yield.
 - `BondYieldHistoryRequest` and `BondYieldBar`: historical yield bars for `YIELD_BID`, `YIELD_ASK`, `YIELD_BID_ASK`, and `YIELD_LAST`.
-- `CTDFutureDefinition`, `CTDBondCandidate`, and `CTDBondSnapshot`: CTD delivery-basket analytics for US Treasury, JGB, KTB, and German Bund futures.
+- `CTDFutureDefinition`, `CTDBondCandidate`, and `CTDBondSnapshot`: CTD delivery-basket analytics for US Treasury, JGB, KTB, German Bund, and UK Gilt futures.
 - `YieldCurveBootstrapInstrument`, `YieldCurvePoint`, and `YieldCurveDTO`: par-yield curve inputs and bootstrapped discount/zero curve outputs.
+- `BondCurveRequest`, `StandardTenorCTDPoint`, `BondCurveRenderPoint`, and `BondCurveResponse`: business-facing sovereign curve payloads for API consumers and dashboards.
 
 IBKR historical bar documentation lists yield fields for bonds, but the same table notes that yield historical data is only available for corporate bonds. For US Treasury, JGB, KTB, and German Bund CTD capture, IBKR should be treated as a quote/contract source only. The actual deliverable basket, conversion factor, accrued interest, delivery date, financing/carry, and CTD selection require an exchange, vendor, or internally controlled delivery-basket provider.
 
@@ -522,8 +624,13 @@ IBKR historical bar documentation lists yield fields for bonds, but the same tab
 REST endpoint:
 
 ```text
+GET  /api/v1/business/getBondCurve
 POST /api/v1/market-data/bonds/yields/history
 ```
+
+`GET /api/v1/business/getBondCurve` is intentionally minimal. A caller can request `market=UST`, `JGB`, `KTB`, `BUND`, `GERMAN_BUND`, `UK`, `UK_GILT`, or `GILT`, and optionally pass `valuation_date` and `coupon_frequency`. The API returns standard-tenor CTD/benchmark inputs plus `render_points` that are ready for a line chart or risk dashboard.
+
+Quant caveat: the built-in `getBondCurve` source is an indicative standard-tenor placeholder so Swagger, notebooks, and downstream services can integrate against a stable DTO. It is not an exchange-official CTD engine. Before trading, backtesting, or risk reporting from this endpoint, replace the placeholder with a controlled provider for delivery baskets, conversion factors, accrued interest, delivery dates, financing/carry, futures prices, and point-in-time bond/yield quotes.
 
 ## IBKR Account, Position, And PnL Data
 
@@ -638,11 +745,15 @@ Operational recommendations:
 - For large historical backfills, add a dedicated chunked backfill worker with durable progress state instead of using high-frequency scheduler jobs.
 - If your strategy needs broad real-time streaming, use a proper market data vendor or explicitly budget IBKR market data lines and subscriptions before relying on TWS API.
 
-## QuestDB Schema
+## Market OHLCV Schema
 
 Main table: `market_ohlcv`
 
-The table is timestamped on `timestamp`, partitioned by day, and stores metadata as JSON text. Query builders are parameterized to avoid unsafe string interpolation.
+QuestDB schema: timestamped on `timestamp`, partitioned by day, stores metadata as JSON text.
+
+MySQL schema: InnoDB table with `(symbol, asset_class, bar_size, timestamp)` primary key, secondary indexes for latest/history reads, and `metadata JSON`.
+
+Both query builders are parameterized to avoid unsafe string interpolation.
 
 ## Quant Engineering Notes
 

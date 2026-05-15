@@ -4,7 +4,14 @@ from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
 
 from src.feeds.models import AssetClass, OHLCVBar
-from src.transport.redis_client import MarketDataRedisClient, index_composition_key, latest_bar_key, scheduler_job_key
+from src.transport.redis_client import (
+    MarketDataRedisClient,
+    index_composition_key,
+    latest_bar_key,
+    ohlcv_snapshot_last_ts_key,
+    ohlcv_snapshot_status_key,
+    scheduler_job_key,
+)
 
 
 def test_latest_bar_key_format() -> None:
@@ -19,6 +26,15 @@ def test_index_composition_key_format() -> None:
 
 def test_scheduler_job_key_format() -> None:
     assert scheduler_job_key("snapshot_spy_1m") == "SchedulerJob::snapshot_spy_1m"
+
+
+def test_ohlcv_snapshot_bookmark_key_formats() -> None:
+    assert ohlcv_snapshot_last_ts_key("ohlcv_us_equity_1m", "spy", "1 min") == (
+        "OhlcvSnapshot::OHLCV_US_EQUITY_1M::SPY::1_MIN:last_ts"
+    )
+    assert ohlcv_snapshot_status_key("ohlcv_us_equity_1m", "spy", "1 min") == (
+        "OhlcvSnapshot::OHLCV_US_EQUITY_1M::SPY::1_MIN:status"
+    )
 
 
 def test_redis_client_stores_password() -> None:

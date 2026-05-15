@@ -14,6 +14,7 @@ def test_default_config_values_come_from_config_constants() -> None:
     assert values["ibkr_port"] == constants.DEFAULT_IBKR_PORT
     assert values["questdb_database"] == constants.DEFAULT_QUESTDB_DATABASE
     assert values["redis_password"] == constants.DEFAULT_REDIS_PASSWORD
+    assert values["market_data_db_backend"] == constants.DEFAULT_MARKET_DATA_DB_BACKEND
     assert values["ibkr_rest_market_data_cache_maxsize"] == constants.DEFAULT_IBKR_REST_MARKET_DATA_CACHE_MAXSIZE
 
 
@@ -24,6 +25,7 @@ def test_env_name_constants_are_canonical_names() -> None:
     assert constants.REDIS_URL_ENV == "REDIS_URL"
     assert constants.REDIS_PASSWORD_ENV == "REDIS_PASSWORD"
     assert constants.QUESTDB_HOST_ENV == "QUESTDB_HOST"
+    assert constants.MARKET_DATA_DB_BACKEND_ENV == "MARKET_DATA_DB_BACKEND"
 
 
 def test_config_loader_uses_defaults_when_env_file_is_missing() -> None:
@@ -40,6 +42,7 @@ def test_config_loader_ignores_blank_dotenv_values_and_parses_types(tmp_path: Pa
             [
                 "IBKR_HOST=",
                 "IBKR_PORT=4002",
+                "MARKET_DATA_DB_BACKEND=MYSQL",
                 "IBKR_REST_CONNECT_ON_STARTUP=true",
                 "IBKR_REST_MARKET_DATA_TTL_SECONDS=12.5",
             ]
@@ -51,6 +54,7 @@ def test_config_loader_ignores_blank_dotenv_values_and_parses_types(tmp_path: Pa
 
     assert values["ibkr_host"] == constants.DEFAULT_IBKR_HOST
     assert values["ibkr_port"] == 4002
+    assert values["market_data_db_backend"] == "mysql"
     assert values["ibkr_rest_connect_on_startup"] is True
     assert values["ibkr_rest_market_data_ttl_seconds"] == 12.5
 

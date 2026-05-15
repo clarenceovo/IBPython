@@ -32,6 +32,11 @@ class Settings(BaseModel):
     mysql_user: str = Field(default=constants.DEFAULT_MYSQL_USER, alias=constants.MYSQL_USER_ENV)
     mysql_password: str = Field(default=constants.DEFAULT_MYSQL_PASSWORD, alias=constants.MYSQL_PASSWORD_ENV)
     mysql_database: str = Field(default=constants.DEFAULT_MYSQL_DATABASE, alias=constants.MYSQL_DATABASE_ENV)
+    market_data_db_backend: str = Field(
+        default=constants.DEFAULT_MARKET_DATA_DB_BACKEND,
+        alias=constants.MARKET_DATA_DB_BACKEND_ENV,
+        pattern="^(questdb|mysql)$",
+    )
 
     index_sync_interval_seconds: int = Field(
         default=constants.DEFAULT_INDEX_SYNC_INTERVAL_SECONDS,

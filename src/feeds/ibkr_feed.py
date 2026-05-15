@@ -18,7 +18,7 @@ from src.feeds.fundamental_data import (
     WSHEventDataRequest,
     WSHMetadataReport,
 )
-from src.feeds.models import AssetClass, OHLCVBar, OHLCVRequest
+from src.feeds.models import AssetClass, FXOHLCVBar, FutureOHLCVBar, OHLCVBar, OHLCVRequest
 from src.feeds.account import (
     AccountPnLDTO,
     AccountSummaryDTO,
@@ -563,6 +563,14 @@ class IBKRFeedClient:
         return unique_bars
 
     async def load_historical_ohlcv(self, request: OHLCVRequest) -> list[OHLCVBar]:
+        if request.start_datetime is not None:
+            range_request = request.model_copy(update={"start_datetime": None})
+            return await self.load_historical_ohlcv_range(
+                range_request,
+                start_datetime=request.start_datetime,
+                end_datetime=request.end_datetime,
+            )
+
         await self._ensure_connected()
         logger.info("load_historical_ohlcv: symbol=%s bar_size=%s duration=%s", request.symbol, request.bar_size, request.duration)
         t0 = monotonic_time.monotonic()
@@ -589,6 +597,37 @@ class IBKRFeedClient:
         result = normalize_ibkr_bars(bars, request)
         logger.info("load_historical_ohlcv: %d bars for %s in %.2fs", len(result), request.symbol, monotonic_time.monotonic() - t0)
         return result
+
+    async def load_trading_schedule(
+        self,
+        request: OHLCVRequest,
+        *,
+        ref_date: date,
+        use_rth: bool = True,
+    ) -> tuple[Any, ...]:
+        """Load IBKR historical trading schedule sessions for one contract/date."""
+
+        await self._ensure_connected()
+        contract = await self.qualify_contract(ContractSpec.from_ohlcv_request(request))
+        end_datetime = datetime.combine(ref_date + timedelta(days=1), time.min, tzinfo=timezone.utc)
+        schedule = await self._with_retry(
+            lambda: self._ib.reqHistoricalScheduleAsync(
+                contract,
+                1,
+                endDateTime=_format_ibkr_end_datetime(end_datetime),
+                useRTH=use_rth,
+            ),
+            operation=f"trading_schedule:{request.symbol}:{ref_date.isoformat()}",
+        )
+        sessions = tuple(getattr(schedule, "sessions", ()) or ())
+        logger.info(
+            "load_trading_schedule: symbol=%s date=%s use_rth=%s sessions=%d",
+            request.symbol,
+            ref_date.isoformat(),
+            use_rth,
+            len(sessions),
+        )
+        return sessions
 
     async def load_option_chains(self, request: OptionChainRequest) -> list[OptionChain]:
         """Load option chain metadata for stock or index underlyings via reqSecDefOptParams."""
@@ -1373,9 +1412,10 @@ class IBKRHistoricalPacingGuard:
 
 def normalize_ibkr_bars(bars: Sequence[Any], request: OHLCVRequest) -> list[OHLCVBar]:
     normalized: list[OHLCVBar] = []
+    bar_model = _ohlcv_bar_model_for_request(request)
     for bar in bars:
         normalized.append(
-            OHLCVBar(
+            bar_model(
                 symbol=request.symbol,
                 asset_class=request.asset_class,
                 exchange=request.exchange,
@@ -1388,6 +1428,22 @@ def normalize_ibkr_bars(bars: Sequence[Any], request: OHLCVRequest) -> list[OHLC
                 volume=float(getattr(bar, "volume", 0) or 0),
                 bar_size=request.bar_size,
                 source=request.source,
+                **(
+                    {
+                        "contract_month": request.last_trade_date_or_contract_month,
+                        "is_continuous": bool(request.metadata.get("is_continuous", False)),
+                    }
+                    if request.asset_class is AssetClass.FUTURE
+                    else {}
+                ),
+                **(
+                    {
+                        "base_currency": request.metadata.get("base_currency") or _fx_base_currency(request.symbol),
+                        "quote_currency": request.metadata.get("quote_currency") or request.currency,
+                    }
+                    if request.asset_class is AssetClass.FX
+                    else {}
+                ),
                 metadata={
                     **request.metadata,
                     "what_to_show": request.what_to_show,
@@ -1396,6 +1452,21 @@ def normalize_ibkr_bars(bars: Sequence[Any], request: OHLCVRequest) -> list[OHLC
             )
         )
     return normalized
+
+
+def _ohlcv_bar_model_for_request(request: OHLCVRequest) -> type[OHLCVBar]:
+    if request.asset_class is AssetClass.FUTURE:
+        return FutureOHLCVBar
+    if request.asset_class is AssetClass.FX:
+        return FXOHLCVBar
+    return OHLCVBar
+
+
+def _fx_base_currency(symbol: str) -> str | None:
+    normalized = symbol.replace("/", "").strip().upper()
+    if len(normalized) >= 6:
+        return normalized[:3]
+    return None
 
 
 def normalize_ibkr_option_chains(
@@ -1503,6 +1574,7 @@ def _historical_identical_key(request: OHLCVRequest) -> tuple[Any, ...]:
         request.asset_class,
         request.exchange,
         request.currency,
+        request.start_datetime,
         request.end_datetime,
         request.duration,
         request.bar_size,

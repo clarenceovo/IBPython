@@ -16,6 +16,7 @@ class SovereignBondMarket(StrEnum):
     JGB = "JGB"
     KTB = "KTB"
     GERMAN_BUND = "GERMAN_BUND"
+    UK_GILT = "UK_GILT"
 
 
 class BondYieldField(StrEnum):
@@ -246,6 +247,13 @@ DEFAULT_CTD_FUTURE_DEFINITIONS: tuple[CTDFutureDefinition, ...] = (
         exchange="EUREX",
         currency="EUR",
         description="German Bund futures delivery basket",
+    ),
+    CTDFutureDefinition(
+        market=SovereignBondMarket.UK_GILT,
+        futures_symbol="G",
+        exchange="ICEEU",
+        currency="GBP",
+        description="UK Long Gilt futures delivery basket",
     ),
 )
 

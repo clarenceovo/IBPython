@@ -30,6 +30,10 @@ def parse_str(value: Any) -> str:
     return str(value).strip()
 
 
+def parse_market_data_db_backend(value: Any) -> str:
+    return parse_str(value).lower()
+
+
 CONFIG_VALUE_SPECS: tuple[ConfigValueSpec, ...] = (
     ConfigValueSpec("ibkr_host", constants.IBKR_HOST_ENV, constants.DEFAULT_IBKR_HOST, parse_str),
     ConfigValueSpec("ibkr_port", constants.IBKR_PORT_ENV, constants.DEFAULT_IBKR_PORT, int),
@@ -46,6 +50,12 @@ CONFIG_VALUE_SPECS: tuple[ConfigValueSpec, ...] = (
     ConfigValueSpec("mysql_user", constants.MYSQL_USER_ENV, constants.DEFAULT_MYSQL_USER, parse_str),
     ConfigValueSpec("mysql_password", constants.MYSQL_PASSWORD_ENV, constants.DEFAULT_MYSQL_PASSWORD, parse_str),
     ConfigValueSpec("mysql_database", constants.MYSQL_DATABASE_ENV, constants.DEFAULT_MYSQL_DATABASE, parse_str),
+    ConfigValueSpec(
+        "market_data_db_backend",
+        constants.MARKET_DATA_DB_BACKEND_ENV,
+        constants.DEFAULT_MARKET_DATA_DB_BACKEND,
+        parse_market_data_db_backend,
+    ),
     ConfigValueSpec(
         "index_sync_interval_seconds",
         constants.INDEX_SYNC_INTERVAL_SECONDS_ENV,
@@ -108,6 +118,7 @@ _CANONICAL_FIELD_NAME_BY_ENV_NAME = {
     "MYSQL_USER": "mysql_user",
     "MYSQL_PASSWORD": "mysql_password",
     "MYSQL_DATABASE": "mysql_database",
+    "MARKET_DATA_DB_BACKEND": "market_data_db_backend",
     "INDEX_SYNC_INTERVAL_SECONDS": "index_sync_interval_seconds",
     "IBKR_MARKET_DATA_LINES": "ibkr_market_data_lines",
     "INDEX_COMPOSITION_PROVIDER": "index_composition_provider",

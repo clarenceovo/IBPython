@@ -151,6 +151,7 @@ class RedisIBKRHistoricalPacingGuard:
                 str(request.asset_class),
                 request.exchange,
                 request.currency,
+                str(request.start_datetime),
                 str(request.end_datetime),
                 request.duration,
                 request.bar_size,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from typing import Any
 
 from src.config import config_constant as constants
@@ -29,6 +31,43 @@ def index_composition_key(index_symbol: str) -> str:
 
 def scheduler_job_key(job_name: str) -> str:
     return constants.REDIS_SCHEDULER_JOB_KEY_TEMPLATE.format(job_name=job_name)
+
+
+def ohlcv_snapshot_last_ts_key(job_name: str, symbol: str, bar_size: str) -> str:
+    return constants.REDIS_OHLCV_SNAPSHOT_LAST_TS_KEY_TEMPLATE.format(
+        job_name=_redis_token(job_name),
+        symbol=_redis_token(symbol),
+        bar_size=_redis_token(bar_size),
+    )
+
+
+def ohlcv_snapshot_status_key(job_name: str, symbol: str, bar_size: str) -> str:
+    return constants.REDIS_OHLCV_SNAPSHOT_STATUS_KEY_TEMPLATE.format(
+        job_name=_redis_token(job_name),
+        symbol=_redis_token(symbol),
+        bar_size=_redis_token(bar_size),
+    )
+
+
+def ohlcv_snapshot_calendar_key(
+    *,
+    asset_class: AssetClass | str,
+    exchange: str,
+    symbol: str,
+    date_value: str,
+    use_rth: bool,
+) -> str:
+    return constants.REDIS_OHLCV_SNAPSHOT_CALENDAR_KEY_TEMPLATE.format(
+        asset_class=_redis_token(str(asset_class)),
+        exchange=_redis_token(exchange),
+        symbol=_redis_token(symbol),
+        date=date_value,
+        use_rth=str(use_rth).lower(),
+    )
+
+
+def _redis_token(value: str) -> str:
+    return str(value).strip().upper().replace(" ", "_")
 
 
 class MarketDataRedisClient:
@@ -115,9 +154,49 @@ class MarketDataRedisClient:
         await self.connect()
         return await self._client.get(key)
 
+    async def set_raw(self, key: str, value: str, *, ex: int | None = None) -> None:
+        await self.connect()
+        kwargs = {"ex": ex} if ex is not None else {}
+        await self._client.set(key, value, **kwargs)
+
     async def raw_client(self) -> Any:
         await self.connect()
         return self._client
+
+    async def get_ohlcv_snapshot_last_ts(self, job_name: str, symbol: str, bar_size: str) -> datetime | None:
+        payload = await self.get_raw(ohlcv_snapshot_last_ts_key(job_name, symbol, bar_size))
+        if payload is None:
+            return None
+        if isinstance(payload, bytes):
+            payload = payload.decode("utf-8")
+        parsed = datetime.fromisoformat(payload.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    async def set_ohlcv_snapshot_last_ts(
+        self,
+        job_name: str,
+        symbol: str,
+        bar_size: str,
+        timestamp: datetime,
+    ) -> str:
+        key = ohlcv_snapshot_last_ts_key(job_name, symbol, bar_size)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        await self.set_raw(key, timestamp.astimezone(timezone.utc).isoformat())
+        return key
+
+    async def set_ohlcv_snapshot_status(
+        self,
+        job_name: str,
+        symbol: str,
+        bar_size: str,
+        status: dict[str, Any],
+    ) -> str:
+        key = ohlcv_snapshot_status_key(job_name, symbol, bar_size)
+        await self.set_raw(key, json.dumps(status, sort_keys=True, default=str))
+        return key
 
     # ------------------------------------------------------------------
     # Equity snapshot caching

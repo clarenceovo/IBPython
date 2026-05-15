@@ -7,6 +7,9 @@ import pytest
 
 import main
 from src.feeds.index_composition import IndexCompositionPayload
+from src.config.settings import load_settings
+from src.transport.mysql_client import MySQLClient
+from src.transport.questdb_client import QuestDBClient
 from src.transport.scheduler import SchedulerJobDefinition
 
 
@@ -60,6 +63,18 @@ def test_build_index_composition_provider_returns_none_for_bad_import_path() -> 
     assert main.build_index_composition_provider("not_an_import_path") is None
 
 
+def test_build_market_data_store_selects_questdb_by_default() -> None:
+    settings = load_settings(env_file=None, include_os_environ=False)
+
+    assert isinstance(main.build_market_data_store(settings), QuestDBClient)
+
+
+def test_build_market_data_store_selects_mysql() -> None:
+    settings = load_settings(env_file=None, include_os_environ=False, market_data_db_backend="mysql")
+
+    assert isinstance(main.build_market_data_store(settings), MySQLClient)
+
+
 def test_dependency_plan_for_market_snapshot_jobs() -> None:
     persist_job = SchedulerJobDefinition(
         name="persisting_snapshot",
@@ -80,7 +95,41 @@ def test_dependency_plan_for_market_snapshot_jobs() -> None:
     )
 
     assert main._jobs_require_ibkr([persist_job]) is True
+    assert main._jobs_require_market_store([persist_job]) is True
     assert main._jobs_require_questdb([persist_job]) is True
+    assert main._jobs_require_market_store([cache_only_job]) is False
+    assert main._jobs_require_questdb([cache_only_job]) is False
+
+
+def test_dependency_plan_for_ohlcv_snapshot_jobs() -> None:
+    persist_job = SchedulerJobDefinition(
+        name="ohlcv_snapshot",
+        job_type="ohlcv_snapshot",
+        interval_seconds=60,
+        params={
+            "start_time": "09:30",
+            "end_time": "16:00",
+            "timezone": "UTC",
+            "snap_interval_seconds": 60,
+            "defaults": {
+                "asset_class": "equity",
+                "exchange": "SMART",
+                "currency": "USD",
+                "duration": "1 D",
+                "bar_size": "1 min",
+                "persist": True,
+            },
+            "symbols": [{"symbol": "SPY"}],
+        },
+    )
+    cache_only_job = persist_job.model_copy(
+        update={"params": {**persist_job.params, "defaults": {**persist_job.params["defaults"], "persist": "false"}}}
+    )
+
+    assert main._jobs_require_ibkr([persist_job]) is True
+    assert main._jobs_require_market_store([persist_job]) is True
+    assert main._jobs_require_questdb([persist_job]) is True
+    assert main._jobs_require_market_store([cache_only_job]) is False
     assert main._jobs_require_questdb([cache_only_job]) is False
 
 
@@ -93,4 +142,5 @@ def test_dependency_plan_for_index_only_jobs_does_not_need_ibkr_or_questdb() -> 
     )
 
     assert main._jobs_require_ibkr([job]) is False
+    assert main._jobs_require_market_store([job]) is False
     assert main._jobs_require_questdb([job]) is False

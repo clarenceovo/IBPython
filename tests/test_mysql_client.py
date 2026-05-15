@@ -5,7 +5,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.transport.mysql_client import MySQLClient
+from src.feeds.models import OHLCVBar
+from src.transport.market_data_store import MarketOHLCVStore
+from src.transport.mysql_client import (
+    CREATE_MYSQL_MARKET_OHLCV_TABLE_SQL,
+    INSERT_MYSQL_MARKET_OHLCV_SQL,
+    MySQLClient,
+    build_mysql_historical_query,
+    build_mysql_latest_query,
+    mysql_bar_to_row,
+)
 
 
 @pytest.fixture
@@ -169,6 +178,38 @@ class TestMySQLClientHelpers:
         await client.create_table("CREATE TABLE test (id INT PRIMARY KEY)")
         cursor.execute.assert_any_await("CREATE TABLE test (id INT PRIMARY KEY)", None)
 
+    @pytest.mark.asyncio
+    async def test_create_market_ohlcv_table(self, mock_pool):
+        pool, cursor = mock_pool
+        client = _make_client(pool)
+
+        await client.create_market_ohlcv_table()
+
+        cursor.execute.assert_any_await(CREATE_MYSQL_MARKET_OHLCV_TABLE_SQL, None)
+
+    @pytest.mark.asyncio
+    async def test_insert_bars(self, mock_pool):
+        pool, cursor = mock_pool
+        client = _make_client(pool)
+        bar = OHLCVBar(
+            symbol="SPY",
+            asset_class="equity",
+            exchange="SMART",
+            currency="USD",
+            timestamp="2026-01-01T00:00:00Z",
+            open=1,
+            high=2,
+            low=1,
+            close=1.5,
+            volume=100,
+            bar_size="1 min",
+            metadata={"a": 1},
+        )
+
+        await client.insert_bars([bar])
+
+        cursor.executemany.assert_awaited_once_with(INSERT_MYSQL_MARKET_OHLCV_SQL, [mysql_bar_to_row(bar)])
+
 
 class TestMySQLClientReconnect:
     @pytest.mark.asyncio
@@ -193,3 +234,27 @@ class TestMySQLClientReconnect:
             client = _make_client(pool)
             # _ensure_connection should catch the error and reconnect
             await client._ensure_connection()
+
+
+def test_mysql_market_ohlcv_sql_shapes() -> None:
+    assert "CREATE TABLE IF NOT EXISTS market_ohlcv" in CREATE_MYSQL_MARKET_OHLCV_TABLE_SQL
+    assert "ON DUPLICATE KEY UPDATE" in INSERT_MYSQL_MARKET_OHLCV_SQL
+
+
+def test_mysql_query_builders_are_parameterized() -> None:
+    sql, params = build_mysql_historical_query(symbol="spy", asset_class="equity", bar_size="1 min", limit=50)
+
+    assert "symbol = %s" in sql
+    assert "asset_class = %s" in sql
+    assert params == ["SPY", "equity", "1 min", 50]
+
+    latest_sql, latest_params = build_mysql_latest_query(asset_class="future", bar_size="5 mins", limit=10)
+    assert "ROW_NUMBER() OVER" in latest_sql
+    assert latest_params == ["future", "5 mins", 10]
+
+
+def test_mysql_client_implements_market_ohlcv_store_interface(mock_pool) -> None:
+    pool, _ = mock_pool
+    client = _make_client(pool)
+
+    assert isinstance(client, MarketOHLCVStore)

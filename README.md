@@ -11,7 +11,7 @@ Production-oriented IBKR market data, transport, scheduler, and REST API layer f
 - Bond yield, CTD, and yield-curve bootstrap DTOs
 - Account summary, live position, portfolio, account PnL, and position PnL DTOs
 - Redis cache for latest bars, index compositions, scheduler jobs, and IBKR pacing bookmarks
-- QuestDB persistence over PostgreSQL wire protocol
+- OHLCV persistence through a storage interface with QuestDB as the main time-series backend and MySQL as an alternate relational backend
 - Generic Redis-defined scheduler jobs
 - FastAPI app: `IBKRRestApp`
 - Notebook workflows for local debugging and research
@@ -22,6 +22,7 @@ Production-oriented IBKR market data, transport, scheduler, and REST API layer f
 - IBKR TWS or IB Gateway running locally or on a reachable host
 - Redis
 - QuestDB
+- MySQL, optional when `MARKET_DATA_DB_BACKEND=mysql`
 - Docker Desktop or Docker Engine, if using Compose
 
 ## Quick Start
@@ -89,6 +90,12 @@ Core variables:
 | `QUESTDB_USER` | `admin` | QuestDB user |
 | `QUESTDB_PASSWORD` | `quest` | QuestDB password |
 | `QUESTDB_DATABASE` | `qdb` | QuestDB database |
+| `MYSQL_HOST` | `127.0.0.1` | MySQL host for alternate OHLCV persistence |
+| `MYSQL_PORT` | `3306` | MySQL port |
+| `MYSQL_USER` | `root` | MySQL user |
+| `MYSQL_PASSWORD` | empty | MySQL password |
+| `MYSQL_DATABASE` | `trading` | MySQL database |
+| `MARKET_DATA_DB_BACKEND` | `questdb` | OHLCV persistence backend: `questdb` or `mysql` |
 | `INDEX_SYNC_INTERVAL_SECONDS` | `86400` | Default index reload interval |
 | `INDEX_COMPOSITION_PROVIDER` | empty | External index constituent provider name |
 | `IBKR_REST_APP_NAME` | `IBKRRestApp` | FastAPI title |
@@ -126,14 +133,14 @@ make run-api-dev
 The scheduler worker is dependency-aware:
 
 - market snapshot jobs connect to IBKR
-- market snapshot jobs with `persist=true` also connect to QuestDB
-- index-composition-only jobs do not connect to IBKR or QuestDB
+- market/OHLCV snapshot jobs with `persist=true` also connect to the configured market OHLCV store
+- index-composition-only jobs do not connect to IBKR or the market OHLCV store
 - unsupported job types are skipped with a warning instead of crashing the worker
 - SIGINT/SIGTERM request graceful scheduler shutdown
 
 ## Docker
 
-Build and run the API, Redis, and QuestDB:
+Build and run the API, Redis, QuestDB, and MySQL:
 
 ```bash
 cp .env.example .env
@@ -151,12 +158,15 @@ docker compose down
 
 The Compose API service defaults `IBKR_HOST` to `host.docker.internal`, which lets the container reach TWS or IB Gateway running on the host machine through Docker Desktop. Override `IBKR_HOST` if IB Gateway runs elsewhere.
 
+QuestDB remains the default market-data store. To route OHLCV snapshot persistence to MySQL instead, set `MARKET_DATA_DB_BACKEND=mysql` and configure the `MYSQL_*` variables in `.env`.
+
 ## REST API
 
 `IBKRRestApp` is a thin async HTTP bridge over the Pydantic DTOs in `src/feeds`. It keeps business logic in the feed/transport layer and exposes a clean API surface for notebooks, dashboards, services, and internal tools.
 
 Main route groups:
 
+- `/api/v1/business/*`: business-level analytics such as sovereign bond curves
 - `/api/v1/system/*`: health and TTL cache controls
 - `/api/v1/market-data/*`: OHLCV, latest Redis bars, option analytics, bond yield history
 - `/api/v1/reference-data/*`: option chains, fundamentals, WSH events, news
@@ -165,6 +175,7 @@ Main route groups:
 Common endpoints:
 
 ```text
+GET  /api/v1/business/getBondCurve
 GET  /api/v1/system/health
 GET  /api/v1/system/cache/market-data
 POST /api/v1/market-data/ohlcv
@@ -215,6 +226,10 @@ curl -X POST http://localhost:8000/api/v1/market-data/ohlcv/equity \
   -H "Content-Type: application/json" \
   -d '{"symbol":"SPY"}'
 
+curl -X POST http://localhost:8000/api/v1/market-data/ohlcv/equity \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"SPY","start_datetime":"2026-05-01T13:30:00Z","end_datetime":"2026-05-01T20:00:00Z","bar_size":"1 min"}'
+
 curl -X POST http://localhost:8000/api/v1/market-data/ohlcv/fx \
   -H "Content-Type: application/json" \
   -d '{"symbol":"EURUSD"}'
@@ -228,7 +243,20 @@ curl -X POST http://localhost:8000/api/v1/market-data/ohlcv/bond \
   -d '{"sec_id_type":"CUSIP","sec_id":"91282CJN2"}'
 ```
 
-The asset-specific OHLCV wrappers preset `asset_class` and common IBKR defaults. They accept the same optional controls as the generic OHLCV endpoint: `duration`, `bar_size`, `end_datetime`, `what_to_show`, `use_rth`, `persist`, `cache_latest`, `use_ttl_cache`, `cache_ttl_seconds`, and `metadata`.
+The asset-specific OHLCV wrappers are the business-friendly OHLCV API: callers pass minimal identifiers and the service presets `asset_class` plus common IBKR defaults. They accept the same optional controls as the generic OHLCV endpoint: `duration`, `bar_size`, `start_datetime`, `end_datetime`, `what_to_show`, `use_rth`, `persist`, `cache_latest`, `use_ttl_cache`, `cache_ttl_seconds`, and `metadata`.
+
+When `start_datetime` is supplied, the API uses the paginated historical range loader and treats `end_datetime` as the end of the requested range. If `end_datetime` is omitted, the range ends at current UTC time. This is the preferred business payload for explicit backfill windows; `duration` remains useful for simple one-shot IBKR historical requests.
+
+OHLCV DTOs are layered for extension: `BaseOHLCVBar` carries `symbol`, `timestamp`, and OHLCV prices; `OHLCVBar` adds market metadata; `FutureOHLCVBar` adds `contract_month` and `is_continuous`; `FXOHLCVBar` adds `base_currency` and `quote_currency`; `OptionOHLCVBar` adds option contract identity such as underlying, expiry, strike, right, multiplier, trading class, contract month, and `con_id`. The futures and FX wrappers document their specific response schemas in OpenAPI.
+
+OHLCV persistence is backend-neutral. `OHLCVLoader` writes to the configured `MarketOHLCVStore`, implemented by QuestDB and MySQL:
+
+```bash
+MARKET_DATA_DB_BACKEND=questdb  # default main time-series store
+MARKET_DATA_DB_BACKEND=mysql    # alternate relational store
+```
+
+QuestDB is preferred for high-volume time-series capture. MySQL uses the same `market_ohlcv` logical table with an idempotent primary key for operational/reporting deployments that need bars in a relational database.
 
 Example TSLA option-chain request:
 
@@ -278,6 +306,14 @@ curl -X POST http://localhost:8000/api/v1/market-data/options/skew \
 
 The skew endpoint computes per-expiry `put IV - call IV` using the nearest target-delta contracts when Greeks are available, falls back to symmetric moneyness when they are not, and reports the largest open-interest call and put strike for each maturity. Because IBKR rejects snapshot market data with generic ticks, option skew uses short-lived streaming subscriptions for the sampled contracts, waits briefly, then cancels them.
 
+Example standard sovereign bond curve request:
+
+```bash
+curl "http://localhost:8000/api/v1/business/getBondCurve?market=UST&valuation_date=2026-05-16"
+```
+
+Supported `market` aliases include `UST`, `JGB`, `KTB`, `BUND`, `GERMAN_BUND`, `UK`, `UK_GILT`, and `GILT`. The response contains `standard_ctd_points`, the bootstrapped `curve`, and chart-ready `render_points` with tenor, par yield, zero rate, discount factor, CTD symbol, and futures symbol. The built-in provider is an indicative workflow stub: production CTD selection needs official delivery-basket, conversion-factor, accrued-interest, delivery-date, financing, futures-price, and bond quote data from an exchange or vendor.
+
 Example latest-bar request:
 
 ```bash
@@ -306,7 +342,9 @@ SchedulerJob::<job_name>
 
 Operational JSON files live in `schedulejob/`.
 
-Load the default G10 index composition reload job:
+The scheduler reads runnable jobs from both local `schedulejob/*.json` files and Redis `SchedulerJob::*` keys. Local files are deployable defaults; Redis jobs override local jobs when the `name` matches.
+
+Load a local job into Redis when you want to override it operationally:
 
 ```bash
 redis-cli SET SchedulerJob::reload_g10_index_composition "$(cat schedulejob/reload_g10_index_composition.json)"
@@ -333,6 +371,16 @@ The target may be a provider instance, a provider class, or a zero-argument fact
 
 If `INDEX_COMPOSITION_PROVIDER` is blank, `configured_provider`, `placeholder`, or `todo`, the scheduler will not register the index reload handler and Redis index reload jobs will be skipped with a clear warning.
 
+OHLCV snapshot jobs use `job_type="ohlcv_snapshot"` and support either `interval_seconds` or a five-field `cron` expression. The OHLCV job still evaluates its market window before loading data, so a cron trigger outside `start_time`/`end_time` is logged and skipped.
+
+Example local jobs:
+
+- `schedulejob/ohlcv_us_equity_1m.json`
+- `schedulejob/ohlcv_hk_futures_1m.json`
+- `schedulejob/ohlcv_major_indices_5m.json`
+
+Execution state is logged through `src.transport.scheduler.execution` with states such as `evaluating`, `started`, `skipped`, `success`, `error`, and `bookmark_updated`.
+
 ## Redis Keys
 
 Latest OHLCV bar:
@@ -358,6 +406,14 @@ IBKRRateLimit:historical:identical:<request_hash>
 IBKRRateLimit:historical:same_contract:<contract_hash>
 ```
 
+OHLCV snapshot bookmarks and status:
+
+```text
+OhlcvSnapshot::<JOB_NAME>::<SYMBOL>::<BAR_SIZE>:last_ts
+OhlcvSnapshot::<JOB_NAME>::<SYMBOL>::<BAR_SIZE>:status
+OhlcvSnapshotCalendar::<ASSET_CLASS>::<EXCHANGE>::<SYMBOL>::<YYYY-MM-DD>::<true|false>:has_session
+```
+
 ## Verification
 
 ```bash
@@ -369,7 +425,7 @@ python3 -m json.tool schedulejob/reload_g10_index_composition.json >/dev/null
 Current expected test status:
 
 ```text
-64 passed
+186 passed
 ```
 
 ## Important Quant And IBKR Caveats

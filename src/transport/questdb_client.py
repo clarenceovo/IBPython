@@ -9,6 +9,7 @@ from typing import Any
 from src.config import config_constant as constants
 from src.feeds.models import AssetClass, OHLCVBar
 from src.feeds.snapshotter import EquitySnapshot
+from src.transport.market_data_store import MarketOHLCVStore
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 
 """.strip()
 
 
-class QuestDBClient:
+class QuestDBClient(MarketOHLCVStore):
     """Async QuestDB client over the PostgreSQL wire protocol."""
 
     def __init__(

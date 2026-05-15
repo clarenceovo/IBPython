@@ -8,6 +8,14 @@ from src.feeds.account import (
     PortfolioItemDTO,
     PositionPnLDTO,
 )
+from src.feeds.bond_curve import (
+    BondCurveRenderPoint,
+    BondCurveRequest,
+    BondCurveResponse,
+    StandardTenorCTDPoint,
+    build_standard_bond_curve,
+    resolve_bond_curve_market,
+)
 from src.feeds.bonds import (
     BondInstrument,
     BondYieldBar,
@@ -33,7 +41,7 @@ from src.feeds.fundamental_data import (
     WSHEventDataRequest,
     WSHMetadataReport,
 )
-from src.feeds.models import AssetClass, OHLCVBar, OHLCVRequest
+from src.feeds.models import AssetClass, BaseOHLCVBar, FXOHLCVBar, FutureOHLCVBar, OHLCVBar, OHLCVRequest, OptionOHLCVBar
 from src.feeds.news import (
     HistoricalNewsHeadline,
     HistoricalNewsRequest,
@@ -63,6 +71,10 @@ __all__ = [
     "AccountSummaryDTO",
     "AccountValueDTO",
     "AssetClass",
+    "BaseOHLCVBar",
+    "BondCurveRenderPoint",
+    "BondCurveRequest",
+    "BondCurveResponse",
     "BondInstrument",
     "BondYieldBar",
     "BondYieldField",
@@ -73,13 +85,16 @@ __all__ = [
     "CTDFutureDefinition",
     "DEFAULT_CTD_FUTURE_DEFINITIONS",
     "DEFAULT_OPTION_ANALYTICS_GENERIC_TICKS",
+    "FXOHLCVBar",
     "ForecastEventContractCategory",
     "FundamentalDataReport",
     "FundamentalDataRequest",
     "FundamentalReportType",
+    "FutureOHLCVBar",
     "LivePositionDTO",
     "OHLCVBar",
     "OHLCVRequest",
+    "OptionOHLCVBar",
     "OptionAnalyticsRequest",
     "OptionAnalyticsSnapshot",
     "OptionContractSpec",
@@ -93,6 +108,7 @@ __all__ = [
     "OptionSkewSurfaceResponse",
     "PortfolioItemDTO",
     "PositionPnLDTO",
+    "StandardTenorCTDPoint",
     "SovereignBondMarket",
     "YieldCurveBootstrapInstrument",
     "YieldCurveDTO",
@@ -108,4 +124,6 @@ __all__ = [
     "WSHEventDataReport",
     "WSHEventDataRequest",
     "WSHMetadataReport",
+    "build_standard_bond_curve",
+    "resolve_bond_curve_market",
 ]

@@ -80,11 +80,17 @@ class EquitySnapshot(BaseModel):
 
     @model_validator(mode="after")
     def compute_derived(self) -> EquitySnapshot:
+        mid_price: float | None = None
+        spread: float | None = None
+        spread_bps: float | None = None
         if self.bid is not None and self.ask is not None and self.bid > 0 and self.ask > 0:
-            self.mid_price = (self.bid + self.ask) / 2
-            self.spread = self.ask - self.bid
-            if self.mid_price > 0:
-                self.spread_bps = round((self.spread / self.mid_price) * 10_000, 2)
+            mid_price = (self.bid + self.ask) / 2
+            spread = self.ask - self.bid
+            if mid_price > 0:
+                spread_bps = round((spread / mid_price) * 10_000, 2)
+        object.__setattr__(self, "mid_price", mid_price)
+        object.__setattr__(self, "spread", spread)
+        object.__setattr__(self, "spread_bps", spread_bps)
         return self
 
     def to_redis_json(self) -> str:

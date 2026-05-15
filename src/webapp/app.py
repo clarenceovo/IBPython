@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from src.config.settings import Settings, load_settings
 from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
-from src.webapp.routers import account, market_data, reference_data, scanner, snapshot, streaming, system
+from src.webapp.routers import account, business, market_data, reference_data, scanner, snapshot, streaming, system
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,7 @@ def create_app(
             "# IBKR REST API\n\n"
             "Async FastAPI bridge for Interactive Brokers TWS/Gateway.\n\n"
             "## Modules\n"
+            "- **Business** — Standard-tenor sovereign bond curves and chart-ready curve payloads\n"
             "- **Market Data** — OHLCV bars, option analytics/skew, bond yields, latest bars, equity snapshots\n"
             "- **Reference Data** — Option chains, fundamentals, WSH events, news, contract search\n"
             "- **Account** — Positions, portfolio, P&L snapshots\n"
@@ -62,6 +63,7 @@ def create_app(
             {"url": "http://localhost:8000", "description": "Local development"},
         ],
         openapi_tags=[
+            {"name": "business", "description": "Business-level analytics such as standard-tenor sovereign bond curves"},
             {"name": "system", "description": "Health checks and cache management"},
             {"name": "market-data", "description": "OHLCV bars, option analytics/skew, bond yields, and latest bar queries"},
             {"name": "reference-data", "description": "Option chains, fundamental data, Wall Street Horizon events, news, and contract search"},
@@ -73,6 +75,7 @@ def create_app(
         docs_url="/docs",
         redoc_url="/redoc",
     )
+    fastapi_app.include_router(business.router, prefix="/api/v1")
     fastapi_app.include_router(system.router, prefix="/api/v1")
     fastapi_app.include_router(market_data.router, prefix="/api/v1")
     fastapi_app.include_router(reference_data.router, prefix="/api/v1")

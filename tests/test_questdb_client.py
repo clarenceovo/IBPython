@@ -1,9 +1,11 @@
 from datetime import datetime, timezone
 
 from src.feeds.models import AssetClass, OHLCVBar
+from src.transport.market_data_store import MarketOHLCVStore
 from src.transport.questdb_client import (
     CREATE_MARKET_OHLCV_TABLE_SQL,
     INSERT_MARKET_OHLCV_SQL,
+    QuestDBClient,
     bar_to_row,
     build_historical_query,
     build_latest_query,
@@ -65,3 +67,9 @@ def test_build_latest_query_uses_latest_on() -> None:
 
     assert "LATEST ON timestamp PARTITION BY symbol" in sql
     assert params == ["future", "5 mins", 10]
+
+
+def test_questdb_client_implements_market_ohlcv_store_interface() -> None:
+    client = QuestDBClient(connection=object())
+
+    assert isinstance(client, MarketOHLCVStore)

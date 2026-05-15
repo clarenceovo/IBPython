@@ -20,9 +20,16 @@ services:
       QUESTDB_USER: ${QUESTDB_USER:-admin}
       QUESTDB_PASSWORD: ${QUESTDB_PASSWORD:-quest}
       QUESTDB_DATABASE: ${QUESTDB_DATABASE:-qdb}
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: ${MYSQL_USER:-root}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-trading}
+      MARKET_DATA_DB_BACKEND: ${MARKET_DATA_DB_BACKEND:-questdb}
     depends_on:
       - redis
       - questdb
+      - mysql
 
   redis:
     image: redis:7-alpine
@@ -55,6 +62,19 @@ services:
     volumes:
       - questdb-data:/var/lib/questdb
 
+  mysql:
+    image: mysql:8.4
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-trading}
+      MYSQL_USER: ${MYSQL_APP_USER:-trading}
+      MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD:-trading}
+    volumes:
+      - mysql-data:/var/lib/mysql
+
 volumes:
   redis-data:
   questdb-data:
+  mysql-data:

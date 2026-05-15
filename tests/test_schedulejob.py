@@ -9,6 +9,7 @@ from src.config import config_constant as constants
 from src.transport.scheduler import (
     IndexCompositionReloadJobHandler,
     IndexCompositionReloadParams,
+    OHLCVSnapshotParams,
     SchedulerJobDefinition,
 )
 
@@ -46,6 +47,25 @@ def test_reload_g10_schedulejob_json_parses() -> None:
     assert job.job_type == "index_composition_reload"
     assert job.interval_seconds == constants.DEFAULT_INDEX_SYNC_INTERVAL_SECONDS
     assert tuple(job.params["index_symbols"]) == constants.DEFAULT_G10_INDEX_SYMBOLS
+
+
+def test_all_schedulejob_json_files_parse() -> None:
+    for file_path in Path("schedulejob").glob("*.json"):
+        payload = json.loads(file_path.read_text())
+        job = SchedulerJobDefinition.model_validate(payload)
+        if job.job_type == "ohlcv_snapshot":
+            params = OHLCVSnapshotParams.model_validate(job.params)
+            params.validate_interval(job)
+
+
+def test_major_indices_schedulejob_contains_expected_symbols() -> None:
+    payload = json.loads(Path("schedulejob/ohlcv_major_indices_5m.json").read_text())
+    job = SchedulerJobDefinition.model_validate(payload)
+    params = OHLCVSnapshotParams.model_validate(job.params)
+
+    assert job.job_type == "ohlcv_snapshot"
+    assert job.interval_seconds == 300
+    assert {symbol.symbol for symbol in params.symbols} >= {"SPX", "NDX", "VIX", "HSI", "DAX", "FTSE100", "NIKKEI", "SMI"}
 
 
 def test_index_composition_reload_handler_calls_sync_many() -> None:
