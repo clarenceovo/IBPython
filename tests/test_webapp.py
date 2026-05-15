@@ -151,7 +151,9 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
 
     assert generic_examples["spy_equity_full_request"]["value"]["request"]["asset_class"] == "equity"
     assert equity_examples["minimal_spy"]["value"] == {"symbol": "SPY"}
-    assert equity_examples["nasdaq_equity_with_primary_exchange"]["value"]["primary_exchange"] == "NASDAQ"
+    assert equity_examples["tsla_nasdaq_auto"]["value"] == {"symbol": "TSLA"}
+    assert equity_examples["hk_stock_0700"]["value"] == {"symbol": "0700.HK"}
+    assert equity_examples["nasdaq_equity_with_primaryExchange"]["value"]["primary_exchange"] == "NASDAQ"
     assert futures_examples["es_by_contract_month"]["value"]["last_trade_date_or_contract_month"] == "202606"
     assert fx_examples["eurusd_minimal"]["value"] == {"symbol": "EURUSD"}
     assert fx_examples["usdjpy_hourly"]["value"]["currency"] == "JPY"

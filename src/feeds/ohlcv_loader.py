@@ -35,3 +35,13 @@ class OHLCVLoader:
             await self.redis.set_latest_bar(bars[-1])
 
         return bars
+
+    async def persist_bars(self, bars: list[OHLCVBar]) -> None:
+        """Persist a list of bars to QuestDB."""
+        if bars and self.questdb is not None:
+            await self.questdb.insert_bars(bars)
+
+    async def cache_latest_bar(self, bar: OHLCVBar) -> None:
+        """Cache the latest bar to Redis."""
+        if self.redis is not None:
+            await self.redis.set_latest_bar(bar)

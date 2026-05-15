@@ -27,6 +27,12 @@ class Settings(BaseModel):
     questdb_password: str = Field(default=constants.DEFAULT_QUESTDB_PASSWORD, alias=constants.QUESTDB_PASSWORD_ENV)
     questdb_database: str = Field(default=constants.DEFAULT_QUESTDB_DATABASE, alias=constants.QUESTDB_DATABASE_ENV)
 
+    mysql_host: str = Field(default=constants.DEFAULT_MYSQL_HOST, alias=constants.MYSQL_HOST_ENV)
+    mysql_port: int = Field(default=constants.DEFAULT_MYSQL_PORT, alias=constants.MYSQL_PORT_ENV)
+    mysql_user: str = Field(default=constants.DEFAULT_MYSQL_USER, alias=constants.MYSQL_USER_ENV)
+    mysql_password: str = Field(default=constants.DEFAULT_MYSQL_PASSWORD, alias=constants.MYSQL_PASSWORD_ENV)
+    mysql_database: str = Field(default=constants.DEFAULT_MYSQL_DATABASE, alias=constants.MYSQL_DATABASE_ENV)
+
     index_sync_interval_seconds: int = Field(
         default=constants.DEFAULT_INDEX_SYNC_INTERVAL_SECONDS,
         alias=constants.INDEX_SYNC_INTERVAL_SECONDS_ENV,

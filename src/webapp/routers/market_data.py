@@ -7,6 +7,7 @@ from fastapi import APIRouter, Body, Depends, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.feeds.bonds import BondYieldBar, BondYieldHistoryRequest
+from src.feeds.exchange_resolver import resolve_equity
 from src.feeds.models import AssetClass, OHLCVBar, OHLCVRequest
 from src.feeds.options import OptionAnalyticsRequest, OptionAnalyticsSnapshot, OptionSkewSurfaceRequest, OptionSkewSurfaceResponse
 from src.webapp.cache import stable_cache_key
@@ -32,7 +33,14 @@ class MinimalOHLCVLoadControls(BaseModel):
 
     duration: str = Field(default="1 D", min_length=1)
     bar_size: str = Field(default="1 min", min_length=1)
-    end_datetime: datetime | None = None
+    start_datetime: datetime | None = Field(
+        default=None,
+        description="Start of the date range (inclusive). When set with end_datetime, the wrapper paginates automatically.",
+    )
+    end_datetime: datetime | None = Field(
+        default=None,
+        description="End of the date range (inclusive). Defaults to now.",
+    )
     what_to_show: str = Field(default="TRADES", min_length=1)
     use_rth: bool = True
     persist: bool = False
@@ -65,18 +73,45 @@ class MinimalOHLCVLoadControls(BaseModel):
 
 
 class EquityOHLCVLoadRequest(MinimalOHLCVLoadControls):
-    symbol: str = Field(min_length=1, examples=["SPY"])
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
-    primary_exchange: str | None = Field(default=None, examples=["ARCA"])
+    symbol: str = Field(
+        min_length=1,
+        examples=["SPY", "0700.HK", "7203.T", "TSLA"],
+        description=(
+            "Ticker symbol with optional exchange suffix. "
+            "Supported suffixes: .HK (HKEX), .T (TSE), .L (LSE), .F/.DE (Xetra), "
+            ".PA (Euronext Paris), .AS (Amsterdam), .MC (Madrid), .MI (Milan), "
+            ".SW (SIX), .TO (TSX), .AX (ASX), .SI (SGX), .NS/.BO (India), "
+            ".KS (Korea), .SS (Shanghai), .SZ (Shenzhen), .MX (Mexico), .SA (Brazil). "
+            "No suffix defaults to SMART/USD (US equity)."
+        ),
+    )
+    exchange: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Override auto-detected exchange. Leave empty to auto-resolve from symbol suffix.",
+    )
+    currency: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Override auto-detected currency. Leave empty to auto-resolve from symbol suffix.",
+    )
+    primary_exchange: str | None = Field(
+        default=None,
+        examples=["ARCA"],
+        description="Override auto-detected primary exchange. Leave empty to auto-resolve.",
+    )
 
     def to_request(self) -> OHLCVRequest:
+        resolved = resolve_equity(self.symbol)
+        exchange = self.exchange or resolved.exchange
+        currency = self.currency or resolved.currency
+        primary = self.primary_exchange or resolved.primary_exchange or None
         return self.to_ohlcv_request(
             AssetClass.EQUITY,
-            symbol=self.symbol,
-            exchange=self.exchange,
-            currency=self.currency,
-            primary_exchange=self.primary_exchange,
+            symbol=resolved.symbol,
+            exchange=exchange,
+            currency=currency,
+            primary_exchange=primary,
         )
 
 
@@ -151,6 +186,39 @@ class BondOHLCVLoadRequest(MinimalOHLCVLoadControls):
         )
 
 
+class IndexOHLCVLoadRequest(MinimalOHLCVLoadControls):
+    """Wrapper for index OHLCV — SPX, NDX, DAX, HSI, etc."""
+
+    symbol: str = Field(
+        min_length=1,
+        examples=["SPX", "NDX", "HSI", "DAX"],
+        description=(
+            "Index symbol as recognized by IBKR. "
+            "SPX → CBOE/USD, NDX → CBOE/USD, HSI → SEHK/HKD, DAX → EUREX/EUR. "
+            "Use the exchange/currency overrides for less common indices."
+        ),
+    )
+    exchange: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Override auto-detected exchange. Leave empty to auto-resolve from symbol.",
+    )
+    currency: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Override auto-detected currency. Leave empty to auto-resolve.",
+    )
+
+    def to_request(self) -> OHLCVRequest:
+        resolved = _resolve_index(self.symbol)
+        return self.to_ohlcv_request(
+            AssetClass.INDEX,
+            symbol=resolved["symbol"],
+            exchange=self.exchange or resolved["exchange"],
+            currency=self.currency or resolved["currency"],
+        )
+
+
 class CachedOptionAnalyticsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -201,12 +269,27 @@ GENERIC_OHLCV_REQUEST_EXAMPLES = {
 EQUITY_OHLCV_REQUEST_EXAMPLES = {
     "minimal_spy": {
         "summary": "Minimal SPY equity bars",
-        "description": "Only symbol is required. The wrapper presets asset_class=equity, exchange=SMART, currency=USD, and TRADES.",
+        "description": "Only symbol is required. Auto-resolves to SMART/USD/ARCA.",
         "value": {"symbol": "SPY"},
     },
-    "nasdaq_equity_with_primary_exchange": {
-        "summary": "NASDAQ-listed equity",
-        "description": "Use primary_exchange when the SMART-routed stock needs IBKR disambiguation.",
+    "tsla_nasdaq_auto": {
+        "summary": "TSLA auto-resolved",
+        "description": "TSLA auto-resolves to SMART/USD/NASDAQ via exchange resolver.",
+        "value": {"symbol": "TSLA"},
+    },
+    "hk_stock_0700": {
+        "summary": "0700.HK (Tencent)",
+        "description": ".HK suffix auto-resolves to SEHK/HKD.",
+        "value": {"symbol": "0700.HK"},
+    },
+    "jp_stock_toyota": {
+        "summary": "7203.T (Toyota)",
+        "description": ".T suffix auto-resolves to TSEJ/JPY.",
+        "value": {"symbol": "7203.T"},
+    },
+    "nasdaq_equity_with_primaryExchange": {
+        "summary": "NASDAQ-listed equity (explicit override)",
+        "description": "Use primary_exchange when the auto-resolver doesn't match and SMART needs disambiguation.",
         "value": {
             "symbol": "TSLA",
             "primary_exchange": "NASDAQ",
@@ -214,6 +297,16 @@ EQUITY_OHLCV_REQUEST_EXAMPLES = {
             "bar_size": "5 mins",
             "cache_latest": True,
         },
+    },
+    "london_stock": {
+        "summary": "HSBA.L (HSBC London)",
+        "description": ".L suffix auto-resolves to LSE/GBP.",
+        "value": {"symbol": "HSBA.L"},
+    },
+    "shanghai_connect": {
+        "summary": "600519.SS (Kweichow Moutai)",
+        "description": ".SS suffix auto-resolves to SEHKNTL/CNH (Stock Connect).",
+        "value": {"symbol": "600519.SS"},
     },
 }
 
@@ -286,6 +379,91 @@ BOND_OHLCV_REQUEST_EXAMPLES = {
 }
 
 
+INDEX_OHLCV_REQUEST_EXAMPLES = {
+    "spx_us": {
+        "summary": "S&P 500 (SPX)",
+        "description": "Auto-resolves to CBOE/USD.",
+        "value": {"symbol": "SPX"},
+    },
+    "ndx_us": {
+        "summary": "Nasdaq-100 (NDX)",
+        "description": "Auto-resolves to CBOE/USD.",
+        "value": {"symbol": "NDX"},
+    },
+    "hsi_hk": {
+        "summary": "Hang Seng Index (HSI)",
+        "description": "Auto-resolves to SEHK/HKD.",
+        "value": {"symbol": "HSI"},
+    },
+    "dax_de": {
+        "summary": "DAX (DAX)",
+        "description": "Auto-resolves to EUREX/EUR.",
+        "value": {"symbol": "DAX"},
+    },
+    "nikkei_jp": {
+        "summary": "Nikkei 225 (NIKKEI)",
+        "description": "Auto-resolves to TSEJ/JPY.",
+        "value": {"symbol": "NIKKEI"},
+    },
+    "vix_us": {
+        "summary": "CBOE Volatility Index (VIX)",
+        "description": "Auto-resolves to CBOE/USD.",
+        "value": {"symbol": "VIX"},
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Index auto-resolver
+# ---------------------------------------------------------------------------
+_INDEX_EXCHANGE_MAP: dict[str, tuple[str, str]] = {
+    # US indices
+    "SPX": ("CBOE", "USD"),
+    "NDX": ("CBOE", "USD"),
+    "VIX": ("CBOE", "USD"),
+    "RUT": ("CBOE", "USD"),
+    "DJI": ("CBOE", "USD"),
+    "OEX": ("CBOE", "USD"),
+    "NDXP": ("CBOE", "USD"),
+    # Hong Kong
+    "HSI": ("SEHK", "HKD"),
+    "HSCEI": ("SEHK", "HKD"),
+    "HSTECH": ("SEHK", "HKD"),
+    # Japan
+    "NIKKEI": ("TSEJ", "JPY"),
+    "NKY": ("TSEJ", "JPY"),
+    "TOPIX": ("TSEJ", "JPY"),
+    # Europe
+    "DAX": ("EUREX", "EUR"),
+    "FDAX": ("EUREX", "EUR"),
+    "SMI": ("EBS", "CHF"),
+    "CAC40": ("SBF", "EUR"),
+    "FTSE100": ("LSE", "GBP"),
+    # Australia
+    "SPI": ("ASX", "AUD"),
+    "XJO": ("ASX", "AUD"),
+    # Korea
+    "KOSPI": ("KSE", "KRW"),
+    "KOSPI200": ("KSE", "KRW"),
+    # India
+    "NIFTY": ("NSE", "INR"),
+    "BANKNIFTY": ("NSE", "INR"),
+    # Singapore
+    "STI": ("SGX", "SGD"),
+    # Canada
+    "SPTSX": ("TSE", "CAD"),
+}
+
+
+def _resolve_index(symbol: str) -> dict[str, str]:
+    """Look up IBKR exchange and currency for a known index symbol."""
+    upper = symbol.strip().upper()
+    if upper in _INDEX_EXCHANGE_MAP:
+        exchange, currency = _INDEX_EXCHANGE_MAP[upper]
+        return {"symbol": upper, "exchange": exchange, "currency": currency}
+    return {"symbol": upper, "exchange": "CBOE", "currency": "USD"}
+
+
 OPTION_SKEW_REQUEST_EXAMPLES = {
     "tsla_bounded_skew": {
         "summary": "TSLA per-maturity skew",
@@ -338,6 +516,7 @@ OPTION_SKEW_REQUEST_EXAMPLES = {
 async def _load_ohlcv_with_controls(
     *,
     request: OHLCVRequest,
+    start_datetime: datetime | None = None,
     persist: bool,
     cache_latest: bool,
     use_ttl_cache: bool,
@@ -345,6 +524,36 @@ async def _load_ohlcv_with_controls(
     cache_namespace: str,
     state: IBKRRestAppState,
 ) -> list[OHLCVBar]:
+    # When start_datetime is provided, use paginated range fetch.
+    if start_datetime is not None and start_datetime != request.end_datetime:
+        if use_ttl_cache and not persist:
+            key = stable_cache_key(
+                f"{cache_namespace}:range",
+                {
+                    "request": request.model_dump(mode="json"),
+                    "start_datetime": start_datetime.isoformat(),
+                },
+            )
+            cached = await state.market_data_cache.get(key)
+            if cached is not None:
+                return cached
+
+        bars = await state.feed.load_historical_ohlcv_range(
+            request,
+            start_datetime=start_datetime,
+            end_datetime=request.end_datetime,
+        )
+
+        if persist:
+            await state.loader.persist_bars(bars)
+        if cache_latest and bars:
+            await state.loader.cache_latest_bar(bars[-1])
+
+        if use_ttl_cache and not persist:
+            await state.market_data_cache.set(key, bars, ttl_seconds=cache_ttl_seconds)
+        return bars
+
+    # Single-chunk fetch (original behavior).
     async def load() -> list[OHLCVBar]:
         return await state.loader.load(
             request,
@@ -391,6 +600,7 @@ async def load_equity_ohlcv(
 ) -> list[OHLCVBar]:
     return await _load_ohlcv_with_controls(
         request=payload.to_request(),
+        start_datetime=payload.start_datetime,
         persist=payload.persist,
         cache_latest=payload.cache_latest,
         use_ttl_cache=payload.use_ttl_cache,
@@ -411,6 +621,7 @@ async def load_futures_ohlcv(
 ) -> list[OHLCVBar]:
     return await _load_ohlcv_with_controls(
         request=payload.to_request(),
+        start_datetime=payload.start_datetime,
         persist=payload.persist,
         cache_latest=payload.cache_latest,
         use_ttl_cache=payload.use_ttl_cache,
@@ -431,6 +642,7 @@ async def load_fx_ohlcv(
 ) -> list[OHLCVBar]:
     return await _load_ohlcv_with_controls(
         request=payload.to_request(),
+        start_datetime=payload.start_datetime,
         persist=payload.persist,
         cache_latest=payload.cache_latest,
         use_ttl_cache=payload.use_ttl_cache,
@@ -451,11 +663,33 @@ async def load_bond_ohlcv(
 ) -> list[OHLCVBar]:
     return await _load_ohlcv_with_controls(
         request=payload.to_request(),
+        start_datetime=payload.start_datetime,
         persist=payload.persist,
         cache_latest=payload.cache_latest,
         use_ttl_cache=payload.use_ttl_cache,
         cache_ttl_seconds=payload.cache_ttl_seconds,
         cache_namespace="ohlcv_bond",
+        state=state,
+    )
+
+
+@router.post(
+    "/ohlcv/index",
+    response_model=list[OHLCVBar],
+    summary="Load index OHLCV with auto-resolved exchange",
+)
+async def load_index_ohlcv(
+    payload: Annotated[IndexOHLCVLoadRequest, Body(openapi_examples=INDEX_OHLCV_REQUEST_EXAMPLES)],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> list[OHLCVBar]:
+    return await _load_ohlcv_with_controls(
+        request=payload.to_request(),
+        start_datetime=payload.start_datetime,
+        persist=payload.persist,
+        cache_latest=payload.cache_latest,
+        use_ttl_cache=payload.use_ttl_cache,
+        cache_ttl_seconds=payload.cache_ttl_seconds,
+        cache_namespace="ohlcv_index",
         state=state,
     )
 

@@ -2,6 +2,7 @@ pydantic>=2.10
 pydantic-settings>=2.6
 redis>=5.0
 psycopg[binary]>=3.2
+aiomysql>=0.2.0
 ib-insync>=0.9.86
 nest-asyncio>=1.5
 pandas>=2.2

@@ -6,7 +6,7 @@ import math
 import time as monotonic_time
 from collections import defaultdict, deque
 from collections.abc import Sequence
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, ClassVar
 
 from src.config import config_constant as constants
@@ -461,6 +461,101 @@ class IBKRFeedClient:
         ):
             setattr(selected, "exchange", "SMART")
         return selected
+
+    async def load_historical_ohlcv_range(
+        self,
+        request: OHLCVRequest,
+        *,
+        start_datetime: datetime,
+        end_datetime: datetime | None = None,
+    ) -> list[OHLCVBar]:
+        """Paginated historical OHLCV fetch across a date range.
+
+        IBKR limits each reqHistoricalData call to a maximum duration that depends
+        on bar_size (e.g. ~6 months for 1-day bars, ~30 days for 1-min bars).
+        This method chunks the range into IBKR-compatible duration windows,
+        respects pacing limits between requests, and concatenates the results.
+        """
+        await self._ensure_connected()
+
+        if end_datetime is None:
+            end_datetime = datetime.now(timezone.utc)
+        if start_datetime.tzinfo is None:
+            start_datetime = start_datetime.replace(tzinfo=timezone.utc)
+        if end_datetime.tzinfo is None:
+            end_datetime = end_datetime.replace(tzinfo=timezone.utc)
+
+        chunk_duration = _ibkr_max_duration_for_bar_size(request.bar_size)
+        chunk_seconds = _ibkr_duration_to_seconds(chunk_duration)
+
+        total_seconds = (end_datetime - start_datetime).total_seconds()
+        if total_seconds <= 0:
+            logger.info("load_historical_ohlcv_range: empty range, returning []")
+            return []
+
+        logger.info(
+            "load_historical_ohlcv_range: symbol=%s bar_size=%s range=%s → %s (%.0f seconds, ~%d chunks)",
+            request.symbol, request.bar_size, start_datetime.isoformat(), end_datetime.isoformat(),
+            total_seconds, max(1, int(total_seconds / chunk_seconds)),
+        )
+
+        all_bars: list[OHLCVBar] = []
+        chunk_end = end_datetime
+        chunk_count = 0
+        max_chunks = 60  # safety limit: 60 requests = full pacing window
+
+        while chunk_end > start_datetime and chunk_count < max_chunks:
+            chunk_start = max(start_datetime, chunk_end - _seconds_to_timedelta(chunk_seconds))
+            chunk_duration_actual = _ibkr_duration_between(chunk_start, chunk_end)
+
+            chunk_request = request.model_copy(update={
+                "end_datetime": chunk_end,
+                "duration": chunk_duration_actual,
+                "start_datetime": None,
+            })
+
+            logger.info(
+                "ohlcv_range chunk %d: fetching %s → %s (duration=%s)",
+                chunk_count + 1, chunk_start.isoformat(), chunk_end.isoformat(), chunk_duration_actual,
+            )
+
+            bars = await self.load_historical_ohlcv(chunk_request)
+
+            # Filter out bars before start_datetime
+            bars = [b for b in bars if b.timestamp >= start_datetime]
+
+            all_bars = bars + all_bars  # prepend older bars
+            chunk_count += 1
+
+            if not bars:
+                # No data returned — either market closed or no trading in this window.
+                # Move the window back and continue.
+                chunk_end = chunk_start
+                continue
+
+            # Earliest bar timestamp tells us where data actually starts.
+            earliest = bars[0].timestamp
+            if earliest <= chunk_start:
+                # We got data at or before chunk_start, done.
+                break
+
+            chunk_end = earliest
+
+        # Deduplicate by timestamp (overlapping chunks may produce duplicates)
+        seen: set[datetime] = set()
+        unique_bars: list[OHLCVBar] = []
+        for bar in all_bars:
+            if bar.timestamp not in seen:
+                seen.add(bar.timestamp)
+                unique_bars.append(bar)
+        unique_bars.sort(key=lambda b: b.timestamp)
+
+        logger.info(
+            "load_historical_ohlcv_range: %d bars for %s across %d chunks (range %s → %s)",
+            len(unique_bars), request.symbol, chunk_count,
+            start_datetime.date().isoformat(), end_datetime.date().isoformat(),
+        )
+        return unique_bars
 
     async def load_historical_ohlcv(self, request: OHLCVRequest) -> list[OHLCVBar]:
         await self._ensure_connected()
@@ -1248,6 +1343,95 @@ def _ibkr_sec_type_for_option_underlying(asset_class: AssetClass) -> str:
     if asset_class is AssetClass.INDEX:
         return "IND"
     raise ValueError(f"unsupported option underlying asset class: {asset_class}")
+
+
+# IBKR maximum duration per bar_size for a single reqHistoricalData call.
+# https://ibkrcampus.com/campus/ibkr-api-page/twsapi-doc/#hd-duration
+_IBKR_MAX_DURATION_BY_BAR_SIZE: dict[str, str] = {
+    "1 sec": "1800 S",
+    "5 secs": "3600 S",
+    "10 secs": "7200 S",
+    "15 secs": "14400 S",
+    "30 secs": "28800 S",
+    "1 min": "1 D",
+    "2 mins": "2 D",
+    "3 mins": "3 D",
+    "5 mins": "7 D",
+    "10 mins": "14 D",
+    "15 mins": "30 D",
+    "20 mins": "30 D",
+    "30 mins": "60 D",
+    "1 hour": "365 D",
+    "2 hours": "365 D",
+    "3 hours": "365 D",
+    "4 hours": "365 D",
+    "8 hours": "365 D",
+    "1 day": "18 M",
+    "1 week": "10 Y",
+    "1 month": "10 Y",
+}
+
+
+def _ibkr_max_duration_for_bar_size(bar_size: str) -> str:
+    """Return the maximum IBKR duration string for a given bar size."""
+    normalized = bar_size.strip().lower()
+    # Handle plural variants like "1 min" vs "1 mins"
+    for key, value in _IBKR_MAX_DURATION_BY_BAR_SIZE.items():
+        if key == normalized or key.rstrip("s") == normalized.rstrip("s"):
+            return value
+    # Default: 1 day for anything unknown
+    return "365 D"
+
+
+def _ibkr_duration_to_seconds(duration: str) -> float:
+    """Convert an IBKR duration string to approximate seconds.
+
+    IBKR duration strings: N S (seconds), N D (days), N W (weeks), N M (months), N Y (years).
+    """
+    duration = duration.strip()
+    parts = duration.split()
+    if len(parts) != 2:
+        return 86400.0  # default 1 day
+    try:
+        amount = float(parts[0])
+    except ValueError:
+        return 86400.0
+    unit = parts[1].upper()
+    if unit == "S":
+        return amount
+    if unit == "D":
+        return amount * 86400
+    if unit == "W":
+        return amount * 86400 * 7
+    if unit == "M":
+        return amount * 86400 * 30
+    if unit == "Y":
+        return amount * 86400 * 365
+    return 86400.0
+
+
+def _seconds_to_timedelta(seconds: float) -> timedelta:
+    from datetime import timedelta as td
+    return td(seconds=seconds)
+
+
+def _ibkr_duration_between(start: datetime, end: datetime) -> str:
+    """Compute an IBKR duration string that covers the interval from start to end."""
+    total_seconds = (end - start).total_seconds()
+    if total_seconds <= 0:
+        return "1 D"
+
+    days = total_seconds / 86400
+    if days <= 1:
+        # Use seconds for sub-day durations
+        return f"{int(total_seconds)} S"
+    if days <= 365:
+        return f"{int(days) + 1} D"  # round up
+    months = int(days / 30) + 1
+    if months <= 18:
+        return f"{months} M"
+    years = int(days / 365) + 1
+    return f"{years} Y"
 
 
 def _build_wsh_event_data(filter_json: str) -> Any:
