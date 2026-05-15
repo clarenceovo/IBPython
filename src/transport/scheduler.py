@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.feeds.models import OHLCVRequest
+from src.feeds.snapshotter import SnapshotWatchlist
 
 logger = logging.getLogger(__name__)
 
@@ -248,3 +249,134 @@ def _coerce_bool(value: Any, *, default: bool) -> bool:
         if normalized in {"0", "false", "f", "no", "n", "off"}:
             return False
     return bool(value)
+
+
+class EquitySnapshotJobHandler:
+    """Handler for Redis job_type='equity_snapshot' jobs.
+
+    Periodically captures point-in-time snapshots for an equity watchlist
+    and persists them to QuestDB + caches latest in Redis.
+
+    Expected job params:
+      - watchlist_name: str — name of a SnapshotWatchlist stored in Redis
+      - persist: bool (default True)
+      - cache_latest: bool (default True)
+    """
+
+    job_type = "equity_snapshot"
+
+    def __init__(self, snapshot_router: Any) -> None:
+        """
+        Parameters
+        ----------
+        snapshot_router : module or object
+            Must expose ``capture_snapshots(request, state)`` compatible with the
+            FastAPI endpoint. In practice, import the router function directly.
+        """
+        self._capture = snapshot_router
+
+    async def __call__(self, job: SchedulerJobDefinition) -> None:
+        watchlist_name = job.params.get("watchlist_name", "")
+        if not watchlist_name:
+            raise ValueError("equity_snapshot job requires 'watchlist_name' param")
+        # The handler needs access to feed/redis/questdb — it will be wired
+        # at main.py level where the full app state is available.
+        # For now, this handler is a placeholder that validates the job config.
+        logger.info("equity snapshot job executed: job=%s watchlist=%s", job.name, watchlist_name)
+
+        persist = _coerce_bool(job.params.get("persist"), default=True)
+        cache_latest = _coerce_bool(job.params.get("cache_latest"), default=True)
+
+        # Load watchlist from Redis (requires redis client to be injected)
+        if not hasattr(self, "_redis") or self._redis is None:
+            raise RuntimeError("EquitySnapshotJobHandler requires redis client (call wire_redis)")
+
+        key_pattern = "SnapshotWatchlist::{name}"
+        key = key_pattern.format(name=watchlist_name.strip().lower())
+        payload = await self._redis.get_raw(key)
+        if payload is None:
+            raise ValueError(f"watchlist '{watchlist_name}' not found in Redis")
+        if isinstance(payload, bytes):
+            payload = payload.decode("utf-8")
+        watchlist = SnapshotWatchlist.model_validate_json(payload)
+
+        logger.info(
+            "snapshotting watchlist: name=%s symbols=%d persist=%s cache=%s",
+            watchlist.name,
+            len(watchlist.symbols),
+            persist,
+            cache_latest,
+        )
+
+        # Delegate to the feed client directly for scheduler context
+        if not hasattr(self, "_feed") or self._feed is None:
+            raise RuntimeError("EquitySnapshotJobHandler requires feed client (call wire_feed)")
+
+        from src.feeds.exchange_resolver import resolve_equity
+        from src.feeds.snapshotter import ticker_to_snapshot, EquitySnapshot
+
+        import time as _time
+        t0 = _time.monotonic()
+        snapshots: list[EquitySnapshot] = []
+        failed: list[str] = []
+
+        symbol_params = []
+        for raw_sym in watchlist.symbols:
+            resolved = resolve_equity(raw_sym)
+            symbol_params.append((resolved.symbol, resolved.exchange, resolved.currency, resolved.primary_exchange, 0))
+
+        tickers = await self._feed.capture_equity_snapshots(symbol_params)
+
+        for i, ticker in enumerate(tickers):
+            if i < len(symbol_params):
+                s, ex, cur, pe, _ = symbol_params[i]
+                try:
+                    snap = ticker_to_snapshot(ticker, symbol=s, exchange=ex, currency=cur, primary_exchange=pe)
+                    snapshots.append(snap)
+                except Exception:
+                    failed.append(s)
+
+        await self._feed.cancel_equity_tickers(tickers)
+
+        captured_symbols = {s.symbol for s in snapshots}
+        for raw_sym in watchlist.symbols:
+            resolved = resolve_equity(raw_sym)
+            if resolved.symbol not in captured_symbols:
+                failed.append(resolved.symbol)
+
+        # Persist
+        if persist and snapshots and hasattr(self, "_questdb") and self._questdb is not None:
+            try:
+                await self._questdb.insert_snapshots(snapshots)
+                logger.info("persisted %d snapshots to QuestDB", len(snapshots))
+            except Exception:
+                logger.exception("failed to persist snapshots")
+
+        # Cache
+        if cache_latest and snapshots:
+            for snap in snapshots:
+                try:
+                    await self._redis.set_latest_equity_snapshot(snap)
+                except Exception:
+                    pass
+
+        duration = _time.monotonic() - t0
+        logger.info(
+            "equity snapshot complete: watchlist=%s captured=%d failed=%d duration=%.2fs",
+            watchlist.name,
+            len(snapshots),
+            len(failed),
+            duration,
+        )
+
+    def wire_feed(self, feed: Any) -> "EquitySnapshotJobHandler":
+        self._feed = feed
+        return self
+
+    def wire_redis(self, redis: Any) -> "EquitySnapshotJobHandler":
+        self._redis = redis
+        return self
+
+    def wire_questdb(self, questdb: Any) -> "EquitySnapshotJobHandler":
+        self._questdb = questdb
+        return self

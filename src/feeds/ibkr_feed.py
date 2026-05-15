@@ -37,6 +37,11 @@ from src.feeds.bonds import (
     BondYieldHistoryRequest,
     normalize_ibkr_bond_yield_bars,
 )
+from src.feeds.scanner import (
+    ContractScanRequest,
+    ContractSearchRequest,
+    ContractSearchResult,
+)
 from src.feeds.news import (
     HistoricalNewsHeadline,
     HistoricalNewsRequest,
@@ -1043,6 +1048,167 @@ class IBKRFeedClient:
     ) -> PositionPnLDTO:
         return normalize_position_pnl(pnl_subscription, account, con_id, model_code)
 
+    # ------------------------------------------------------------------
+    # Contract search & scanner
+    # ------------------------------------------------------------------
+
+    async def search_contracts(self, request: ContractSearchRequest) -> list[ContractSearchResult]:
+        """Search IBKR contract database by symbol pattern or conId."""
+        await self._ensure_connected()
+
+        try:
+            from ib_insync import Contract
+        except ImportError as exc:
+            raise RuntimeError("ib_insync is required") from exc
+
+        contract_kwargs: dict[str, Any] = {}
+        if request.con_id:
+            contract_kwargs["conId"] = request.con_id
+        if request.symbol:
+            contract_kwargs["symbol"] = request.symbol.upper()
+        if request.sec_type:
+            contract_kwargs["secType"] = request.sec_type.upper()
+        if request.exchange:
+            contract_kwargs["exchange"] = request.exchange.upper()
+        if request.currency:
+            contract_kwargs["currency"] = request.currency.upper()
+
+        contract = Contract(**contract_kwargs)
+
+        try:
+            details = await self._with_retry(
+                lambda: self._ib.reqContractDetailsAsync(contract),
+                operation="search_contracts",
+            )
+        except Exception as exc:
+            # 200 = no security definition found is not an error for search
+            if "200" in str(exc):
+                return []
+            raise
+
+        if not details:
+            return []
+
+        results: list[ContractSearchResult] = []
+        for detail in details:
+            c = getattr(detail, "contract", detail)
+            result = ContractSearchResult(
+                con_id=int(getattr(c, "conId", 0) or 0),
+                symbol=getattr(c, "symbol", "") or "",
+                sec_type=getattr(c, "secType", "") or "",
+                exchange=getattr(c, "exchange", "") or "",
+                currency=getattr(c, "currency", "") or "",
+                primary_exchange=getattr(c, "primaryExchange", "") or getattr(c, "primaryExch", "") or "",
+                local_symbol=getattr(c, "localSymbol", "") or "",
+                long_name=getattr(detail, "longName", "") or "",
+                category=getattr(detail, "category", "") or "",
+                subcategory=getattr(detail, "subcategory", "") or "",
+                industry=getattr(detail, "industry", "") or "",
+                market_name=getattr(detail, "marketName", "") or "",
+                min_tick=float(getattr(detail, "minTick", 0) or 0),
+                trading_hours=getattr(detail, "tradingHours", "") or "",
+                liquid_hours=getattr(detail, "liquidHours", "") or "",
+                last_trading_day=getattr(detail, "lastTradeDate", "") or getattr(detail, "contractMonth", "") or "",
+                multiplier=getattr(detail, "multiplier", "") or getattr(c, "multiplier", "") or "",
+                strike=_float_or_none(getattr(c, "strike", None)),
+                right=getattr(c, "right", "") or "",
+                expiry=getattr(c, "lastTradeDateOrContractMonth", "") or "",
+            )
+            if result.con_id > 0:
+                results.append(result)
+
+        return results[:100]  # hard cap
+
+    async def scan_contracts(self, request: ContractScanRequest) -> list[ContractSearchResult]:
+        """Scan for contracts matching a symbol across exchanges/types."""
+        search_req = ContractSearchRequest(
+            symbol=request.symbol,
+            sec_type=request.sec_type,
+            exchange=request.exchange,
+            currency=request.currency,
+        )
+        results = await self.search_contracts(search_req)
+
+        # Filter by primary exchange if specified
+        if request.primary_exchange:
+            primary_upper = request.primary_exchange.upper()
+            results = [r for r in results if r.primary_exchange.upper() == primary_upper or r.exchange.upper() == primary_upper]
+
+        return results[:request.max_results]
+
+    # ------------------------------------------------------------------
+    # Real-time market data streaming
+    # ------------------------------------------------------------------
+
+    async def subscribe_ticker(self, spec: ContractSpec) -> Any:
+        """Subscribe to real-time market data for a contract. Returns the ib_insync Ticker."""
+        await self._ensure_connected()
+        contract = build_ibkr_contract(spec)
+        ticker = self._ib.reqMktData(contract, "", False, False)
+        # Wait briefly for initial data
+        await asyncio.sleep(0.5)
+        return ticker
+
+    async def unsubscribe_ticker(self, ticker: Any) -> None:
+        """Cancel a market data subscription."""
+        if self._ib is None:
+            return
+        try:
+            self._ib.cancelMktData(ticker.contract)
+        except Exception:
+            logger.warning("error unsubscribing ticker", exc_info=True)
+
+    async def capture_equity_snapshots(
+        self,
+        symbols: Sequence[tuple[str, str, str, str, int]],
+    ) -> list[Any]:
+        """Capture point-in-time snapshots for a list of equity contracts.
+
+        Parameters
+        ----------
+        symbols : sequence of (symbol, exchange, currency, primary_exchange, con_id)
+            The equity universe to snapshot.
+
+        Returns
+        -------
+        list of ib_insync Ticker objects with live data.
+        """
+        await self._ensure_connected()
+        tickers: list[Any] = []
+        for symbol, exchange, currency, primary_exchange, con_id in symbols:
+            try:
+                from ib_insync import Contract
+                kwargs: dict[str, Any] = {
+                    "secType": "STK",
+                    "symbol": symbol.upper(),
+                    "exchange": exchange.upper(),
+                    "currency": currency.upper(),
+                }
+                if primary_exchange:
+                    kwargs["primaryExchange"] = primary_exchange.upper()
+                if con_id and con_id > 0:
+                    kwargs["conId"] = con_id
+                contract = Contract(**kwargs)
+                ticker = self._ib.reqMktData(contract, "", False, False)
+                tickers.append(ticker)
+            except Exception:
+                logger.warning("failed to subscribe ticker for %s", symbol, exc_info=True)
+        # Wait for data to arrive
+        await asyncio.sleep(1.0)
+        return tickers
+
+    async def cancel_equity_tickers(self, tickers: Sequence[Any]) -> None:
+        """Cancel market data subscriptions for a batch of tickers."""
+        if self._ib is None:
+            return
+        for ticker in tickers:
+            try:
+                contract = getattr(ticker, "contract", None)
+                if contract is not None:
+                    self._ib.cancelMktData(contract)
+            except Exception:
+                logger.debug("error cancelling ticker", exc_info=True)
+
     async def _ensure_connected(self) -> None:
         if self._ib is not None and self._ib.isConnected():
             return
@@ -1285,6 +1451,14 @@ def _finite_positive(value: Any) -> float | None:
     if not math.isfinite(parsed) or parsed <= 0:
         return None
     return parsed
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        v = float(value)
+        return v if math.isfinite(v) and v != 0.0 else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _format_ibkr_end_datetime(value: datetime | None) -> str:

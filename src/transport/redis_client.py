@@ -5,6 +5,7 @@ from typing import Any
 from src.config import config_constant as constants
 from src.feeds.index_composition import IndexCompositionPayload
 from src.feeds.models import AssetClass, OHLCVBar
+from src.feeds.snapshotter import EquitySnapshot
 
 
 def latest_bar_key(asset_class: AssetClass | str, bar_size: str, symbol: str | None = None) -> str:
@@ -117,3 +118,53 @@ class MarketDataRedisClient:
     async def raw_client(self) -> Any:
         await self.connect()
         return self._client
+
+    # ------------------------------------------------------------------
+    # Equity snapshot caching
+    # ------------------------------------------------------------------
+
+    async def set_latest_equity_snapshot(self, snapshot: EquitySnapshot) -> str:
+        """Cache the latest snapshot for a symbol."""
+        await self.connect()
+        key = constants.REDIS_EQUITY_SNAPSHOT_KEY_TEMPLATE.format(symbol=snapshot.symbol.upper())
+        await self._client.set(key, snapshot.to_redis_json())
+        return key
+
+    async def get_latest_equity_snapshot(self, symbol: str) -> EquitySnapshot | None:
+        """Get the latest cached snapshot for a symbol."""
+        await self.connect()
+        key = constants.REDIS_EQUITY_SNAPSHOT_KEY_TEMPLATE.format(symbol=symbol.strip().upper())
+        payload = await self._client.get(key)
+        if payload is None:
+            return None
+        return EquitySnapshot.from_redis_json(payload)
+
+    async def get_latest_equity_snapshots(self, symbols: list[str]) -> dict[str, EquitySnapshot]:
+        """Batch-get latest cached snapshots for multiple symbols."""
+        await self.connect()
+        if not symbols:
+            return {}
+        keys = [constants.REDIS_EQUITY_SNAPSHOT_KEY_TEMPLATE.format(symbol=s.strip().upper()) for s in symbols]
+        payloads = await self._client.mget(keys)
+        result: dict[str, EquitySnapshot] = {}
+        for symbol, payload in zip(symbols, payloads):
+            if payload is not None:
+                try:
+                    result[symbol.strip().upper()] = EquitySnapshot.from_redis_json(payload)
+                except Exception:
+                    pass
+        return result
+
+    async def set_snapshot_watchlist(self, watchlist_name: str, payload_json: str) -> str:
+        await self.connect()
+        key = constants.REDIS_SNAPSHOT_WATCHLIST_KEY_TEMPLATE.format(name=watchlist_name)
+        await self._client.set(key, payload_json)
+        return key
+
+    async def scan_snapshot_watchlists(self) -> list[str]:
+        await self.connect()
+        keys: list[str] = []
+        pattern = constants.REDIS_SNAPSHOT_WATCHLIST_KEY_TEMPLATE.replace("{name}", "*")
+        async for key in self._client.scan_iter(pattern):
+            keys.append(key.decode("utf-8") if isinstance(key, bytes) else key)
+        return keys

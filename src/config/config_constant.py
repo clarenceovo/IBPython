@@ -87,3 +87,11 @@ REDIS_INDEX_COMPOSITION_KEY_TEMPLATE = "GlobalIndex:{index_symbol}:composition"
 REDIS_SCHEDULER_JOB_KEY_TEMPLATE = "SchedulerJob::{job_name}"
 REDIS_SCHEDULER_JOB_SCAN_PATTERN = "SchedulerJob::*"
 REDIS_IBKR_RATE_LIMIT_PREFIX = "IBKRRateLimit:historical"
+
+EQUITY_SNAPSHOT_TABLE = "equity_snapshot"
+REDIS_EQUITY_SNAPSHOT_KEY_TEMPLATE = "EquitySnapshot::{symbol}:latest"
+REDIS_SNAPSHOT_WATCHLIST_KEY_TEMPLATE = "SnapshotWatchlist::{name}"
+
+EQUITY_SNAPSHOT_TABLE = "equity_snapshot"
+REDIS_EQUITY_SNAPSHOT_KEY_TEMPLATE = "EquitySnapshot::{symbol}:latest"
+REDIS_SNAPSHOT_WATCHLIST_KEY_TEMPLATE = "SnapshotWatchlist::{name}"

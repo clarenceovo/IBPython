@@ -8,6 +8,7 @@ from typing import Any
 
 from src.config import config_constant as constants
 from src.feeds.models import AssetClass, OHLCVBar
+from src.feeds.snapshotter import EquitySnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,45 @@ INSERT_MARKET_OHLCV_SQL = f"""
 INSERT INTO {constants.MARKET_OHLCV_TABLE}
 (symbol, asset_class, exchange, currency, timestamp, open, high, low, close, volume, bar_size, source, metadata)
 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+""".strip()
+
+
+CREATE_EQUITY_SNAPSHOT_TABLE_SQL = f"""
+CREATE TABLE IF NOT EXISTS {constants.EQUITY_SNAPSHOT_TABLE} (
+    symbol SYMBOL,
+    exchange SYMBOL,
+    currency SYMBOL,
+    primary_exchange SYMBOL,
+    con_id LONG,
+    timestamp TIMESTAMP,
+    last DOUBLE,
+    bid DOUBLE,
+    ask DOUBLE,
+    bid_size DOUBLE,
+    ask_size DOUBLE,
+    last_size DOUBLE,
+    volume DOUBLE,
+    open DOUBLE,
+    high DOUBLE,
+    low DOUBLE,
+    close DOUBLE,
+    vwap DOUBLE,
+    mark_price DOUBLE,
+    mid_price DOUBLE,
+    spread DOUBLE,
+    spread_bps DOUBLE,
+    halted BOOLEAN,
+    source SYMBOL
+) TIMESTAMP(timestamp) PARTITION BY DAY WAL
+""".strip()
+
+INSERT_EQUITY_SNAPSHOT_SQL = f"""
+INSERT INTO {constants.EQUITY_SNAPSHOT_TABLE}
+(symbol, exchange, currency, primary_exchange, con_id, timestamp,
+ last, bid, ask, bid_size, ask_size, last_size, volume,
+ open, high, low, close, vwap, mark_price,
+ mid_price, spread, spread_bps, halted, source)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """.strip()
 
 
@@ -120,6 +160,61 @@ class QuestDBClient:
             async with self._connection.cursor() as cur:
                 await cur.execute(CREATE_MARKET_OHLCV_TABLE_SQL)
             await self._connection.commit()
+
+    async def create_equity_snapshot_table(self) -> None:
+        await self._ensure_connection()
+        async with self._lock:
+            async with self._connection.cursor() as cur:
+                await cur.execute(CREATE_EQUITY_SNAPSHOT_TABLE_SQL)
+            await self._connection.commit()
+
+    async def insert_snapshots(self, snapshots: Sequence[EquitySnapshot]) -> int:
+        if not snapshots:
+            return 0
+        await self._ensure_connection()
+        async with self._lock:
+            async with self._connection.cursor() as cur:
+                await cur.executemany(INSERT_EQUITY_SNAPSHOT_SQL, [snapshot_to_row(s) for s in snapshots])
+            await self._connection.commit()
+        return len(snapshots)
+
+    async def query_snapshots(
+        self,
+        *,
+        symbol: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        clauses = ["symbol = %s"]
+        params: list[Any] = [symbol.upper()]
+        if start is not None:
+            clauses.append("timestamp >= %s")
+            params.append(_questdb_timestamp(start))
+        if end is not None:
+            clauses.append("timestamp < %s")
+            params.append(_questdb_timestamp(end))
+        params.append(limit)
+        sql = (
+            f"SELECT * FROM {constants.EQUITY_SNAPSHOT_TABLE} "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY timestamp DESC "
+            "LIMIT %s"
+        )
+        return await self._fetch_dicts(sql, params)
+
+    async def query_latest_snapshots(
+        self,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = [limit]
+        sql = (
+            f"SELECT * FROM {constants.EQUITY_SNAPSHOT_TABLE} "
+            "LATEST ON timestamp PARTITION BY symbol "
+            "LIMIT %s"
+        )
+        return await self._fetch_dicts(sql, params)
 
     async def insert_bars(self, bars: Sequence[OHLCVBar]) -> int:
         if not bars:
@@ -251,3 +346,32 @@ def _questdb_timestamp(value: datetime) -> datetime:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def snapshot_to_row(snapshot: EquitySnapshot) -> tuple[Any, ...]:
+    return (
+        snapshot.symbol,
+        snapshot.exchange,
+        snapshot.currency,
+        snapshot.primary_exchange,
+        snapshot.con_id,
+        snapshot.timestamp.astimezone(timezone.utc).replace(tzinfo=None),
+        snapshot.last,
+        snapshot.bid,
+        snapshot.ask,
+        snapshot.bid_size,
+        snapshot.ask_size,
+        snapshot.last_size,
+        snapshot.volume,
+        snapshot.open,
+        snapshot.high,
+        snapshot.low,
+        snapshot.close,
+        snapshot.vwap,
+        snapshot.mark_price,
+        snapshot.mid_price,
+        snapshot.spread,
+        snapshot.spread_bps,
+        snapshot.halted,
+        snapshot.source,
+    )

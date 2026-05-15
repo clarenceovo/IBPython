@@ -1,0 +1,89 @@
+from __future__ import annotations
+
+from typing import Annotated
+
+from fastapi import APIRouter, Body, Depends
+from pydantic import BaseModel, ConfigDict, Field
+
+from src.feeds.scanner import ContractScanRequest, ContractSearchRequest, ContractSearchResult
+from src.webapp.dependencies import IBKRRestAppState, get_rest_state
+
+router = APIRouter(prefix="/scanner", tags=["reference-data"])
+
+CONTRACT_SEARCH_EXAMPLES = {
+    "tsla_search": {
+        "summary": "Search TSLA contracts",
+        "value": {"symbol": "TSLA", "sec_type": "STK"},
+    },
+    "spx_index": {
+        "summary": "Search SPX index",
+        "value": {"symbol": "SPX", "sec_type": "IND"},
+    },
+    "es_futures": {
+        "summary": "Search ES futures",
+        "value": {"symbol": "ES", "sec_type": "FUT"},
+    },
+    "by_conid": {
+        "summary": "Look up by conId",
+        "value": {"con_id": 76792991},
+    },
+}
+
+CONTRACT_SCAN_EXAMPLES = {
+    "aapl_scan": {
+        "summary": "Scan AAPL across exchanges",
+        "value": {"symbol": "AAPL", "sec_type": "STK", "max_results": 10},
+    },
+    "eurusd_fx": {
+        "summary": "Scan EURUSD forex",
+        "value": {"symbol": "EURUSD", "sec_type": "CASH", "exchange": "IDEALPRO"},
+    },
+}
+
+
+class CachedContractSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request: ContractSearchRequest
+    use_ttl_cache: bool = True
+    cache_ttl_seconds: float | None = Field(default=300, ge=0)
+
+
+class CachedContractScanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request: ContractScanRequest
+    use_ttl_cache: bool = True
+    cache_ttl_seconds: float | None = Field(default=300, ge=0)
+
+
+@router.post("/search", response_model=list[ContractSearchResult])
+async def search_contracts(
+    payload: Annotated[CachedContractSearchRequest, Body(openapi_examples=CONTRACT_SEARCH_EXAMPLES)],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> list[ContractSearchResult]:
+    async def load() -> list[ContractSearchResult]:
+        return await state.feed.search_contracts(payload.request)
+
+    if payload.use_ttl_cache:
+        from src.webapp.cache import stable_cache_key
+
+        key = stable_cache_key("contract_search", payload.request)
+        return await state.market_data_cache.get_or_set(key, load, ttl_seconds=payload.cache_ttl_seconds)
+    return await load()
+
+
+@router.post("/scan", response_model=list[ContractSearchResult])
+async def scan_contracts(
+    payload: Annotated[CachedContractScanRequest, Body(openapi_examples=CONTRACT_SCAN_EXAMPLES)],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> list[ContractSearchResult]:
+    async def load() -> list[ContractSearchResult]:
+        return await state.feed.scan_contracts(payload.request)
+
+    if payload.use_ttl_cache:
+        from src.webapp.cache import stable_cache_key
+
+        key = stable_cache_key("contract_scan", payload.request)
+        return await state.market_data_cache.get_or_set(key, load, ttl_seconds=payload.cache_ttl_seconds)
+    return await load()

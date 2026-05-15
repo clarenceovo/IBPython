@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from src.config.settings import Settings, load_settings
 from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
-from src.webapp.routers import account, market_data, reference_data, system
+from src.webapp.routers import account, market_data, reference_data, scanner, snapshot, streaming, system
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +45,11 @@ def create_app(
             "# IBKR REST API\n\n"
             "Async FastAPI bridge for Interactive Brokers TWS/Gateway.\n\n"
             "## Modules\n"
-            "- **Market Data** — OHLCV bars, option analytics/skew, bond yields, latest bars\n"
-            "- **Reference Data** — Option chains, fundamentals, WSH events, news\n"
+            "- **Market Data** — OHLCV bars, option analytics/skew, bond yields, latest bars, equity snapshots\n"
+            "- **Reference Data** — Option chains, fundamentals, WSH events, news, contract search\n"
             "- **Account** — Positions, portfolio, P&L snapshots\n"
+            "- **Streaming** — Real-time market data via SSE\n"
+            "- **Scanner** — Contract search across IBKR's security database\n"
             "- **System** — Health check, cache management\n\n"
             "## Authentication\n"
             "Not implemented yet. All endpoints are open when the service is running.\n\n"
@@ -62,8 +64,10 @@ def create_app(
         openapi_tags=[
             {"name": "system", "description": "Health checks and cache management"},
             {"name": "market-data", "description": "OHLCV bars, option analytics/skew, bond yields, and latest bar queries"},
-            {"name": "reference-data", "description": "Option chains, fundamental data, Wall Street Horizon events, and news"},
+            {"name": "reference-data", "description": "Option chains, fundamental data, Wall Street Horizon events, news, and contract search"},
             {"name": "account", "description": "Account summary, positions, portfolio items, and P&L snapshots"},
+            {"name": "scanner", "description": "Contract search and scanning across IBKR's security database"},
+            {"name": "streaming", "description": "Real-time market data streaming via Server-Sent Events (SSE)"},
         ],
         openapi_url="/api/v1/openapi.json",
         docs_url="/docs",
@@ -73,6 +77,9 @@ def create_app(
     fastapi_app.include_router(market_data.router, prefix="/api/v1")
     fastapi_app.include_router(reference_data.router, prefix="/api/v1")
     fastapi_app.include_router(account.router, prefix="/api/v1")
+    fastapi_app.include_router(scanner.router, prefix="/api/v1")
+    fastapi_app.include_router(streaming.router, prefix="/api/v1")
+    fastapi_app.include_router(snapshot.router, prefix="/api/v1")
 
     @fastapi_app.exception_handler(RuntimeError)
     async def runtime_error_handler(_request: Request, exc: RuntimeError) -> JSONResponse:
