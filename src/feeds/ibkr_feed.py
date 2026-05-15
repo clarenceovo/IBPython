@@ -263,8 +263,10 @@ class IBKRFeedClient:
         self._shutting_down = False
         self._reconnect_lock = asyncio.Lock()
         self._last_ibkr_error: tuple[int, str] | None = None
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     async def connect(self) -> None:
+        self._shutting_down = False
         if self._ib is not None and self._ib.isConnected():
             logger.debug("connect skipped – already connected to %s:%d clientId=%d", self.host, self.port, self.client_id)
             return
@@ -343,7 +345,9 @@ class IBKRFeedClient:
             logger.info("IBKR disconnected during shutdown – skipping reconnection")
             return
         logger.warning("IBKR disconnected – attempting reconnection")
-        asyncio.ensure_future(self._reconnect())
+        task = asyncio.create_task(self._reconnect())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     def _on_ibkr_timeout(self, *_: object) -> None:
         """Handle IB timeout events."""
@@ -393,7 +397,8 @@ class IBKRFeedClient:
         if self._ib is not None and self._ib.isConnected():
             logger.info("disconnecting from IBKR %s:%d clientId=%d", self.host, self.port, self.client_id)
             self._ib.disconnect()
-        self._shutting_down = False
+        # Do NOT reset _shutting_down here — reconnection race if disconnected event fires.
+        # It will be reset in connect() on next successful connection.
 
     async def __aenter__(self) -> "IBKRFeedClient":
         await self.connect()
@@ -1339,19 +1344,30 @@ class IBKRHistoricalPacingGuard:
         self._request_times: deque[float] = deque()
         self._identical_last_seen: dict[tuple[Any, ...], float] = {}
         self._same_contract_times: dict[tuple[Any, ...], deque[float]] = defaultdict(deque)
-        self._lock = asyncio.Lock()
-        self._concurrency = asyncio.Semaphore(max_concurrent_requests)
+        self._lock: asyncio.Lock | None = None
+        self._concurrency: asyncio.Semaphore | None = None
+        self._max_concurrent_requests = max_concurrent_requests
+
+    def _get_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    def _get_concurrency(self) -> asyncio.Semaphore:
+        if self._concurrency is None:
+            self._concurrency = asyncio.Semaphore(self._max_concurrent_requests)
+        return self._concurrency
 
     async def acquire(self, request: OHLCVRequest) -> None:
-        await self._concurrency.acquire()
+        await self._get_concurrency().acquire()
         try:
             await self._wait_for_slot(request)
         except Exception:
-            self._concurrency.release()
+            self._get_concurrency().release()
             raise
 
     def release(self) -> None:
-        self._concurrency.release()
+        self._get_concurrency().release()
 
     async def _wait_for_slot(self, request: OHLCVRequest) -> None:
         weight = 2 if request.what_to_show.upper() == "BID_ASK" else 1
@@ -1359,7 +1375,7 @@ class IBKRHistoricalPacingGuard:
         same_contract_key = _historical_same_contract_key(request)
 
         while True:
-            async with self._lock:
+            async with self._get_lock():
                 now = monotonic_time.monotonic()
                 self._prune(now)
                 wait_seconds = self._required_wait_seconds(now, identical_key, same_contract_key, weight)
