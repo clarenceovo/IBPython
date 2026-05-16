@@ -373,7 +373,7 @@ POST /api/v1/business/fixed-income/getCashBondCurve
 POST /api/v1/business/fixed-income/getCurveComparison
 ```
 
-`getBondFutureQuotes` uses IBKR historical OHLCV on futures contracts and accepts the business minimum: `market` plus `contract_month` for the default curve futures, or an explicit `futures` list. For IBKR futures qualification the generated contract request uses `symbol`, `exchange`, `currency`, and one of `contract_month`, `local_symbol`, or `con_id`. `getCTD`, `getFuturesImpliedCurve`, and `getCurveComparison` additionally require `FIXED_INCOME_REFERENCE_PROVIDER`, because IBKR does not provide a complete official CTD delivery basket or conversion-factor feed through the standard TWS historical bar API.
+`getBondFutureQuotes` uses IBKR historical OHLCV on futures contracts and accepts the business minimum: `market` plus `contract_month` for the default curve futures, or an explicit `futures` list. For IBKR futures qualification the generated contract request uses `symbol`, `exchange`, `currency`, and one of `contract_month`, `local_symbol`, or `con_id`. `getCTD`, `getFuturesImpliedCurve`, and `getCurveComparison` additionally require `FIXED_INCOME_REFERENCE_PROVIDER`, because IBKR does not provide a complete official CTD delivery basket or conversion-factor feed through the standard TWS historical bar API. IBKR currently documents historical/live bar limitations for OSE, so treat JGB futures as entitlement/feed dependent and validate with your gateway before relying on them in production.
 
 Example business news request:
 
