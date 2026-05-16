@@ -1,16 +1,18 @@
-"""REST router for IBKR order management — place, cancel, modify, executions, preview."""
+"""REST router for IBKR order management — place, cancel, modify, executions, preview, cache."""
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
 from src.feeds.orders import (
+    CachedOrderLookup,
     CancelOrderResponse,
     CompletedOrder,
     ExecutionRequest,
     ExecutionResponse,
     ModifyOrderRequest,
     OpenOrder,
+    OrderEnvelope,
     OrderResponse,
     PlaceOrderRequest,
     WhatIfOrderResponse,
@@ -20,12 +22,20 @@ from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 router = APIRouter(prefix="/orders", tags=["orders"])
 
 
+# ------------------------------------------------------------------
+# Order lifecycle
+# ------------------------------------------------------------------
+
 @router.post("/place", response_model=OrderResponse)
 async def place_order(
     request: PlaceOrderRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> OrderResponse:
-    """Place a new order — supports market, limit, stop, trailing, and more."""
+    """Place a new order — supports market, limit, stop, trailing, and more.
+
+    Every order is UUID-tagged and cached to Redis for auditability.
+    The response includes `order_uuid` for client-side tracking.
+    """
     return await state.feed.place_order(request)
 
 
@@ -35,7 +45,10 @@ async def cancel_order(
     account_id: str = Query(default="", alias="account_id"),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> CancelOrderResponse:
-    """Cancel an existing order by order ID and account ID."""
+    """Cancel an existing order by order ID and account ID.
+
+    Creates a cancel envelope linked to the original order's UUID.
+    """
     return await state.feed.cancel_order(account_id, order_id)
 
 
@@ -46,7 +59,10 @@ async def modify_order(
     account_id: str = Query(default="", alias="account_id"),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> OrderResponse:
-    """Modify an existing order — price, quantity, type, TIF, trailing params."""
+    """Modify an existing order — price, quantity, type, TIF, trailing params.
+
+    Creates a modify envelope linked to the original order's UUID.
+    """
     return await state.feed.modify_order(account_id, order_id, modifications)
 
 
@@ -82,3 +98,33 @@ async def load_completed_orders(
 ) -> list[CompletedOrder]:
     """Get completed (filled/cancelled) order history."""
     return await state.feed.load_completed_orders()
+
+
+# ------------------------------------------------------------------
+# Order cache (UUID-tagged envelopes in Redis)
+# ------------------------------------------------------------------
+
+@router.get("/cache/{order_uuid}", response_model=CachedOrderLookup)
+async def get_cached_order(
+    order_uuid: str,
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> CachedOrderLookup:
+    """Look up a cached order envelope by UUID.
+
+    Every place/cancel/modify/preview action is cached to Redis with a UUID.
+    Use this endpoint to retrieve the full envelope including original request,
+    IBKR response, timestamps, and metadata.
+    """
+    return await state.feed.get_cached_order(order_uuid)
+
+
+@router.get("/cache", response_model=list[OrderEnvelope])
+async def list_cached_orders(
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> list[OrderEnvelope]:
+    """List all cached order envelopes from Redis.
+
+    Returns the full audit trail of all order actions cached in Redis.
+    Envelopes expire after 24 hours by default.
+    """
+    return await state.feed.list_cached_orders()

@@ -84,6 +84,10 @@ def _redis_token(value: str) -> str:
     return str(value).strip().upper().replace(" ", "_")
 
 
+def order_envelope_key(order_uuid: str) -> str:
+    return constants.REDIS_ORDER_ENVELOPE_KEY_TEMPLATE.format(order_uuid=order_uuid)
+
+
 class MarketDataRedisClient:
     """Async Redis transport for latest bars, index composition, and scheduler jobs."""
 
@@ -296,3 +300,40 @@ class MarketDataRedisClient:
         async for key in self._client.scan_iter(pattern):
             keys.append(key.decode("utf-8") if isinstance(key, bytes) else key)
         return keys
+
+    # ------------------------------------------------------------------
+    # Order envelope caching
+    # ------------------------------------------------------------------
+
+    async def cache_order_envelope(self, envelope_json: str, *, ttl: int | None = None) -> str:
+        """Cache an OrderEnvelope JSON blob keyed by its UUID. Returns the Redis key."""
+        await self.connect()
+        data = json.loads(envelope_json)
+        order_uuid = data["order_uuid"]
+        key = order_envelope_key(order_uuid)
+        effective_ttl = ttl if ttl is not None else constants.REDIS_ORDER_ENVELOPE_TTL_SECONDS
+        await self._client.set(key, envelope_json, ex=effective_ttl)
+        return key
+
+    async def get_order_envelope(self, order_uuid: str) -> str | None:
+        """Get cached OrderEnvelope JSON by UUID. Returns None if not found."""
+        await self.connect()
+        key = order_envelope_key(order_uuid)
+        payload = await self._client.get(key)
+        if payload is None:
+            return None
+        return payload.decode("utf-8") if isinstance(payload, bytes) else payload
+
+    async def scan_order_envelopes(self) -> list[str]:
+        """Scan all cached order envelope keys."""
+        await self.connect()
+        keys: list[str] = []
+        async for key in self._client.scan_iter(constants.REDIS_ORDER_ENVELOPE_SCAN_PATTERN):
+            keys.append(key.decode("utf-8") if isinstance(key, bytes) else key)
+        return keys
+
+    async def delete_order_envelope(self, order_uuid: str) -> bool:
+        """Delete a cached order envelope by UUID. Returns True if deleted."""
+        await self.connect()
+        key = order_envelope_key(order_uuid)
+        return bool(await self._client.delete(key))

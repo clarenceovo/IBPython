@@ -5,6 +5,7 @@ These models are used by the order sub-client, REST router, and tests.
 
 from __future__ import annotations
 
+import uuid as _uuid
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
@@ -111,6 +112,62 @@ class OrderResponse(BaseModel):
     status: OrderStatus
     message: str | None = None
     warnings: list[str] = []
+    order_uuid: str | None = None
+
+
+class OrderEnvelope(BaseModel):
+    """UUID-tagged order payload for Redis caching.
+
+    Every order action (place, cancel, modify) produces an envelope
+    that wraps the original request with a UUID, timestamps, current
+    status, and IBKR's order ID once acknowledged.
+    """
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    order_uuid: str = Field(default_factory=lambda: str(_uuid.uuid4()))
+    ibkr_order_id: int | None = None
+    action: str  # "place", "cancel", "modify", "preview"
+    request: dict[str, Any]  # The original request payload (serialized PlaceOrderRequest, etc.)
+    response: dict[str, Any] | None = None  # IBKR response (serialized OrderResponse, etc.)
+    status: OrderStatus = OrderStatus.PENDING
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    account_id: str | None = None
+    parent_uuid: str | None = None  # Links modify/cancel to original place UUID
+    metadata: dict[str, Any] = {}
+
+    @field_validator("order_uuid", mode="before")
+    @classmethod
+    def coerce_uuid(cls, v: Any) -> str:
+        if v is None:
+            return str(_uuid.uuid4())
+        return str(v)
+
+    @field_validator("created_at", "updated_at", mode="before")
+    @classmethod
+    def normalize_timestamp_utc(cls, value: Any) -> datetime:
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if not isinstance(value, datetime):
+            raise TypeError("timestamp must be a datetime")
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def touch(self) -> None:
+        """Update the updated_at timestamp."""
+        self.updated_at = datetime.now(timezone.utc)
+
+
+class CachedOrderLookup(BaseModel):
+    """Response for a cached order envelope lookup by UUID."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_uuid: str
+    found: bool
+    envelope: OrderEnvelope | None = None
 
 
 class ModifyOrderRequest(BaseModel):

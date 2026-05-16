@@ -122,12 +122,14 @@ from src.feeds.ibkr_reference_feed import (
 )
 from src.feeds.ibkr_order_client import IBKROrderClient
 from src.feeds.orders import (
+    CachedOrderLookup,
     CancelOrderResponse,
     CompletedOrder,
     ExecutionRequest,
     ExecutionResponse,
     ModifyOrderRequest,
     OpenOrder,
+    OrderEnvelope,
     OrderResponse,
     PlaceOrderRequest,
     WhatIfOrderResponse,
@@ -158,6 +160,7 @@ class IBKRFeedClient:
         retry_attempts: int = 3,
         retry_base_delay_seconds: float = 0.5,
         pacing_guard: "IBKRHistoricalPacingGuard | None" = None,
+        redis: Any | None = None,
     ) -> None:
         self._connection = IBKRConnectionManager(
             host=host,
@@ -179,7 +182,7 @@ class IBKRFeedClient:
         self._options = IBKROptionsFeedClient(self._connection, self._historical)
         self._account = IBKRAccountFeedClient(self._connection)
         self._reference = IBKRReferenceFeedClient(self._connection, self._historical)
-        self._order_client = IBKROrderClient(self._connection)
+        self._order_client = IBKROrderClient(self._connection, redis=redis)
         self._marketdata_ext = IBKRMarketDataExtClient(self._connection)
 
     # Backward-compatible internal accessors
@@ -565,6 +568,14 @@ class IBKRFeedClient:
     async def load_completed_orders(self) -> list[CompletedOrder]:
         """Load completed (filled/cancelled) order history."""
         return await self._order_client.load_completed_orders()
+
+    async def get_cached_order(self, order_uuid: str) -> CachedOrderLookup:
+        """Look up a cached order envelope by UUID."""
+        return await self._order_client.get_cached_order(order_uuid)
+
+    async def list_cached_orders(self) -> list[OrderEnvelope]:
+        """List all cached order envelopes from Redis."""
+        return await self._order_client.list_cached_orders()
 
     # ------------------------------------------------------------------
     # IBKR event handlers — delegated to connection manager

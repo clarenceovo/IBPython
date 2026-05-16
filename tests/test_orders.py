@@ -980,3 +980,281 @@ class FakeRedisForRouter:
     """Minimal Redis fake for router tests."""
     async def health_check(self) -> bool:
         return True
+
+
+# ===========================================================================
+# UUID tagging & Redis cache tests
+# ===========================================================================
+
+
+class FakeOrderRedis:
+    """In-memory fake for the order envelope Redis methods."""
+
+    def __init__(self) -> None:
+        self._store: dict[str, str] = {}
+
+    async def cache_order_envelope(self, envelope_json: str, *, ttl: int | None = None) -> str:
+        import json
+        data = json.loads(envelope_json)
+        key = f"OrderCache::{data['order_uuid']}"
+        self._store[key] = envelope_json
+        return key
+
+    async def get_order_envelope(self, order_uuid: str) -> str | None:
+        return self._store.get(f"OrderCache::{order_uuid}")
+
+    async def scan_order_envelopes(self) -> list[str]:
+        return list(self._store.keys())
+
+    async def delete_order_envelope(self, order_uuid: str) -> bool:
+        key = f"OrderCache::{order_uuid}"
+        if key in self._store:
+            del self._store[key]
+            return True
+        return False
+
+    async def get_raw(self, key: str) -> str | None:
+        return self._store.get(key)
+
+
+class TestOrderEnvelopeModel:
+    """Tests for OrderEnvelope Pydantic model."""
+
+    def test_default_uuid_generated(self) -> None:
+        from src.feeds.orders import OrderEnvelope
+        env = OrderEnvelope(action="place", request={"symbol": "AAPL"})
+        assert env.order_uuid is not None
+        assert len(env.order_uuid) == 36  # UUID4 format
+
+    def test_explicit_uuid(self) -> None:
+        from src.feeds.orders import OrderEnvelope
+        uid = "12345678-1234-1234-1234-123456789abc"
+        env = OrderEnvelope(order_uuid=uid, action="cancel", request={})
+        assert env.order_uuid == uid
+
+    def test_timestamps_auto_set(self) -> None:
+        from src.feeds.orders import OrderEnvelope
+        env = OrderEnvelope(action="place", request={})
+        assert env.created_at is not None
+        assert env.updated_at is not None
+        assert env.created_at.tzinfo is not None
+
+    def test_touch_updates_timestamp(self) -> None:
+        import time
+        from src.feeds.orders import OrderEnvelope
+        env = OrderEnvelope(action="place", request={})
+        before = env.updated_at
+        time.sleep(0.01)
+        env.touch()
+        assert env.updated_at > before
+
+    def test_parent_uuid_link(self) -> None:
+        from src.feeds.orders import OrderEnvelope
+        parent = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        env = OrderEnvelope(
+            action="modify",
+            request={"price": 155.0},
+            parent_uuid=parent,
+            ibkr_order_id=42,
+        )
+        assert env.parent_uuid == parent
+        assert env.ibkr_order_id == 42
+
+    def test_serialization_roundtrip(self) -> None:
+        from src.feeds.orders import OrderEnvelope
+        env = OrderEnvelope(
+            action="place",
+            request={"symbol": "AAPL", "quantity": 100},
+            metadata={"source": "test"},
+        )
+        json_str = env.model_dump_json()
+        restored = OrderEnvelope.model_validate_json(json_str)
+        assert restored.order_uuid == env.order_uuid
+        assert restored.action == "place"
+        assert restored.request["symbol"] == "AAPL"
+        assert restored.metadata["source"] == "test"
+
+    def test_extra_fields_rejected(self) -> None:
+        from src.feeds.orders import OrderEnvelope
+        with pytest.raises(Exception):
+            OrderEnvelope(action="place", request={}, unknown_field=True)
+
+
+class TestCachedOrderLookupModel:
+    """Tests for CachedOrderLookup model."""
+
+    def test_not_found(self) -> None:
+        from src.feeds.orders import CachedOrderLookup
+        result = CachedOrderLookup(order_uuid="abc", found=False)
+        assert not result.found
+        assert result.envelope is None
+
+    def test_found_with_envelope(self) -> None:
+        from src.feeds.orders import CachedOrderLookup, OrderEnvelope
+        env = OrderEnvelope(action="place", request={"symbol": "AAPL"})
+        result = CachedOrderLookup(order_uuid=env.order_uuid, found=True, envelope=env)
+        assert result.found
+        assert result.envelope is not None
+        assert result.envelope.action == "place"
+
+
+class TestOrderClientUUIDCaching:
+    """Tests for UUID tagging and Redis caching in IBKROrderClient."""
+
+    def _make_client(self, *, with_redis: bool = True) -> tuple[IBKROrderClient, FakeIB, FakeOrderRedis | None]:
+        fake_ib = FakeIB()
+        fake_conn = FakeConnection(fake_ib)
+        redis = FakeOrderRedis() if with_redis else None
+        client = IBKROrderClient(fake_conn, redis=redis)
+        return client, fake_ib, redis
+
+    @pytest.mark.asyncio
+    async def test_place_order_gets_uuid(self) -> None:
+        client, _, redis = self._make_client()
+        request = PlaceOrderRequest(
+            symbol="AAPL",
+            action=OrderAction.BUY,
+            order_type=OrderType.LIMIT,
+            quantity=100,
+            price=150.0,
+        )
+        response = await client.place_order(request)
+        assert response.order_uuid is not None
+        assert len(response.order_uuid) == 36
+
+    @pytest.mark.asyncio
+    async def test_place_order_cached_to_redis(self) -> None:
+        client, _, redis = self._make_client()
+        request = PlaceOrderRequest(
+            symbol="AAPL",
+            action=OrderAction.BUY,
+            order_type=OrderType.LIMIT,
+            quantity=100,
+            price=150.0,
+        )
+        response = await client.place_order(request)
+        assert redis is not None
+        lookup = await client.get_cached_order(response.order_uuid)  # type: ignore[arg-type]
+        assert lookup.found
+        assert lookup.envelope is not None
+        assert lookup.envelope.action == "place"
+        assert lookup.envelope.request["symbol"] == "AAPL"
+
+    @pytest.mark.asyncio
+    async def test_cancel_order_cached(self) -> None:
+        client, _, redis = self._make_client()
+        result = await client.cancel_order("DU123", 42)
+        assert redis is not None
+        # Cancel creates its own envelope
+        keys = await redis.scan_order_envelopes()
+        assert len(keys) == 1
+        raw = await redis.get_order_envelope(keys[0].split("::")[-1])
+        assert raw is not None
+        from src.feeds.orders import OrderEnvelope
+        env = OrderEnvelope.model_validate_json(raw)
+        assert env.action == "cancel"
+
+    @pytest.mark.asyncio
+    async def test_modify_order_gets_uuid(self) -> None:
+        client, fake_ib, _ = self._make_client()
+        # Set up a fake open trade for modify to find
+        fake_order = SimpleNamespace(
+            orderId=99, action="BUY", orderType="LMT",
+            totalQuantity=100, lmtPrice=150.0, tif="DAY",
+            auxPrice=None, trailingType=None,
+        )
+        fake_contract = SimpleNamespace(symbol="AAPL", secType="STK")
+        fake_trade = SimpleNamespace(order=fake_order, contract=fake_contract)
+        fake_ib._open_trades = [fake_trade]
+
+        mods = ModifyOrderRequest(price=155.0, quantity=200)
+        response = await client.modify_order("DU123", 99, mods)
+        assert response.order_uuid is not None
+        assert len(response.order_uuid) == 36
+
+    @pytest.mark.asyncio
+    async def test_preview_order_cached(self) -> None:
+        client, _, redis = self._make_client()
+        request = PlaceOrderRequest(
+            symbol="TSLA",
+            action=OrderAction.SELL,
+            order_type=OrderType.MARKET,
+            quantity=50,
+        )
+        await client.preview_order(request)
+        assert redis is not None
+        keys = await redis.scan_order_envelopes()
+        assert len(keys) == 1
+        raw = await redis.get_order_envelope(keys[0].split("::")[-1])
+        assert raw is not None
+        from src.feeds.orders import OrderEnvelope
+        env = OrderEnvelope.model_validate_json(raw)
+        assert env.action == "preview"
+        assert env.request["symbol"] == "TSLA"
+
+    @pytest.mark.asyncio
+    async def test_list_cached_orders(self) -> None:
+        client, _, redis = self._make_client()
+        # Place two orders
+        for sym in ["AAPL", "TSLA"]:
+            await client.place_order(PlaceOrderRequest(
+                symbol=sym,
+                action=OrderAction.BUY,
+                order_type=OrderType.MARKET,
+                quantity=10,
+            ))
+        envelopes = await client.list_cached_orders()
+        assert len(envelopes) == 2
+        symbols = {e.request["symbol"] for e in envelopes}
+        assert symbols == {"AAPL", "TSLA"}
+
+    @pytest.mark.asyncio
+    async def test_get_cached_order_not_found(self) -> None:
+        client, _, _ = self._make_client()
+        result = await client.get_cached_order("nonexistent-uuid")
+        assert not result.found
+        assert result.envelope is None
+
+    @pytest.mark.asyncio
+    async def test_no_redis_order_still_works(self) -> None:
+        """Order proceeds without Redis — no crash, just no caching."""
+        client, _, _ = self._make_client(with_redis=False)
+        request = PlaceOrderRequest(
+            symbol="AAPL",
+            action=OrderAction.BUY,
+            order_type=OrderType.MARKET,
+            quantity=100,
+        )
+        response = await client.place_order(request)
+        assert response.order_uuid is not None
+        # Cache lookup returns not-found gracefully
+        lookup = await client.get_cached_order(response.order_uuid)  # type: ignore[arg-type]
+        assert not lookup.found
+
+    @pytest.mark.asyncio
+    async def test_envelope_ibkr_order_id_linked(self) -> None:
+        """The envelope's ibkr_order_id matches the OrderResponse.order_id."""
+        client, _, redis = self._make_client()
+        response = await client.place_order(PlaceOrderRequest(
+            symbol="AAPL",
+            action=OrderAction.BUY,
+            order_type=OrderType.MARKET,
+            quantity=100,
+        ))
+        assert redis is not None
+        lookup = await client.get_cached_order(response.order_uuid)  # type: ignore[arg-type]
+        assert lookup.found
+        assert lookup.envelope is not None
+        assert lookup.envelope.ibkr_order_id == response.order_id
+
+
+class TestOrderResponseUUID:
+    """Test that OrderResponse includes order_uuid."""
+
+    def test_order_response_has_uuid_field(self) -> None:
+        resp = OrderResponse(order_id=1, status=OrderStatus.SUBMITTED, order_uuid="test-uuid")
+        assert resp.order_uuid == "test-uuid"
+
+    def test_order_response_uuid_defaults_none(self) -> None:
+        resp = OrderResponse(order_id=1, status=OrderStatus.SUBMITTED)
+        assert resp.order_uuid is None

@@ -5,16 +5,21 @@ This module follows the same sub-client pattern as ``ibkr_account_feed.py``:
 - All methods are async
 - Uses ``self._ib`` to access the ib_insync IB instance
 - Uses ``self._connection.with_retry()`` for retry logic
+
+Every order action is UUID-tagged and cached to Redis for auditability and
+client-side tracking.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import uuid as _uuid
 from typing import Any
 
 from src.feeds.ibkr_connection import IBKRConnectionManager
 from src.feeds.orders import (
+    CachedOrderLookup,
     CancelOrderResponse,
     CompletedOrder,
     ExecutionDetail,
@@ -23,6 +28,7 @@ from src.feeds.orders import (
     ModifyOrderRequest,
     OpenOrder,
     OrderAction,
+    OrderEnvelope,
     OrderResponse,
     OrderStatus,
     OrderType,
@@ -41,14 +47,83 @@ logger = logging.getLogger(__name__)
 
 
 class IBKROrderClient:
-    """Order management sub-client for IBKR — lifecycle, executions, and pre-trade risk."""
+    """Order management sub-client for IBKR — lifecycle, executions, and pre-trade risk.
 
-    def __init__(self, connection: IBKRConnectionManager) -> None:
+    Every order action produces an ``OrderEnvelope`` tagged with a UUID and
+    cached to Redis. The cache is best-effort — if Redis is unavailable the
+    order still proceeds; only the caching step is skipped.
+    """
+
+    def __init__(
+        self,
+        connection: IBKRConnectionManager,
+        redis: Any | None = None,
+    ) -> None:
         self._connection = connection
+        self._redis = redis
 
     @property
     def _ib(self) -> Any:
         return self._connection.ib
+
+    # ------------------------------------------------------------------
+    # Redis order cache helpers
+    # ------------------------------------------------------------------
+
+    async def _cache_envelope(self, envelope: OrderEnvelope) -> str | None:
+        """Cache an OrderEnvelope to Redis. Returns the Redis key or None on failure."""
+        if self._redis is None:
+            return None
+        try:
+            envelope_json = envelope.model_dump_json()
+            key = await self._redis.cache_order_envelope(envelope_json)
+            logger.debug("_cache_envelope: cached uuid=%s key=%s", envelope.order_uuid, key)
+            return key
+        except Exception:
+            logger.warning("_cache_envelope: failed for uuid=%s, order proceeds uncached", envelope.order_uuid, exc_info=True)
+            return None
+
+    async def _update_cached_envelope(self, envelope: OrderEnvelope) -> None:
+        """Update an existing cached envelope in-place."""
+        if self._redis is None:
+            return
+        try:
+            envelope.touch()
+            envelope_json = envelope.model_dump_json()
+            await self._redis.cache_order_envelope(envelope_json)
+        except Exception:
+            logger.warning("_update_cached_envelope: failed for uuid=%s", envelope.order_uuid, exc_info=True)
+
+    async def get_cached_order(self, order_uuid: str) -> CachedOrderLookup:
+        """Look up a cached order envelope by UUID."""
+        if self._redis is None:
+            return CachedOrderLookup(order_uuid=order_uuid, found=False)
+        try:
+            payload = await self._redis.get_order_envelope(order_uuid)
+            if payload is None:
+                return CachedOrderLookup(order_uuid=order_uuid, found=False)
+            envelope = OrderEnvelope.model_validate_json(payload)
+            return CachedOrderLookup(order_uuid=order_uuid, found=True, envelope=envelope)
+        except Exception:
+            logger.warning("get_cached_order: failed for uuid=%s", order_uuid, exc_info=True)
+            return CachedOrderLookup(order_uuid=order_uuid, found=False)
+
+    async def list_cached_orders(self) -> list[OrderEnvelope]:
+        """List all cached order envelopes from Redis."""
+        if self._redis is None:
+            return []
+        try:
+            keys = await self._redis.scan_order_envelopes()
+            envelopes: list[OrderEnvelope] = []
+            for key in keys:
+                raw = await self._redis.get_raw(key)
+                if raw is not None:
+                    payload = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+                    envelopes.append(OrderEnvelope.model_validate_json(payload))
+            return envelopes
+        except Exception:
+            logger.warning("list_cached_orders: failed", exc_info=True)
+            return []
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -125,10 +200,22 @@ class IBKROrderClient:
 
         Creates the ib_insync Contract and Order from the request, places
         the order, waits briefly for acknowledgment, and returns the result.
+        The order is UUID-tagged and cached to Redis for auditability.
         """
         await self._connection.ensure_connected()
+
+        order_uuid = str(_uuid.uuid4())
+        envelope = OrderEnvelope(
+            order_uuid=order_uuid,
+            action="place",
+            request=request.model_dump(),
+            account_id=request.account_id,
+            metadata={"symbol": request.symbol, "action": request.action.value},
+        )
+
         logger.info(
-            "place_order: symbol=%s action=%s type=%s qty=%.0f price=%s",
+            "place_order: uuid=%s symbol=%s action=%s type=%s qty=%.0f price=%s",
+            order_uuid,
             request.symbol,
             request.action.value,
             request.order_type.value,
@@ -158,27 +245,50 @@ class IBKROrderClient:
 
         order_id = getattr(order, "orderId", 0) or getattr(trade, "orderId", 0)
 
+        # Update envelope with IBKR response.
+        response = OrderResponse(
+            order_id=order_id,
+            status=status,
+            message=msg,
+            warnings=warnings,
+            order_uuid=order_uuid,
+        )
+        envelope.ibkr_order_id = order_id
+        envelope.status = status
+        envelope.response = response.model_dump()
+        envelope.touch()
+
+        await self._cache_envelope(envelope)
+
         logger.info(
-            "place_order: order_id=%s status=%s symbol=%s",
+            "place_order: uuid=%s order_id=%s status=%s symbol=%s",
+            order_uuid,
             order_id,
             status.value,
             request.symbol,
         )
 
-        return OrderResponse(
-            order_id=order_id,
-            status=status,
-            message=msg,
-            warnings=warnings,
-        )
+        return response
 
     async def cancel_order(self, account_id: str, order_id: int) -> CancelOrderResponse:
         """Cancel an existing order by account ID and order ID.
 
         Looks up the order from open orders and calls ib_insync cancelOrder.
+        Creates a cancel envelope linked to the original order's UUID.
         """
         await self._connection.ensure_connected()
-        logger.info("cancel_order: account=%s order_id=%d", account_id, order_id)
+
+        cancel_uuid = str(_uuid.uuid4())
+        logger.info("cancel_order: uuid=%s account=%s order_id=%d", cancel_uuid, account_id, order_id)
+
+        envelope = OrderEnvelope(
+            order_uuid=cancel_uuid,
+            ibkr_order_id=order_id,
+            action="cancel",
+            request={"account_id": account_id, "order_id": order_id},
+            account_id=account_id,
+            metadata={"cancel_of_order_id": order_id},
+        )
 
         # Find the order in open trades.
         open_trades = self._ib.openTrades() if hasattr(self._ib, "openTrades") else []
@@ -191,29 +301,41 @@ class IBKROrderClient:
 
         if target_order is None:
             logger.warning("cancel_order: order_id=%d not found in open trades", order_id)
-            return CancelOrderResponse(
+            result = CancelOrderResponse(
                 order_id=order_id,
                 status="not_found",
                 message=f"Order {order_id} not found in open orders",
             )
+            envelope.status = OrderStatus.CANCELLED
+            envelope.response = result.model_dump()
+            await self._cache_envelope(envelope)
+            return result
 
         current_status = str(getattr(target_order, "status", "")).lower()
         if current_status in ("filled", "cancelled", "api cancelled"):
             logger.info("cancel_order: order_id=%d already %s", order_id, current_status)
-            return CancelOrderResponse(
+            result = CancelOrderResponse(
                 order_id=order_id,
                 status="already_terminal",
                 message=f"Order already {current_status}",
             )
+            envelope.status = OrderStatus.CANCELLED
+            envelope.response = result.model_dump()
+            await self._cache_envelope(envelope)
+            return result
 
         self._ib.cancelOrder(target_order)
         logger.info("cancel_order: cancel requested for order_id=%d", order_id)
 
-        return CancelOrderResponse(
+        result = CancelOrderResponse(
             order_id=order_id,
             status="cancel_requested",
             message="Cancel request sent",
         )
+        envelope.status = OrderStatus.CANCELLED
+        envelope.response = result.model_dump()
+        await self._cache_envelope(envelope)
+        return result
 
     async def modify_order(
         self,
@@ -224,9 +346,21 @@ class IBKROrderClient:
         """Modify an existing order.
 
         Finds the order in open trades, applies modifications, and resubmits.
+        Creates a modify envelope linked to the original order.
         """
         await self._connection.ensure_connected()
-        logger.info("modify_order: account=%s order_id=%d", account_id, order_id)
+
+        modify_uuid = str(_uuid.uuid4())
+        logger.info("modify_order: uuid=%s account=%s order_id=%d", modify_uuid, account_id, order_id)
+
+        envelope = OrderEnvelope(
+            order_uuid=modify_uuid,
+            ibkr_order_id=order_id,
+            action="modify",
+            request=modifications.model_dump(exclude_none=True),
+            account_id=account_id,
+            metadata={"modify_of_order_id": order_id},
+        )
 
         open_trades = self._ib.openTrades() if hasattr(self._ib, "openTrades") else []
         target_trade = None
@@ -264,17 +398,25 @@ class IBKROrderClient:
         modified_trade = self._ib.placeOrder(contract, order)
         status = await self._wait_for_order_status(modified_trade, timeout_seconds=5.0)
 
+        response = OrderResponse(
+            order_id=order_id,
+            status=status,
+            message="Order modified",
+            order_uuid=modify_uuid,
+        )
+
+        envelope.status = status
+        envelope.response = response.model_dump()
+        await self._cache_envelope(envelope)
+
         logger.info(
-            "modify_order: order_id=%d status=%s",
+            "modify_order: uuid=%s order_id=%d status=%s",
+            modify_uuid,
             order_id,
             status.value,
         )
 
-        return OrderResponse(
-            order_id=order_id,
-            status=status,
-            message="Order modified",
-        )
+        return response
 
     async def load_open_orders(self) -> list[OpenOrder]:
         """Load all currently open (working) orders.
@@ -339,15 +481,26 @@ class IBKROrderClient:
         """Pre-trade margin and commission preview (what-if order).
 
         Uses ``order.whatIf = True`` to get margin impact without
-        actually placing the order.
+        actually placing the order. Caches the preview envelope.
         """
         await self._connection.ensure_connected()
+
+        preview_uuid = str(_uuid.uuid4())
         logger.info(
-            "preview_order: symbol=%s action=%s type=%s qty=%.0f",
+            "preview_order: uuid=%s symbol=%s action=%s type=%s qty=%.0f",
+            preview_uuid,
             request.symbol,
             request.action.value,
             request.order_type.value,
             request.quantity,
+        )
+
+        envelope = OrderEnvelope(
+            order_uuid=preview_uuid,
+            action="preview",
+            request=request.model_dump(),
+            account_id=request.account_id,
+            metadata={"symbol": request.symbol, "action": request.action.value},
         )
 
         contract = self._build_ibkr_contract(request)
@@ -367,8 +520,14 @@ class IBKROrderClient:
         await asyncio.sleep(0.5)
 
         result = normalize_what_if_response(trade)
+
+        envelope.status = OrderStatus.PENDING
+        envelope.response = result.model_dump()
+        await self._cache_envelope(envelope)
+
         logger.info(
-            "preview_order: symbol=%s initial_margin=%s maintenance_margin=%s",
+            "preview_order: uuid=%s symbol=%s initial_margin=%s maintenance_margin=%s",
+            preview_uuid,
             request.symbol,
             result.initial_margin,
             result.maintenance_margin,
