@@ -1,0 +1,323 @@
+"""Option chains, option analytics, skew surfaces, strike/expiry selection."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import math
+import time as monotonic_time
+from collections.abc import Sequence
+from typing import Any
+
+from src.feeds.contracts import OptionChain, OptionChainRequest, build_ibkr_contract
+from src.feeds.ibkr_connection import (
+    IBKRConnectionManager,
+    _contract_int,
+    _root_cause_message,
+)
+from src.feeds.models import AssetClass
+from src.feeds.options import (
+    OptionAnalyticsRequest,
+    OptionAnalyticsSnapshot,
+    OptionSkewSurfaceRequest,
+    OptionSkewSurfaceResponse,
+    build_ibkr_option_contract,
+    build_skew_option_contracts,
+    calculate_maturity_skew,
+    normalize_option_analytics_from_ticker,
+    select_option_chain,
+    select_skew_expirations,
+    select_skew_strikes,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _finite_positive(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed) or parsed <= 0:
+        return None
+    return parsed
+
+
+def _ticker_snapshot_price(ticker: Any) -> float | None:
+    market_price = getattr(ticker, "marketPrice", None)
+    if callable(market_price):
+        value = _finite_positive(market_price())
+        if value is not None:
+            return value
+
+    bid = _finite_positive(getattr(ticker, "bid", None))
+    ask = _finite_positive(getattr(ticker, "ask", None))
+    if bid is not None and ask is not None:
+        return (bid + ask) / 2
+
+    for attribute_name in ("last", "close", "markPrice"):
+        value = _finite_positive(getattr(ticker, attribute_name, None))
+        if value is not None:
+            return value
+    return None
+
+
+def _ibkr_sec_type_for_option_underlying(asset_class: AssetClass) -> str:
+    if asset_class is AssetClass.EQUITY:
+        return "STK"
+    if asset_class is AssetClass.INDEX:
+        return "IND"
+    raise ValueError(f"unsupported option underlying asset class: {asset_class}")
+
+
+def normalize_ibkr_option_chains(
+    chains: Sequence[Any],
+    request: OptionChainRequest,
+    underlying_con_id: int,
+) -> list[OptionChain]:
+    normalized: list[OptionChain] = []
+    for chain in chains:
+        expirations = tuple(getattr(chain, "expirations", ()) or ())
+        strikes = tuple(getattr(chain, "strikes", ()) or ())
+        if not expirations or not strikes:
+            continue
+        normalized.append(
+            OptionChain(
+                underlying_symbol=request.symbol,
+                underlying_asset_class=request.asset_class,
+                underlying_con_id=underlying_con_id,
+                exchange=getattr(chain, "exchange", ""),
+                trading_class=getattr(chain, "tradingClass", ""),
+                multiplier=str(getattr(chain, "multiplier", "")),
+                expirations=expirations,
+                strikes=strikes,
+            )
+        )
+    return normalized
+
+
+class IBKROptionsFeedClient:
+    """Option chains, analytics, skew surfaces."""
+
+    def __init__(self, connection: IBKRConnectionManager, historical_client: "IBKRHistoricalClient") -> None:
+        self._connection = connection
+        self._historical = historical_client
+
+    @property
+    def _ib(self) -> Any:
+        return self._connection.ib
+
+    async def load_option_chains(self, request: OptionChainRequest) -> list[OptionChain]:
+        """Load option chain metadata for stock or index underlyings via reqSecDefOptParams."""
+        await self._connection.ensure_connected()
+        logger.info(
+            "load_option_chains: symbol=%s asset_class=%s exchange=%s primary_exchange=%s underlying_con_id=%s",
+            request.symbol,
+            request.asset_class,
+            request.exchange,
+            request.primary_exchange,
+            request.underlying_con_id,
+        )
+        t0 = monotonic_time.monotonic()
+        if request.underlying_con_id:
+            underlying_con_id = request.underlying_con_id
+            logger.info("load_option_chains: using provided underlying_con_id=%s for %s", underlying_con_id, request.symbol)
+        else:
+            underlying_contract = await self._historical.qualify_contract(request.to_contract_spec())
+            resolved_con_id = _contract_int(underlying_contract, "conId")
+            if resolved_con_id is None:
+                raise RuntimeError(f"IBKR qualified {request.symbol} but did not return an underlying conId")
+            underlying_con_id = resolved_con_id
+        chains = await self._connection.with_retry(
+            lambda: self._ib.reqSecDefOptParamsAsync(
+                request.symbol,
+                "",
+                _ibkr_sec_type_for_option_underlying(request.asset_class),
+                underlying_con_id,
+            ),
+            operation=f"option_chain:{request.symbol}",
+        )
+        result = normalize_ibkr_option_chains(chains, request, underlying_con_id)
+        logger.info("load_option_chains: %d chains for %s in %.2fs", len(result), request.symbol, monotonic_time.monotonic() - t0)
+        return result
+
+    async def load_option_analytics(self, request: OptionAnalyticsRequest) -> OptionAnalyticsSnapshot:
+        """Load short-lived option market data with Greeks, volume, OI, and volatility fields."""
+        await self._connection.ensure_connected()
+        logger.info("load_option_analytics: underlying=%s expiry=%s", request.contract.underlying_symbol, request.contract.expiry)
+        t0 = monotonic_time.monotonic()
+        contract = build_ibkr_option_contract(request.contract)
+        qualified = await self._connection.with_retry(
+            lambda: self._ib.qualifyContractsAsync(contract),
+            operation=f"qualify_option:{request.contract.underlying_symbol}:{request.contract.expiry}",
+        )
+        if qualified:
+            contract = qualified[0]
+        generic_tick_list = request.generic_tick_list
+        use_snapshot = not generic_tick_list
+        if generic_tick_list and request.regulatory_snapshot:
+            logger.warning(
+                "load_option_analytics: regulatory_snapshot ignored because IBKR snapshot market data "
+                "does not support generic ticks; using short-lived streaming subscription"
+            )
+        logger.debug(
+            "load_option_analytics market data mode: snapshot=%s generic_ticks=%s",
+            use_snapshot,
+            generic_tick_list or "none",
+        )
+        ticker = self._ib.reqMktData(
+            contract,
+            genericTickList=generic_tick_list,
+            snapshot=use_snapshot,
+            regulatorySnapshot=request.regulatory_snapshot if use_snapshot else False,
+            mktDataOptions=[],
+        )
+        try:
+            await asyncio.sleep(request.snapshot_wait_seconds)
+            result = normalize_option_analytics_from_ticker(ticker, request.contract)
+            logger.debug("load_option_analytics completed in %.2fs for %s", monotonic_time.monotonic() - t0, request.contract.underlying_symbol)
+            return result
+        finally:
+            try:
+                self._ib.cancelMktData(contract)
+            except Exception:
+                logger.debug("Failed to cancel market data subscription for %s", request.contract.underlying_symbol, exc_info=True)
+
+    async def load_option_skew_surface(self, request: OptionSkewSurfaceRequest) -> OptionSkewSurfaceResponse:
+        """Load bounded per-maturity option skew and open-interest summaries."""
+        await self._connection.ensure_connected()
+        logger.info(
+            "load_option_skew_surface: symbol=%s max_expirations=%d max_strikes_per_expiry=%d",
+            request.chain_request.symbol,
+            request.max_expirations,
+            request.max_strikes_per_expiry,
+        )
+        t0 = monotonic_time.monotonic()
+        chains = await self.load_option_chains(request.chain_request)
+        chain = select_option_chain(chains, request)
+        spot_price = request.spot_price
+        if spot_price is None:
+            spot_price = await self._load_underlying_snapshot_price(
+                request.chain_request,
+                wait_seconds=request.snapshot_wait_seconds,
+            )
+        expirations = select_skew_expirations(chain, request)
+        if not expirations:
+            raise RuntimeError(f"IBKR returned no matching expirations for {request.chain_request.symbol}")
+
+        semaphore = asyncio.Semaphore(request.max_concurrent_requests)
+        maturities = []
+        for expiry in expirations:
+            strikes = select_skew_strikes(
+                chain.strikes,
+                spot_price=spot_price,
+                window_pct=request.strike_window_pct,
+                max_count=request.max_strikes_per_expiry,
+            )
+            contracts = build_skew_option_contracts(
+                chain=chain,
+                request=request,
+                expiry=expiry,
+                strikes=strikes,
+            )
+            snapshots, warnings = await self._load_skew_contract_snapshots(
+                contracts,
+                generic_ticks=request.generic_ticks,
+                snapshot_wait_seconds=request.snapshot_wait_seconds,
+                regulatory_snapshot=request.regulatory_snapshot,
+                semaphore=semaphore,
+            )
+            maturities.append(
+                calculate_maturity_skew(
+                    underlying_symbol=request.chain_request.symbol,
+                    expiry=expiry,
+                    spot_price=spot_price,
+                    target_abs_delta=request.target_abs_delta,
+                    fallback_moneyness_pct=request.fallback_moneyness_pct,
+                    snapshots=snapshots,
+                    warnings=tuple(warnings),
+                )
+            )
+
+        logger.info(
+            "load_option_skew_surface: %d maturities for %s in %.2fs",
+            len(maturities),
+            request.chain_request.symbol,
+            monotonic_time.monotonic() - t0,
+        )
+        return OptionSkewSurfaceResponse(
+            underlying_symbol=request.chain_request.symbol,
+            underlying_con_id=chain.underlying_con_id,
+            underlying_asset_class=request.chain_request.asset_class.value,
+            chain_exchange=chain.exchange,
+            trading_class=chain.trading_class,
+            multiplier=chain.multiplier,
+            spot_price=spot_price,
+            maturities=tuple(maturities),
+            metadata={
+                "strike_window_pct": request.strike_window_pct,
+                "max_strikes_per_expiry": request.max_strikes_per_expiry,
+                "target_abs_delta": request.target_abs_delta,
+                "sampled_expirations": expirations,
+            },
+        )
+
+    async def _load_skew_contract_snapshots(
+        self,
+        contracts: Sequence[Any],
+        *,
+        generic_ticks: tuple[str, ...],
+        snapshot_wait_seconds: float,
+        regulatory_snapshot: bool,
+        semaphore: asyncio.Semaphore,
+    ) -> tuple[list[OptionAnalyticsSnapshot], list[str]]:
+        async def load_one(contract: Any) -> OptionAnalyticsSnapshot:
+            async with semaphore:
+                return await self.load_option_analytics(
+                    OptionAnalyticsRequest(
+                        contract=contract,
+                        generic_ticks=generic_ticks,
+                        snapshot_wait_seconds=snapshot_wait_seconds,
+                        regulatory_snapshot=regulatory_snapshot,
+                    )
+                )
+
+        results = await asyncio.gather(*(load_one(contract) for contract in contracts), return_exceptions=True)
+        snapshots: list[OptionAnalyticsSnapshot] = []
+        warnings: list[str] = []
+        for contract, result in zip(contracts, results, strict=True):
+            if isinstance(result, Exception):
+                warnings.append(f"{contract.expiry}:{contract.right.value}:{contract.strike}: {_root_cause_message(result)}")
+            else:
+                snapshots.append(result)
+        return snapshots, warnings
+
+    async def _load_underlying_snapshot_price(
+        self,
+        request: OptionChainRequest,
+        *,
+        wait_seconds: float,
+    ) -> float:
+        spec = request.to_contract_spec()
+        contract = build_ibkr_contract(spec) if request.underlying_con_id else await self._historical.qualify_contract(spec)
+        ticker = self._ib.reqMktData(
+            contract,
+            genericTickList="",
+            snapshot=True,
+            regulatorySnapshot=False,
+            mktDataOptions=[],
+        )
+        try:
+            await asyncio.sleep(wait_seconds)
+            price = _ticker_snapshot_price(ticker)
+            if price is None:
+                raise RuntimeError(
+                    f"IBKR did not return a finite underlying snapshot price for {request.symbol}; "
+                    "pass spot_price in the option skew request"
+                )
+            return price
+        finally:
+            try:
+                self._ib.cancelMktData(contract)
+            except Exception:
+                logger.debug("Failed to cancel underlying snapshot market data for %s", request.symbol, exc_info=True)

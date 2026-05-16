@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.feeds.models import OHLCVRequest
+from src.feeds.ohlcv_loader import estimate_expected_bars
 from src.feeds.snapshotter import SnapshotWatchlist
 from src.transport.redis_client import ohlcv_snapshot_calendar_key
 from src.transport.scheduler_calendar import _parse_cron_expression, next_cron_run
@@ -306,6 +307,7 @@ class GenericScheduler:
         worker_id: str | None = None,
         local_job_directory: str | Path | None = None,
         job_reload_interval_seconds: float | None = None,
+        health_monitor: object | None = None,
     ) -> None:
         self._handlers: dict[str, JobHandler] = {}
         self._jobs: dict[str, SchedulerJobDefinition] = {}
@@ -317,6 +319,7 @@ class GenericScheduler:
         self._local_job_directory = Path(local_job_directory) if local_job_directory is not None else None
         self._job_reload_interval_seconds = job_reload_interval_seconds
         self._reload_task: asyncio.Task[None] | None = None
+        self._health_monitor = health_monitor
         self.validation_warnings: list[str] = []
 
     def configure_job_sources(
@@ -773,6 +776,16 @@ class GenericScheduler:
                 json.dumps(final_result.metrics, sort_keys=True, default=str),
                 final_result.error,
             )
+            if self._health_monitor is not None:
+                try:
+                    self._health_monitor.record_result(
+                        job_name=job.name,
+                        job_type=job.job_type,
+                        status=final_result.status,
+                        error=final_result.error,
+                    )
+                except Exception:
+                    execution_logger.exception("health monitor update failed for job=%s", job.name)
         finally:
             await self._release_job_lease(job, lease_token)
 
@@ -929,7 +942,8 @@ class MarketSnapshotJobHandler:
             cache_latest,
         )
         bars = await self.loader.load(request, persist=persist, cache_latest=cache_latest)
-        return SchedulerRunResult(status="success", metrics={"bars_captured": len(bars or [])})
+        bars_expected = estimate_expected_bars(request.duration, request.bar_size)
+        return SchedulerRunResult(status="success", metrics={"bars_captured": len(bars or []), "bars_expected": bars_expected})
 
 
 class OHLCVSnapshotJobHandler:
@@ -1005,6 +1019,7 @@ class OHLCVSnapshotJobHandler:
         skipped_count = sum(1 for result in results if result["status"] == "skipped_holiday")
         failed_count = sum(1 for result in results if result["status"] == "failed")
         bars_captured = sum(int(result.get("bars_captured", 0)) for result in results)
+        bars_expected = sum(int(result.get("bars_expected", 0)) for result in results)
         if failed_count == len(results):
             status = "failed"
         elif failed_count > 0:
@@ -1022,6 +1037,7 @@ class OHLCVSnapshotJobHandler:
                 "symbols_failed": failed_count,
                 "symbols_skipped_holiday": skipped_count,
                 "bars_captured": bars_captured,
+                "bars_expected": bars_expected,
                 "estimated_historical_requests": estimated_requests,
                 "max_concurrency": self.max_concurrency,
             },
@@ -1123,7 +1139,8 @@ class OHLCVSnapshotJobHandler:
                 request.bar_size,
                 len(bars),
             )
-            return {"status": "success", "symbol": request.symbol, "bars_captured": len(bars)}
+            bars_expected = estimate_expected_bars(request.duration, request.bar_size)
+            return {"status": "success", "symbol": request.symbol, "bars_captured": len(bars), "bars_expected": bars_expected}
         except Exception as exc:
             execution_logger.exception(
                 "job_state=failed job=%s run_id=%s symbol=%s error=%s",
@@ -1312,31 +1329,44 @@ class EquitySnapshotJobHandler:
 
     job_type = "equity_snapshot"
 
-    def __init__(self, snapshot_router: Any) -> None:
+    def __init__(
+        self,
+        snapshot_router: Any,
+        *,
+        feed: Any = None,
+        redis: Any = None,
+        questdb: Any = None,
+    ) -> None:
         """
         Parameters
         ----------
         snapshot_router : module or object
             Must expose ``capture_snapshots(request, state)`` compatible with the
             FastAPI endpoint. In practice, import the router function directly.
+        feed : IBKRFeedClient
+            Required feed client for capturing equity snapshots.
+        redis : MarketDataRedisClient
+            Required Redis client for watchlist lookup and caching.
+        questdb : QuestDBClient
+            Optional QuestDB client for snapshot persistence.
         """
         self._capture = snapshot_router
+        self._feed = feed
+        self._redis = redis
+        self._questdb = questdb
 
     async def __call__(self, job: SchedulerJobDefinition) -> None:
         watchlist_name = job.params.get("watchlist_name", "")
         if not watchlist_name:
             raise ValueError("equity_snapshot job requires 'watchlist_name' param")
-        # The handler needs access to feed/redis/questdb — it will be wired
-        # at main.py level where the full app state is available.
-        # For now, this handler is a placeholder that validates the job config.
         logger.info("equity snapshot job executed: job=%s watchlist=%s", job.name, watchlist_name)
 
         persist = _coerce_bool(job.params.get("persist"), default=True)
         cache_latest = _coerce_bool(job.params.get("cache_latest"), default=True)
 
-        # Load watchlist from Redis (requires redis client to be injected)
-        if not hasattr(self, "_redis") or self._redis is None:
-            raise RuntimeError("EquitySnapshotJobHandler requires redis client (call wire_redis)")
+        # Load watchlist from Redis
+        if self._redis is None:
+            raise RuntimeError("EquitySnapshotJobHandler requires redis client (pass redis to constructor)")
 
         key_pattern = "SnapshotWatchlist::{name}"
         key = key_pattern.format(name=watchlist_name.strip().lower())
@@ -1356,8 +1386,8 @@ class EquitySnapshotJobHandler:
         )
 
         # Delegate to the feed client directly for scheduler context
-        if not hasattr(self, "_feed") or self._feed is None:
-            raise RuntimeError("EquitySnapshotJobHandler requires feed client (call wire_feed)")
+        if self._feed is None:
+            raise RuntimeError("EquitySnapshotJobHandler requires feed client (pass feed to constructor)")
 
         from src.feeds.exchange_resolver import resolve_equity
         from src.feeds.snapshotter import ticker_to_snapshot, EquitySnapshot
@@ -1392,7 +1422,7 @@ class EquitySnapshotJobHandler:
                 failed.append(resolved.symbol)
 
         # Persist
-        if persist and snapshots and hasattr(self, "_questdb") and self._questdb is not None:
+        if persist and snapshots and self._questdb is not None:
             try:
                 await self._questdb.insert_snapshots(snapshots)
                 logger.info("persisted %d snapshots to QuestDB", len(snapshots))
@@ -1416,14 +1446,4 @@ class EquitySnapshotJobHandler:
             duration,
         )
 
-    def wire_feed(self, feed: Any) -> "EquitySnapshotJobHandler":
-        self._feed = feed
-        return self
 
-    def wire_redis(self, redis: Any) -> "EquitySnapshotJobHandler":
-        self._redis = redis
-        return self
-
-    def wire_questdb(self, questdb: Any) -> "EquitySnapshotJobHandler":
-        self._questdb = questdb
-        return self
