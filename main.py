@@ -107,7 +107,11 @@ async def main() -> None:
         pacing_guard=pacing_guard,
     )
 
-    scheduler = GenericScheduler()
+    scheduler = GenericScheduler(
+        redis_client=redis,
+        local_job_directory="schedulejob",
+        job_reload_interval_seconds=60,
+    )
     loader = OHLCVLoader(ibkr, store=store, redis=redis)
     snapshot_handler = MarketSnapshotJobHandler(loader)
     scheduler.register_handler(snapshot_handler.job_type, snapshot_handler)

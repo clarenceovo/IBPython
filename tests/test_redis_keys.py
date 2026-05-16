@@ -8,9 +8,13 @@ from src.transport.redis_client import (
     MarketDataRedisClient,
     index_composition_key,
     latest_bar_key,
+    ohlcv_snapshot_calendar_key,
     ohlcv_snapshot_last_ts_key,
     ohlcv_snapshot_status_key,
+    scheduler_lease_key,
     scheduler_job_key,
+    scheduler_run_history_key,
+    scheduler_run_latest_key,
 )
 
 
@@ -28,6 +32,12 @@ def test_scheduler_job_key_format() -> None:
     assert scheduler_job_key("snapshot_spy_1m") == "SchedulerJob::snapshot_spy_1m"
 
 
+def test_scheduler_lease_and_run_key_formats() -> None:
+    assert scheduler_lease_key("snapshot_spy_1m") == "SchedulerLease::SNAPSHOT_SPY_1M"
+    assert scheduler_run_latest_key("snapshot_spy_1m") == "SchedulerRun::SNAPSHOT_SPY_1M:latest"
+    assert scheduler_run_history_key("snapshot_spy_1m") == "SchedulerRun::SNAPSHOT_SPY_1M:history"
+
+
 def test_ohlcv_snapshot_bookmark_key_formats() -> None:
     assert ohlcv_snapshot_last_ts_key("ohlcv_us_equity_1m", "spy", "1 min") == (
         "OhlcvSnapshot::OHLCV_US_EQUITY_1M::SPY::1_MIN:last_ts"
@@ -35,6 +45,17 @@ def test_ohlcv_snapshot_bookmark_key_formats() -> None:
     assert ohlcv_snapshot_status_key("ohlcv_us_equity_1m", "spy", "1 min") == (
         "OhlcvSnapshot::OHLCV_US_EQUITY_1M::SPY::1_MIN:status"
     )
+
+
+def test_ohlcv_snapshot_calendar_key_includes_contract_fingerprint() -> None:
+    assert ohlcv_snapshot_calendar_key(
+        asset_class=AssetClass.FUTURE,
+        exchange="hkfe",
+        symbol="hsi",
+        contract_fingerprint="202606",
+        date_value="2026-06-01",
+        use_rth=True,
+    ) == "OhlcvSnapshotCalendar::FUTURE::HKFE::HSI::202606::2026-06-01::true:has_session"
 
 
 def test_redis_client_stores_password() -> None:
@@ -105,3 +126,32 @@ def test_redis_client_sets_symbol_and_legacy_latest_bar_keys() -> None:
     assert symbol_loaded.symbol == "SPY"
     assert legacy_loaded is not None
     assert legacy_loaded.symbol == "SPY"
+
+
+def test_redis_client_records_scheduler_run_history() -> None:
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.store: dict[str, str] = {}
+            self.lists: dict[str, list[str]] = {}
+
+        async def set(self, key: str, value: str, **kwargs: object) -> bool:
+            self.store[key] = value
+            return True
+
+        async def lpush(self, key: str, value: str) -> None:
+            self.lists.setdefault(key, []).insert(0, value)
+
+        async def ltrim(self, key: str, start: int, stop: int) -> None:
+            self.lists[key] = self.lists.get(key, [])[start : stop + 1]
+
+    async def run() -> tuple[dict[str, str], dict[str, list[str]]]:
+        fake = FakeRedis()
+        client = MarketDataRedisClient(client=fake)
+        await client.record_scheduler_run("snapshot_spy_1m", {"status": "success", "run_id": "r1"})
+        return fake.store, fake.lists
+
+    store, lists = asyncio.run(run())
+
+    assert "SchedulerRun::SNAPSHOT_SPY_1M:latest" in store
+    assert "SchedulerRun::SNAPSHOT_SPY_1M:history" in lists
+    assert '"status": "success"' in lists["SchedulerRun::SNAPSHOT_SPY_1M:history"][0]

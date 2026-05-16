@@ -52,6 +52,10 @@ class Settings(BaseModel):
         default=constants.DEFAULT_INDEX_COMPOSITION_PROVIDER,
         alias=constants.INDEX_COMPOSITION_PROVIDER_ENV,
     )
+    fixed_income_reference_provider: str = Field(
+        default=constants.DEFAULT_FIXED_INCOME_REFERENCE_PROVIDER,
+        alias=constants.FIXED_INCOME_REFERENCE_PROVIDER_ENV,
+    )
     ibkr_rest_app_name: str = Field(
         default=constants.DEFAULT_IBKR_REST_APP_NAME,
         alias=constants.IBKR_REST_APP_NAME_ENV,

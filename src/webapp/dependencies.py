@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
+import importlib
+import inspect
 from dataclasses import dataclass
 from typing import Any
 
 from fastapi import Request
 
 from src.config.settings import Settings
+from src.feeds.fixed_income import FixedIncomeReferenceProvider
 from src.feeds.ibkr_feed import IBKRFeedClient
 from src.feeds.ohlcv_loader import OHLCVLoader
 from src.transport.ibkr_rate_limit import RedisIBKRHistoricalPacingGuard
@@ -28,6 +31,7 @@ class IBKRRestAppState:
     feed: IBKRFeedClient
     loader: OHLCVLoader
     market_data_cache: AsyncTTLCache
+    fixed_income_reference_provider: FixedIncomeReferenceProvider | None = None
 
     async def connect(self) -> None:
         try:
@@ -105,6 +109,7 @@ def build_rest_app_state(settings: Settings) -> IBKRRestAppState:
         ttl_seconds=settings.ibkr_rest_market_data_ttl_seconds,
         max_size=settings.ibkr_rest_market_data_cache_maxsize,
     )
+    fixed_income_reference_provider = build_fixed_income_reference_provider(settings.fixed_income_reference_provider)
     return IBKRRestAppState(
         settings=settings,
         redis=redis,
@@ -113,6 +118,7 @@ def build_rest_app_state(settings: Settings) -> IBKRRestAppState:
         feed=feed,
         loader=loader,
         market_data_cache=market_data_cache,
+        fixed_income_reference_provider=fixed_income_reference_provider,
     )
 
 
@@ -133,3 +139,25 @@ def build_market_data_store(settings: Settings, *, questdb: QuestDBClient) -> Ma
             database=settings.mysql_database,
         )
     raise ValueError(f"unsupported MARKET_DATA_DB_BACKEND={settings.market_data_db_backend!r}; expected questdb or mysql")
+
+
+def build_fixed_income_reference_provider(import_path: str) -> FixedIncomeReferenceProvider | None:
+    normalized = import_path.strip()
+    if not normalized:
+        logger.info("fixed income reference provider not configured; CTD business APIs will require one")
+        return None
+    module_name, separator, attribute_name = normalized.partition(":")
+    if not separator or not module_name or not attribute_name:
+        raise ValueError("FIXED_INCOME_REFERENCE_PROVIDER must be an import path like 'package.module:provider_or_factory'")
+    module = importlib.import_module(module_name)
+    target = getattr(module, attribute_name)
+    provider = target if _looks_like_fixed_income_provider(target) else target()
+    if not _looks_like_fixed_income_provider(provider):
+        raise TypeError("FIXED_INCOME_REFERENCE_PROVIDER target must expose name and async get_deliverable_basket(request)")
+    logger.info("loaded fixed income reference provider: name=%s source=%s", provider.name, normalized)
+    return provider
+
+
+def _looks_like_fixed_income_provider(provider: Any) -> bool:
+    get_deliverable_basket = getattr(provider, "get_deliverable_basket", None)
+    return bool(getattr(provider, "name", None)) and callable(get_deliverable_basket) and inspect.iscoroutinefunction(get_deliverable_basket)

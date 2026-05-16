@@ -36,7 +36,8 @@ src/
     market_data_store.py    # Base OHLCV persistence interface
     questdb_client.py       # QuestDB PostgreSQL wire client and SQL builders
     mysql_client.py         # MySQL OHLCV store implementation
-    scheduler.py            # Generic async scheduler and market snapshot job handler
+    scheduler.py            # Generic async scheduler, Redis leases/run ledger, snapshot job handlers
+    scheduler_calendar.py   # Cron parsing and next-run calculation helpers
   webapp/
     app.py                  # IBKRRestApp FastAPI application factory
     dependencies.py         # Shared async clients, loader, and cache state
@@ -48,7 +49,9 @@ src/
       system.py             # Health and cache operations
 schedulejob/
   reload_g10_index_composition.json
-Dockerfile
+Dockerfile                # Backward-compatible API image default
+Dockerfile.api            # FastAPI service image
+Dockerfile.scheduler      # Scheduler worker service image
 docker-compose.yml
 tests/
 notebooks/
@@ -120,28 +123,43 @@ make notebook
 
 ## Docker Setup
 
-Build and run the API with Redis, QuestDB, and MySQL:
+The API and scheduler are deployed as separate app containers:
+
+- `ibkr-rest-app`: FastAPI bridge on port `8000`.
+- `ibkr-scheduler`: Redis-defined scheduler worker with no public port.
+
+Build and run both app containers with Redis, QuestDB, and MySQL:
 
 ```bash
 cp .env.example .env
-docker compose up -d --build ibkr-rest-app
+docker compose up -d --build ibkr-rest-app ibkr-scheduler
 ```
 
-The Compose service exposes:
+Compose exposes:
 
 - FastAPI: http://localhost:8000/docs
 - QuestDB UI: http://localhost:9000
 - Redis: `localhost:6379`
 - MySQL: `localhost:3306`
 
-Inside Docker, `IBKR_HOST` defaults to `host.docker.internal` so the container can reach TWS or IB Gateway running on the host machine. If you run IB Gateway in another container or remote host, override `IBKR_HOST` in `.env`.
+Inside Docker, app services set `IBKR_HOST` from `IBKR_DOCKER_HOST`, defaulting to `host.docker.internal`, so containers can reach TWS or IB Gateway running on the host machine. If you run IB Gateway in another container or remote host, override `IBKR_DOCKER_HOST` and `IBKR_DOCKER_PORT` in `.env`.
+
+The two app services intentionally use different IBKR client IDs:
+
+- `IBKR_API_CLIENT_ID=101`
+- `IBKR_SCHEDULER_CLIENT_ID=201`
+
+Keep these distinct from notebooks and other IBKR API clients.
 
 Useful commands:
 
 ```bash
 make docker-build
 make docker-up
-docker compose logs -f ibkr-rest-app
+make docker-up-api
+make docker-up-scheduler
+make docker-logs-api
+make docker-logs-scheduler
 docker compose down
 ```
 
@@ -182,6 +200,7 @@ Blank or missing `.env` values are treated as null and skipped, so the correspon
 | `MARKET_DATA_DB_BACKEND` | `questdb` | OHLCV persistence backend: `questdb` or `mysql` |
 | `INDEX_SYNC_INTERVAL_SECONDS` | `86400` | Default index composition sync interval |
 | `INDEX_COMPOSITION_PROVIDER` | empty | Enables an external index composition provider when implemented |
+| `FIXED_INCOME_REFERENCE_PROVIDER` | empty | Optional import path for the provider used by CTD and futures-implied curve business APIs |
 
 ## IBKRRestApp FastAPI Bridge
 
@@ -198,6 +217,18 @@ The API runner intentionally uses `--loop asyncio`. `uvicorn[standard]` may othe
 Router split:
 
 - `GET /api/v1/business/getBondCurve`
+- `GET /api/v1/business/getNewsProviders`
+- `POST /api/v1/business/getSymbolNews`
+- `POST /api/v1/business/getNewsArticle`
+- `POST /api/v1/business/getMarketPanel`
+- `POST /api/v1/business/getUniverseBars`
+- `POST /api/v1/business/getReturns`
+- `POST /api/v1/business/getOptionSkew`
+- `POST /api/v1/business/fixed-income/getBondFutureQuotes`
+- `POST /api/v1/business/fixed-income/getCTD`
+- `POST /api/v1/business/fixed-income/getFuturesImpliedCurve`
+- `POST /api/v1/business/fixed-income/getCashBondCurve`
+- `POST /api/v1/business/fixed-income/getCurveComparison`
 - `GET /api/v1/system/health`
 - `GET /api/v1/system/cache/market-data`
 - `DELETE /api/v1/system/cache/market-data`
@@ -223,7 +254,7 @@ Router split:
 - `POST /api/v1/account/pnl/account`
 - `POST /api/v1/account/pnl/position`
 
-The app uses async FastAPI endpoints end-to-end. Market-data endpoints can use the in-process `AsyncTTLCache`; it has per-key single-flight protection so concurrent duplicate requests share one IBKR call. The TTL cache is intentionally short-lived and local to the API process. Redis remains the distributed cache for latest bars, index compositions, and scheduler/rate-limit bookmarks.
+The app uses async FastAPI endpoints end-to-end. Market-data and business endpoints can use the in-process `AsyncTTLCache`; it has per-key single-flight protection so concurrent duplicate requests share one IBKR call. The TTL cache is intentionally short-lived and local to the API process. Redis remains the distributed cache for latest bars, index compositions, and scheduler/rate-limit bookmarks.
 
 Business endpoint:
 
@@ -240,6 +271,35 @@ curl "http://localhost:8000/api/v1/business/getBondCurve?market=UST&valuation_da
 | `coupon_frequency` | no | Optional coupon frequency override for par-yield bootstrap. |
 
 The response is a business DTO with `standard_ctd_points`, a bootstrapped `curve`, and chart-ready `render_points`. Each render point includes tenor, maturity date, par yield, continuous zero rate, discount factor, CTD symbol, and futures symbol.
+
+Business news wrapper:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/business/getSymbolNews \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"TSLA","primary_exchange":"NASDAQ","total_results":20}'
+```
+
+`getSymbolNews` accepts a symbol instead of an IBKR `conId`, resolves/qualifies the contract, defaults to entitled news providers, and optionally fetches article bodies when `include_articles=true`. The raw IBKR-shaped news endpoints remain under `/reference-data/news/*`.
+
+Business-route Swagger examples are sourced from `src/webapp/docs/business_api_examples.md`, so the router code stays focused on request validation and orchestration.
+
+Research wrappers:
+
+- `POST /api/v1/business/getMarketPanel`: multi-symbol OHLCV in normalized long form.
+- `POST /api/v1/business/getUniverseBars`: load bars for explicit symbols or a Redis index composition.
+- `POST /api/v1/business/getReturns`: close-to-close simple/log returns, cumulative return, and realized volatility.
+- `POST /api/v1/business/getOptionSkew`: minimal symbol-level wrapper over bounded option skew.
+
+Fixed-income business wrappers:
+
+- `POST /api/v1/business/fixed-income/getBondFutureQuotes`: load latest IBKR OHLCV futures bars for the default sovereign curve futures or an explicit futures list.
+- `POST /api/v1/business/fixed-income/getCTD`: combine an IBKR futures quote with an injected deliverable-basket provider and calculate lowest-net-basis CTD analytics.
+- `POST /api/v1/business/fixed-income/getFuturesImpliedCurve`: build a CTD selected futures-implied yield curve.
+- `POST /api/v1/business/fixed-income/getCashBondCurve`: build the existing indicative cash-bond curve through a POST business payload.
+- `POST /api/v1/business/fixed-income/getCurveComparison`: return cash curve, futures-implied curve, and aligned zero-rate spreads.
+
+For IBKR futures qualification, the default bond future payload generates `OHLCVRequest(asset_class="future")` with `symbol`, `exchange`, `currency`, and one of `contract_month`, `local_symbol`, or `con_id`. The CTD and futures-implied APIs intentionally require `FIXED_INCOME_REFERENCE_PROVIDER`; the provider object must expose `name` and async `get_deliverable_basket(request)`. This keeps the production boundary honest: IBKR supplies tradeable futures prices, while point-in-time deliverable baskets, conversion factors, accrued interest, and delivery-date/funding assumptions come from a controlled reference source.
 
 Example OHLCV request:
 
@@ -354,6 +414,17 @@ Scheduler jobs are JSON payloads stored in Redis. Python code registers handlers
 
 The worker loads local `schedulejob/*.json` files first and Redis `SchedulerJob::*` keys second. Redis wins on duplicate job names, so local files are deployable defaults and Redis is the live operational override. Unknown job types or index reload jobs without a configured provider are logged and skipped, so one inactive operational job does not prevent unrelated market snapshot jobs from running. Runtime dependencies are opened only when needed: IBKR for market/OHLCV snapshots, the configured market OHLCV store only when at least one runnable snapshot persists bars, and Redis for all scheduler state.
 
+The scheduler periodically reconciles local and Redis job sources while running. It starts new jobs, removes disabled jobs, and restarts changed jobs by stable payload hash. Every run tries to acquire a Redis lease before execution, which prevents duplicate capture when more than one worker process is active.
+
+Operational job fields:
+
+- `timeout_seconds`: optional wall-clock timeout for one handler attempt.
+- `max_attempts`: retry attempts for failed or timed-out runs.
+- `retry_backoff_seconds`: linear backoff multiplier between attempts.
+- `jitter_seconds`: optional random start delay to avoid thundering-herd starts.
+- `lease_ttl_seconds`: Redis lease expiry; keep it longer than normal job runtime.
+- `misfire_policy`: reserved policy field; current supported values are `run_next` and `skip`.
+
 Example job:
 
 ```json
@@ -408,6 +479,13 @@ Then run:
 make run
 ```
 
+Validate scheduler configuration before live operation:
+
+```bash
+make validate-scheduler
+python scripts/validate_scheduler_jobs.py --schedule-dir schedulejob --include-redis
+```
+
 ## OHLCV Persistence Backends
 
 OHLCV snapshots persist through `MarketOHLCVStore`, a base interface implemented by both `QuestDBClient` and `MySQLClient`. The snapshotter and `OHLCVLoader` do not branch on vendor-specific clients; they call `insert_bars(...)` on the configured store.
@@ -432,6 +510,8 @@ QuestDB should remain the default for high-volume time-series capture because th
 
 `job_type="ohlcv_snapshot"` is the production scheduler path for multi-market OHLCV capture. It supports either interval scheduling or five-field cron expressions. Cron fields support `*`, ranges, lists, steps, and weekday names such as `mon-fri`.
 
+If both `cron` and `interval_seconds` are present, cron controls trigger timing. `interval_seconds` remains operational metadata and must match `params.snap_interval_seconds` for OHLCV jobs.
+
 Local job definitions included:
 
 - `schedulejob/ohlcv_us_equity_1m.json`
@@ -450,17 +530,20 @@ Core JSON fields:
 - `params.defaults`: shared OHLCV request fields plus `persist` and `cache_latest`.
 - `params.symbols`: symbol objects merged over defaults.
 
-Execution state logging uses `src.transport.scheduler.execution` and emits state markers including `evaluating`, `cron_wait`, `started`, `skipped`, `success`, `error`, and `bookmark_updated`.
+Execution state logging uses `src.transport.scheduler.execution` and emits state markers including `running`, `cron_wait`, `lease_skipped`, `skipped_window`, `skipped_holiday`, `success`, `partial_success`, `failed`, `timeout`, `cancelled`, and `bookmark_updated`.
 
 Redis state keys:
 
 ```text
+SchedulerLease::<JOB_NAME>
+SchedulerRun::<JOB_NAME>:latest
+SchedulerRun::<JOB_NAME>:history
 OhlcvSnapshot::<JOB_NAME>::<SYMBOL>::<BAR_SIZE>:last_ts
 OhlcvSnapshot::<JOB_NAME>::<SYMBOL>::<BAR_SIZE>:status
-OhlcvSnapshotCalendar::<ASSET_CLASS>::<EXCHANGE>::<SYMBOL>::<YYYY-MM-DD>::<true|false>:has_session
+OhlcvSnapshotCalendar::<ASSET_CLASS>::<EXCHANGE>::<SYMBOL>::<CONTRACT_FINGERPRINT>::<YYYY-MM-DD>::<true|false>:has_session
 ```
 
-The handler updates `last_ts` only after successful load/persist/cache for that symbol. On restart, an existing bookmark is used as `OHLCVRequest.start_datetime` when the job request does not already specify one.
+The handler updates `last_ts` only after successful load/persist/cache for that symbol. On restart, an existing bookmark is used as `OHLCVRequest.start_datetime` when the job request does not already specify one. Symbol-level failures roll up to job-level `partial_success` or `failed`, and telemetry/status write failures are logged without masking the original market-data result.
 
 ## Schedule Job Definitions
 
@@ -625,12 +708,19 @@ REST endpoint:
 
 ```text
 GET  /api/v1/business/getBondCurve
+POST /api/v1/business/fixed-income/getBondFutureQuotes
+POST /api/v1/business/fixed-income/getCTD
+POST /api/v1/business/fixed-income/getFuturesImpliedCurve
+POST /api/v1/business/fixed-income/getCashBondCurve
+POST /api/v1/business/fixed-income/getCurveComparison
 POST /api/v1/market-data/bonds/yields/history
 ```
 
 `GET /api/v1/business/getBondCurve` is intentionally minimal. A caller can request `market=UST`, `JGB`, `KTB`, `BUND`, `GERMAN_BUND`, `UK`, `UK_GILT`, or `GILT`, and optionally pass `valuation_date` and `coupon_frequency`. The API returns standard-tenor CTD/benchmark inputs plus `render_points` that are ready for a line chart or risk dashboard.
 
 Quant caveat: the built-in `getBondCurve` source is an indicative standard-tenor placeholder so Swagger, notebooks, and downstream services can integrate against a stable DTO. It is not an exchange-official CTD engine. Before trading, backtesting, or risk reporting from this endpoint, replace the placeholder with a controlled provider for delivery baskets, conversion factors, accrued interest, delivery dates, financing/carry, futures prices, and point-in-time bond/yield quotes.
+
+The fixed-income futures endpoints use IBKR as a futures quote source and then hand off to the configured reference provider for CTD terms. The request parameters are aligned to TWS futures contract construction: `symbol`, `exchange`, `currency`, and either `lastTradeDateOrContractMonth` via the API-facing `contract_month`, `local_symbol`, or `con_id`. Bond yield historical fields remain under `/market-data/bonds/yields/history`; IBKR documents those `whatToShow` values, but also notes historical yield availability limitations, so sovereign curve construction should not rely on yield bars alone.
 
 ## IBKR Account, Position, And PnL Data
 

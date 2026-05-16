@@ -75,6 +75,12 @@ CONFIG_VALUE_SPECS: tuple[ConfigValueSpec, ...] = (
         parse_str,
     ),
     ConfigValueSpec(
+        "fixed_income_reference_provider",
+        constants.FIXED_INCOME_REFERENCE_PROVIDER_ENV,
+        constants.DEFAULT_FIXED_INCOME_REFERENCE_PROVIDER,
+        parse_str,
+    ),
+    ConfigValueSpec(
         "ibkr_rest_app_name",
         constants.IBKR_REST_APP_NAME_ENV,
         constants.DEFAULT_IBKR_REST_APP_NAME,
@@ -122,6 +128,7 @@ _CANONICAL_FIELD_NAME_BY_ENV_NAME = {
     "INDEX_SYNC_INTERVAL_SECONDS": "index_sync_interval_seconds",
     "IBKR_MARKET_DATA_LINES": "ibkr_market_data_lines",
     "INDEX_COMPOSITION_PROVIDER": "index_composition_provider",
+    "FIXED_INCOME_REFERENCE_PROVIDER": "fixed_income_reference_provider",
     "IBKR_REST_APP_NAME": "ibkr_rest_app_name",
     "IBKR_REST_CONNECT_ON_STARTUP": "ibkr_rest_connect_on_startup",
     "IBKR_REST_MARKET_DATA_TTL_SECONDS": "ibkr_rest_market_data_ttl_seconds",

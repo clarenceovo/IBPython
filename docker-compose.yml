@@ -1,35 +1,68 @@
+x-app-env: &app-env
+  IBKR_HOST: ${IBKR_DOCKER_HOST:-host.docker.internal}
+  IBKR_PORT: ${IBKR_DOCKER_PORT:-4001}
+  IBKR_MARKET_DATA_LINES: ${IBKR_MARKET_DATA_LINES:-100}
+  REDIS_URL: redis://redis:6379/0
+  REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+  QUESTDB_HOST: questdb
+  QUESTDB_PORT: 8812
+  QUESTDB_USER: ${QUESTDB_USER:-admin}
+  QUESTDB_PASSWORD: ${QUESTDB_PASSWORD:-quest}
+  QUESTDB_DATABASE: ${QUESTDB_DATABASE:-qdb}
+  MYSQL_HOST: mysql
+  MYSQL_PORT: 3306
+  MYSQL_USER: ${MYSQL_USER:-root}
+  MYSQL_PASSWORD: ${MYSQL_PASSWORD:-}
+  MYSQL_DATABASE: ${MYSQL_DATABASE:-trading}
+  MARKET_DATA_DB_BACKEND: ${MARKET_DATA_DB_BACKEND:-questdb}
+  INDEX_SYNC_INTERVAL_SECONDS: ${INDEX_SYNC_INTERVAL_SECONDS:-86400}
+  INDEX_COMPOSITION_PROVIDER: ${INDEX_COMPOSITION_PROVIDER:-}
+  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+  TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+  TELEGRAM_LOG_LEVEL: ${TELEGRAM_LOG_LEVEL:-WARNING}
+
+x-app-depends: &app-depends
+  redis:
+    condition: service_started
+  questdb:
+    condition: service_started
+  mysql:
+    condition: service_started
+
 services:
   ibkr-rest-app:
     build:
       context: .
-      dockerfile: Dockerfile
-    image: ibpython-ibkr-rest-app:latest
+      dockerfile: Dockerfile.api
+    image: ibpython-fastapi:latest
     ports:
       - "8000:8000"
     env_file:
       - path: .env
         required: false
     environment:
-      IBKR_HOST: ${IBKR_HOST:-host.docker.internal}
-      IBKR_PORT: ${IBKR_PORT:-7497}
-      IBKR_CLIENT_ID: ${IBKR_CLIENT_ID:-101}
-      REDIS_URL: redis://redis:6379/0
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
-      QUESTDB_HOST: questdb
-      QUESTDB_PORT: 8812
-      QUESTDB_USER: ${QUESTDB_USER:-admin}
-      QUESTDB_PASSWORD: ${QUESTDB_PASSWORD:-quest}
-      QUESTDB_DATABASE: ${QUESTDB_DATABASE:-qdb}
-      MYSQL_HOST: mysql
-      MYSQL_PORT: 3306
-      MYSQL_USER: ${MYSQL_USER:-root}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-trading}
-      MARKET_DATA_DB_BACKEND: ${MARKET_DATA_DB_BACKEND:-questdb}
-    depends_on:
-      - redis
-      - questdb
-      - mysql
+      <<: *app-env
+      IBKR_CLIENT_ID: ${IBKR_API_CLIENT_ID:-101}
+      IBKR_REST_APP_NAME: ${IBKR_REST_APP_NAME:-IBKRRestApp}
+      IBKR_REST_CONNECT_ON_STARTUP: ${IBKR_REST_CONNECT_ON_STARTUP:-false}
+      IBKR_REST_MARKET_DATA_TTL_SECONDS: ${IBKR_REST_MARKET_DATA_TTL_SECONDS:-5}
+      IBKR_REST_MARKET_DATA_CACHE_MAXSIZE: ${IBKR_REST_MARKET_DATA_CACHE_MAXSIZE:-512}
+    depends_on: *app-depends
+    restart: unless-stopped
+
+  ibkr-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.scheduler
+    image: ibpython-scheduler:latest
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *app-env
+      IBKR_CLIENT_ID: ${IBKR_SCHEDULER_CLIENT_ID:-201}
+    depends_on: *app-depends
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
@@ -56,9 +89,9 @@ services:
       - "8812:8812"
       - "9009:9009"
     environment:
-      QDB_PG_USER: admin
-      QDB_PG_PASSWORD: quest
-      QDB_PG_DATABASE: qdb
+      QDB_PG_USER: ${QUESTDB_USER:-admin}
+      QDB_PG_PASSWORD: ${QUESTDB_PASSWORD:-quest}
+      QDB_PG_DATABASE: ${QUESTDB_DATABASE:-qdb}
     volumes:
       - questdb-data:/var/lib/questdb
 

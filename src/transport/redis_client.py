@@ -33,6 +33,18 @@ def scheduler_job_key(job_name: str) -> str:
     return constants.REDIS_SCHEDULER_JOB_KEY_TEMPLATE.format(job_name=job_name)
 
 
+def scheduler_lease_key(job_name: str) -> str:
+    return constants.REDIS_SCHEDULER_LEASE_KEY_TEMPLATE.format(job_name=_redis_token(job_name))
+
+
+def scheduler_run_latest_key(job_name: str) -> str:
+    return constants.REDIS_SCHEDULER_RUN_LATEST_KEY_TEMPLATE.format(job_name=_redis_token(job_name))
+
+
+def scheduler_run_history_key(job_name: str) -> str:
+    return constants.REDIS_SCHEDULER_RUN_HISTORY_KEY_TEMPLATE.format(job_name=_redis_token(job_name))
+
+
 def ohlcv_snapshot_last_ts_key(job_name: str, symbol: str, bar_size: str) -> str:
     return constants.REDIS_OHLCV_SNAPSHOT_LAST_TS_KEY_TEMPLATE.format(
         job_name=_redis_token(job_name),
@@ -56,11 +68,13 @@ def ohlcv_snapshot_calendar_key(
     symbol: str,
     date_value: str,
     use_rth: bool,
+    contract_fingerprint: str = "default",
 ) -> str:
     return constants.REDIS_OHLCV_SNAPSHOT_CALENDAR_KEY_TEMPLATE.format(
         asset_class=_redis_token(str(asset_class)),
         exchange=_redis_token(exchange),
         symbol=_redis_token(symbol),
+        contract_fingerprint=_redis_token(contract_fingerprint),
         date=date_value,
         use_rth=str(use_rth).lower(),
     )
@@ -158,6 +172,32 @@ class MarketDataRedisClient:
         await self.connect()
         kwargs = {"ex": ex} if ex is not None else {}
         await self._client.set(key, value, **kwargs)
+
+    async def acquire_scheduler_lease(self, job_name: str, owner_token: str, *, ttl_seconds: float) -> bool:
+        await self.connect()
+        key = scheduler_lease_key(job_name)
+        ttl = max(1, int(ttl_seconds))
+        return bool(await self._client.set(key, owner_token, nx=True, ex=ttl))
+
+    async def release_scheduler_lease(self, job_name: str, owner_token: str) -> bool:
+        await self.connect()
+        key = scheduler_lease_key(job_name)
+        script = """
+        if redis.call("GET", KEYS[1]) == ARGV[1] then
+            return redis.call("DEL", KEYS[1])
+        end
+        return 0
+        """
+        return bool(await self._client.eval(script, 1, key, owner_token))
+
+    async def record_scheduler_run(self, job_name: str, payload: dict[str, Any]) -> None:
+        await self.connect()
+        encoded = json.dumps(payload, sort_keys=True, default=str)
+        latest_key = scheduler_run_latest_key(job_name)
+        history_key = scheduler_run_history_key(job_name)
+        await self._client.set(latest_key, encoded)
+        await self._client.lpush(history_key, encoded)
+        await self._client.ltrim(history_key, 0, constants.REDIS_SCHEDULER_RUN_HISTORY_MAXLEN - 1)
 
     async def raw_client(self) -> Any:
         await self.connect()

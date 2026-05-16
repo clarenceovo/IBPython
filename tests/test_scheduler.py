@@ -7,7 +7,9 @@ from src.transport.scheduler import (
     MarketSnapshotJobHandler,
     OHLCVSnapshotJobHandler,
     OHLCVSnapshotParams,
+    SchedulerRunResult,
     SchedulerJobDefinition,
+    get_current_scheduler_run_context,
     next_cron_run,
 )
 
@@ -53,6 +55,9 @@ class FakeRedis:
         self.status: dict[tuple[str, str, str], dict] = {}
         self.raw: dict[str, str] = {}
         self.scheduler_payloads: dict[str, str] = {}
+        self.leases: dict[str, tuple[str, float]] = {}
+        self.now = 0.0
+        self.runs: dict[str, list[dict]] = {}
 
     async def get_ohlcv_snapshot_last_ts(self, job_name: str, symbol: str, bar_size: str):
         return self.last_ts.get((job_name, symbol, bar_size))
@@ -73,6 +78,26 @@ class FakeRedis:
 
     async def scan_scheduler_jobs(self):
         return list(self.scheduler_payloads)
+
+    async def acquire_scheduler_lease(self, job_name: str, owner_token: str, *, ttl_seconds: float):
+        current = self.leases.get(job_name)
+        if current is not None and current[1] > self.now:
+            return False
+        self.leases[job_name] = (owner_token, self.now + ttl_seconds)
+        return True
+
+    async def release_scheduler_lease(self, job_name: str, owner_token: str):
+        current = self.leases.get(job_name)
+        if current is not None and current[0] == owner_token:
+            self.leases.pop(job_name, None)
+            return True
+        return False
+
+    async def record_scheduler_run(self, job_name: str, payload: dict):
+        self.runs.setdefault(job_name, []).append(payload)
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 class FakeFeed:
@@ -269,7 +294,7 @@ def test_ohlcv_snapshot_handler_runs_inside_window_and_merges_symbols() -> None:
         assert persist is True
         assert cache_latest is True
         assert redis.last_ts[("ohlcv_test", "SPY", "1 min")] == datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc)
-        assert redis.status[("ohlcv_test", "SPY", "1 min")]["status"] == "ok"
+        assert redis.status[("ohlcv_test", "SPY", "1 min")]["status"] == "success"
 
     asyncio.run(run())
 
@@ -342,7 +367,7 @@ def test_ohlcv_snapshot_handler_does_not_update_bookmark_on_failure() -> None:
         await handler(_ohlcv_job())
 
         assert redis.last_ts == {}
-        assert redis.status[("ohlcv_test", "SPY", "1 min")]["status"] == "error"
+        assert redis.status[("ohlcv_test", "SPY", "1 min")]["status"] == "failed"
 
     asyncio.run(run())
 
@@ -366,5 +391,160 @@ def test_scheduler_loads_local_jobs_and_redis_overrides_duplicate_names(tmp_path
         jobs = scheduler.jobs()
         assert len(jobs) == 1
         assert jobs[0].params["symbols"][0]["symbol"] == "TSLA"
+
+    asyncio.run(run())
+
+
+def test_scheduler_redis_lease_allows_only_one_worker_to_run_job() -> None:
+    async def run() -> None:
+        redis = FakeRedis()
+        calls: list[str] = []
+
+        async def handler(job):
+            context = get_current_scheduler_run_context()
+            calls.append(context.worker_id if context else "missing")
+            await asyncio.sleep(0.02)
+
+        job = SchedulerJobDefinition(
+            name="leased_job",
+            job_type="leased",
+            interval_seconds=60,
+            lease_ttl_seconds=30,
+        )
+        scheduler_a = GenericScheduler(redis_client=redis, worker_id="worker-a")
+        scheduler_b = GenericScheduler(redis_client=redis, worker_id="worker-b")
+        scheduler_a.register_handler("leased", handler)
+        scheduler_b.register_handler("leased", handler)
+
+        await asyncio.gather(scheduler_a._run_once(job), scheduler_b._run_once(job))
+
+        assert len(calls) == 1
+        statuses = [payload["status"] for payload in redis.runs["leased_job"]]
+        assert "lease_skipped" in statuses
+        assert "success" in statuses
+
+    asyncio.run(run())
+
+
+def test_scheduler_lease_expiry_permits_recovery() -> None:
+    async def run() -> None:
+        redis = FakeRedis()
+
+        assert await redis.acquire_scheduler_lease("expiring", "owner-a", ttl_seconds=5)
+        assert not await redis.acquire_scheduler_lease("expiring", "owner-b", ttl_seconds=5)
+        redis.advance(6)
+        assert await redis.acquire_scheduler_lease("expiring", "owner-b", ttl_seconds=5)
+
+    asyncio.run(run())
+
+
+def test_scheduler_reloads_jobs_from_sources_and_reconciles_changes(tmp_path) -> None:
+    async def run() -> None:
+        job_path = tmp_path / "job.json"
+        job_path.write_text(_ohlcv_job(name="reloadable").model_dump_json())
+        scheduler = GenericScheduler(local_job_directory=tmp_path)
+        scheduler.register_handler("ohlcv_snapshot", lambda job: None)
+
+        await scheduler.reload_jobs_from_sources()
+        assert [job.name for job in scheduler.jobs()] == ["reloadable"]
+
+        changed = _ohlcv_job(
+            name="reloadable",
+            params={"symbols": [{"symbol": "TSLA", "primary_exchange": "NASDAQ"}]},
+        )
+        job_path.write_text(changed.model_dump_json())
+        await scheduler.reload_jobs_from_sources()
+        assert scheduler.jobs()[0].params["symbols"][0]["symbol"] == "TSLA"
+
+        disabled = changed.model_copy(update={"enabled": False})
+        job_path.write_text(disabled.model_dump_json())
+        await scheduler.reload_jobs_from_sources()
+        assert scheduler.jobs() == []
+
+    asyncio.run(run())
+
+
+def test_scheduler_timeout_marks_run_timeout() -> None:
+    async def run() -> None:
+        redis = FakeRedis()
+
+        async def slow_handler(job):
+            await asyncio.sleep(0.05)
+
+        scheduler = GenericScheduler(redis_client=redis, worker_id="worker-timeout")
+        scheduler.register_handler("slow", slow_handler)
+        job = SchedulerJobDefinition(
+            name="slow_job",
+            job_type="slow",
+            interval_seconds=60,
+            timeout_seconds=0.001,
+        )
+
+        await scheduler._run_once(job)
+
+        assert redis.runs["slow_job"][-1]["status"] == "timeout"
+
+    asyncio.run(run())
+
+
+def test_ohlcv_snapshot_handler_returns_partial_success_for_symbol_failures() -> None:
+    class PartiallyFailingLoader(FakeOHLCVLoader):
+        async def load(self, request, *, persist: bool, cache_latest: bool):
+            if request.symbol == "TSLA":
+                raise RuntimeError("tsla failed")
+            return await super().load(request, persist=persist, cache_latest=cache_latest)
+
+    async def run() -> None:
+        loader = PartiallyFailingLoader()
+        redis = FakeRedis()
+        handler = OHLCVSnapshotJobHandler(
+            loader,
+            redis=redis,
+            clock=lambda: datetime(2026, 1, 5, 10, 0, tzinfo=timezone.utc),
+        )
+        job = _ohlcv_job(params={"symbols": [{"symbol": "SPY"}, {"symbol": "TSLA"}]})
+
+        result = await handler(job)
+
+        assert result.status == "partial_success"
+        assert result.metrics["symbols_success"] == 1
+        assert result.metrics["symbols_failed"] == 1
+        assert redis.status[("ohlcv_test", "TSLA", "1 min")]["status"] == "failed"
+
+    asyncio.run(run())
+
+
+def test_ohlcv_snapshot_handler_returns_failed_when_all_symbols_fail() -> None:
+    async def run() -> None:
+        loader = FakeOHLCVLoader(fail=True)
+        handler = OHLCVSnapshotJobHandler(
+            loader,
+            clock=lambda: datetime(2026, 1, 5, 10, 0, tzinfo=timezone.utc),
+        )
+
+        result = await handler(_ohlcv_job())
+
+        assert result.status == "failed"
+        assert result.metrics["symbols_failed"] == 1
+
+    asyncio.run(run())
+
+
+def test_scheduler_run_ledger_writes_latest_status_and_history() -> None:
+    async def run() -> None:
+        redis = FakeRedis()
+
+        async def handler(job):
+            return SchedulerRunResult(status="success", metrics={"bars_captured": 3})
+
+        scheduler = GenericScheduler(redis_client=redis, worker_id="worker-ledger")
+        scheduler.register_handler("ledger", handler)
+        job = SchedulerJobDefinition(name="ledger_job", job_type="ledger", interval_seconds=60)
+
+        await scheduler._run_once(job)
+
+        assert redis.runs["ledger_job"][-1]["status"] == "success"
+        assert redis.runs["ledger_job"][-1]["metrics"]["bars_captured"] == 3
+        assert redis.runs["ledger_job"][-1]["worker_id"] == "worker-ledger"
 
     asyncio.run(run())
