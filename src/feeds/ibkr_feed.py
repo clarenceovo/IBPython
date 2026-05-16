@@ -106,6 +106,7 @@ from src.feeds.ibkr_historical import (
     _parse_timestamp_string,
     _ohlcv_bar_model_for_request,
     _fx_base_currency,
+    US_EQUITY_PRIMARY_EXCHANGE_PREFERENCE,
 )
 from src.feeds.ibkr_options_feed import (
     IBKROptionsFeedClient,
@@ -123,7 +124,6 @@ from src.feeds.ibkr_reference_feed import (
 logger = logging.getLogger(__name__)
 
 DETECTION_TIMEOUT = 180
-US_EQUITY_PRIMARY_EXCHANGE_PREFERENCE: tuple[str, ...] = ("NASDAQ", "NYSE", "ARCA", "AMEX", "BATS")
 
 # Re-export _ibkr_sec_type_for_option_underlying from options module
 from src.feeds.ibkr_options_feed import _ibkr_sec_type_for_option_underlying  # noqa: E402

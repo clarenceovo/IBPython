@@ -10,13 +10,15 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
 
 
 class JobHealthStatus(BaseModel):
     """Health status for a single scheduler job."""
+
+    model_config = ConfigDict(extra="forbid")
 
     job_name: str
     job_type: str
@@ -28,19 +30,15 @@ class JobHealthStatus(BaseModel):
     total_runs: int = 0
     total_failures: int = 0
 
-    class Config:
-        extra = "forbid"
-
 
 class SchedulerHealthReport(BaseModel):
     """Aggregated health report for all scheduler jobs."""
 
+    model_config = ConfigDict(extra="forbid")
+
     status: str  # "healthy", "degraded", "critical"
     jobs: dict[str, JobHealthStatus] = Field(default_factory=dict)
     checked_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-    class Config:
-        extra = "forbid"
 
 
 class SchedulerHealthMonitor:

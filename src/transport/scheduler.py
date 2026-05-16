@@ -1421,21 +1421,24 @@ class EquitySnapshotJobHandler:
             if resolved.symbol not in captured_symbols:
                 failed.append(resolved.symbol)
 
-        # Persist
+        # Persist to QuestDB first, cache to Redis only on success
+        persist_ok = False
         if persist and snapshots and self._questdb is not None:
             try:
                 await self._questdb.insert_snapshots(snapshots)
                 logger.info("persisted %d snapshots to QuestDB", len(snapshots))
+                persist_ok = True
             except Exception:
-                logger.exception("failed to persist snapshots")
+                logger.exception("failed to persist snapshots to QuestDB — skipping Redis cache")
 
-        # Cache
-        if cache_latest and snapshots:
+        if cache_latest and snapshots and persist_ok:
             for snap in snapshots:
                 try:
                     await self._redis.set_latest_equity_snapshot(snap)
                 except Exception:
-                    pass
+                    logger.debug("failed to cache snapshot for %s", snap.symbol, exc_info=True)
+        elif cache_latest and snapshots and not persist_ok:
+            logger.warning("skipping Redis cache because QuestDB persist failed for %d snapshots", len(snapshots))
 
         duration = _time.monotonic() - t0
         logger.info(
