@@ -75,6 +75,11 @@ class Settings(BaseModel):
         alias=constants.IBKR_REST_MARKET_DATA_CACHE_MAXSIZE_ENV,
         gt=0,
     )
+    ibkr_order_auth_redis_key: str = Field(
+        default=constants.DEFAULT_IBKR_ORDER_AUTH_REDIS_KEY,
+        alias=constants.IBKR_ORDER_AUTH_REDIS_KEY_ENV,
+        min_length=1,
+    )
 
     # Telegram alerting
     telegram_bot_token: str = Field(

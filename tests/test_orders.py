@@ -161,8 +161,10 @@ class FakeIB:
     def __init__(self) -> None:
         self._open_trades: list[FakeTrade] = []
         self._placed_orders: list[tuple[Any, Any]] = []
+        self._what_if_orders: list[tuple[Any, Any]] = []
         self._cancelled_orders: list[FakeOrder] = []
         self._connected = True
+        self._next_order_id = 1001
 
     def isConnected(self) -> bool:
         return self._connected
@@ -173,6 +175,12 @@ class FakeIB:
         return _qual()
 
     def placeOrder(self, contract: Any, order: Any) -> FakeTrade:
+        if getattr(order, "orderId", 0) in (None, 0):
+            order.orderId = self._next_order_id
+            self._next_order_id += 1
+        if getattr(order, "whatIf", False):
+            self._what_if_orders.append((contract, order))
+            return FakeTrade(contract=contract, order=order)
         self._placed_orders.append((contract, order))
         trade = FakeTrade(contract=contract, order=order)
         self._open_trades.append(trade)
@@ -328,6 +336,8 @@ class TestPlaceOrderRequest:
                 quantity=100,
                 price=150.0 if ot in (OrderType.LIMIT, OrderType.STOP_LIMIT, OrderType.TRAIL_LIMIT, OrderType.LIMIT_ON_CLOSE) else None,
                 aux_price=140.0 if ot in (OrderType.STOP, OrderType.STOP_LIMIT) else None,
+                trailing_type="%" if ot in (OrderType.TRAIL, OrderType.TRAIL_LIMIT) else None,
+                trailing_amount=5.0 if ot in (OrderType.TRAIL, OrderType.TRAIL_LIMIT) else None,
             )
             assert req.order_type == ot
 
@@ -616,7 +626,7 @@ class TestIBKROrderClientCancelOrder:
 
         async def run() -> CancelOrderResponse:
             # Place an order first
-            await client.place_order(PlaceOrderRequest(
+            placed = await client.place_order(PlaceOrderRequest(
                 symbol="AAPL",
                 action=OrderAction.BUY,
                 order_type=OrderType.LIMIT,
@@ -624,7 +634,7 @@ class TestIBKROrderClientCancelOrder:
                 price=150.0,
             ))
             # Cancel it
-            return await client.cancel_order("DU123", 0)
+            return await client.cancel_order("DU123", placed.order_id)
 
         result = asyncio.run(run())
         assert result.status == "cancel_requested"
@@ -650,7 +660,7 @@ class TestIBKROrderClientModifyOrder:
 
         async def run() -> OrderResponse:
             # Place an order first
-            await client.place_order(PlaceOrderRequest(
+            placed = await client.place_order(PlaceOrderRequest(
                 symbol="AAPL",
                 action=OrderAction.BUY,
                 order_type=OrderType.LIMIT,
@@ -658,7 +668,7 @@ class TestIBKROrderClientModifyOrder:
                 price=150.0,
             ))
             # Modify it
-            return await client.modify_order("DU123", 0, ModifyOrderRequest(price=155.0, quantity=200))
+            return await client.modify_order("DU123", placed.order_id, ModifyOrderRequest(price=155.0, quantity=200))
 
         result = asyncio.run(run())
         assert result.order_id >= 0
@@ -739,7 +749,8 @@ class TestIBKROrderClientPreviewOrder:
         # The fake doesn't populate margin data, but it should succeed
         assert isinstance(result, WhatIfOrderResponse)
         # No real order should have been placed (whatIf was True)
-        for _, order in fake_ib._placed_orders:
+        assert not fake_ib._placed_orders
+        for _, order in fake_ib._what_if_orders:
             assert getattr(order, "whatIf", False) is True
 
 
@@ -804,6 +815,8 @@ class TestOrderLifecycle:
 
 
 class TestOrdersRouter:
+    AUTH_HEADERS = {"Authorization": "Bearer test-order-token"}
+
     def _make_app(self) -> tuple[Any, FakeIB]:
         from src.webapp.app import create_app
         from src.config.settings import Settings
@@ -872,7 +885,7 @@ class TestOrdersRouter:
                 "order_type": "LMT",
                 "quantity": 100,
                 "price": 150.0,
-            })
+            }, headers=self.AUTH_HEADERS)
             assert response.status_code == 200
             data = response.json()
             assert "order_id" in data
@@ -887,7 +900,7 @@ class TestOrdersRouter:
                 "order_type": "LMT",
                 "quantity": 100,
                 "price": 150.0,
-            })
+            }, headers=self.AUTH_HEADERS)
             assert response.status_code == 200
             data = response.json()
             assert "warnings" in data
@@ -895,14 +908,14 @@ class TestOrdersRouter:
     def test_open_orders_endpoint(self) -> None:
         app, fake_ib = self._make_app()
         with TestClient(app) as client:
-            response = client.get("/api/v1/orders/open")
+            response = client.get("/api/v1/orders/open", headers=self.AUTH_HEADERS)
             assert response.status_code == 200
             assert isinstance(response.json(), list)
 
     def test_completed_orders_endpoint(self) -> None:
         app, fake_ib = self._make_app()
         with TestClient(app) as client:
-            response = client.get("/api/v1/orders/completed")
+            response = client.get("/api/v1/orders/completed", headers=self.AUTH_HEADERS)
             assert response.status_code == 200
             data = response.json()
             assert len(data) == 1
@@ -911,7 +924,7 @@ class TestOrdersRouter:
     def test_executions_endpoint(self) -> None:
         app, fake_ib = self._make_app()
         with TestClient(app) as client:
-            response = client.post("/api/v1/orders/executions", json={"account_id": "DU123"})
+            response = client.post("/api/v1/orders/executions", json={"account_id": "DU123"}, headers=self.AUTH_HEADERS)
             assert response.status_code == 200
             data = response.json()
             assert data["total_count"] == 2
@@ -926,10 +939,11 @@ class TestOrdersRouter:
                 "order_type": "LMT",
                 "quantity": 100,
                 "price": 150.0,
-            })
+                "account_id": "DU123",
+            }, headers=self.AUTH_HEADERS)
             order_id = place_resp.json()["order_id"]
             # Cancel
-            response = client.post(f"/api/v1/orders/{order_id}/cancel?account_id=DU123")
+            response = client.post(f"/api/v1/orders/{order_id}/cancel?account_id=DU123", headers=self.AUTH_HEADERS)
             assert response.status_code == 200
             assert response.json()["status"] == "cancel_requested"
 
@@ -943,13 +957,14 @@ class TestOrdersRouter:
                 "order_type": "LMT",
                 "quantity": 100,
                 "price": 150.0,
-            })
+                "account_id": "DU123",
+            }, headers=self.AUTH_HEADERS)
             order_id = place_resp.json()["order_id"]
             # Modify
             response = client.post(f"/api/v1/orders/{order_id}/modify?account_id=DU123", json={
                 "price": 155.0,
                 "quantity": 200,
-            })
+            }, headers=self.AUTH_HEADERS)
             assert response.status_code == 200
             assert response.json()["order_id"] == order_id
 
@@ -962,8 +977,20 @@ class TestOrdersRouter:
                 "order_type": "LMT",
                 "quantity": 100,
                 # Missing price for limit order
-            })
+            }, headers=self.AUTH_HEADERS)
             assert response.status_code == 422
+
+    def test_order_endpoint_requires_bearer_token(self) -> None:
+        app, _ = self._make_app()
+        with TestClient(app) as client:
+            response = client.get("/api/v1/orders/open")
+            assert response.status_code == 401
+
+    def test_order_endpoint_rejects_wrong_bearer_token(self) -> None:
+        app, _ = self._make_app()
+        with TestClient(app) as client:
+            response = client.get("/api/v1/orders/open", headers={"Authorization": "Bearer wrong"})
+            assert response.status_code == 401
 
     def test_router_registered_in_app(self) -> None:
         """Verify order router paths appear in the app's route list."""
@@ -975,11 +1002,25 @@ class TestOrdersRouter:
         assert "/api/v1/orders/preview" in paths
         assert "/api/v1/orders/executions" in paths
 
+    def test_order_openapi_declares_bearer_security(self) -> None:
+        app, _ = self._make_app()
+        spec = app.openapi()
+        assert spec["components"]["securitySchemes"]["OrderBearerAuth"]["type"] == "http"
+        assert spec["components"]["securitySchemes"]["OrderBearerAuth"]["scheme"] == "bearer"
+        operation = spec["paths"]["/api/v1/orders/place"]["post"]
+        assert {"OrderBearerAuth": []} in operation["security"]
+
 
 class FakeRedisForRouter:
     """Minimal Redis fake for router tests."""
+    def __init__(self) -> None:
+        self.values = {"OrderAuth::bearer_token": "test-order-token"}
+
     async def health_check(self) -> bool:
         return True
+
+    async def get_raw(self, key: str) -> str | None:
+        return self.values.get(key)
 
 
 # ===========================================================================

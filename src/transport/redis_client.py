@@ -311,8 +311,16 @@ class MarketDataRedisClient:
         data = json.loads(envelope_json)
         order_uuid = data["order_uuid"]
         key = order_envelope_key(order_uuid)
-        effective_ttl = ttl if ttl is not None else constants.REDIS_ORDER_ENVELOPE_TTL_SECONDS
-        await self._client.set(key, envelope_json, ex=effective_ttl)
+        if ttl is None:
+            effective_ttl = constants.REDIS_ORDER_ENVELOPE_TTL_SECONDS
+        elif ttl > 0:
+            effective_ttl = ttl
+        else:
+            effective_ttl = None
+        if effective_ttl is None:
+            await self._client.set(key, envelope_json)
+        else:
+            await self._client.set(key, envelope_json, ex=effective_ttl)
         return key
 
     async def get_order_envelope(self, order_uuid: str) -> str | None:

@@ -103,6 +103,7 @@ Core variables:
 | `IBKR_REST_CONNECT_ON_STARTUP` | `false` | Connect transports during API startup |
 | `IBKR_REST_MARKET_DATA_TTL_SECONDS` | `5` | REST market-data TTL cache default |
 | `IBKR_REST_MARKET_DATA_CACHE_MAXSIZE` | `512` | REST TTL cache max entries |
+| `IBKR_ORDER_AUTH_REDIS_KEY` | `OrderAuth::bearer_token` | Redis key containing the bearer token payload required by `/api/v1/orders/*` |
 
 ## Local Commands
 
@@ -206,6 +207,7 @@ Main route groups:
 - `/api/v1/market-data/*`: OHLCV, latest Redis bars, option analytics, bond yield history
 - `/api/v1/reference-data/*`: option chains, fundamentals, WSH events, news
 - `/api/v1/account/*`: account summary, live positions, portfolio, PnL snapshots
+- `/api/v1/orders/*`: protected order lifecycle, execution lookup, what-if preview, and order-envelope cache
 
 Common endpoints:
 
@@ -244,7 +246,83 @@ GET  /api/v1/account/positions
 GET  /api/v1/account/portfolio
 POST /api/v1/account/pnl/account
 POST /api/v1/account/pnl/position
+POST /api/v1/orders/place
+POST /api/v1/orders/{order_id}/cancel
+POST /api/v1/orders/{order_id}/modify
+GET  /api/v1/orders/open
+POST /api/v1/orders/executions
+POST /api/v1/orders/preview
+GET  /api/v1/orders/completed
+GET  /api/v1/orders/cache/{order_uuid}
+GET  /api/v1/orders/cache
 ```
+
+### Order Endpoint Authentication
+
+Order endpoints require a bearer token:
+
+```text
+Authorization: Bearer <token>
+```
+
+The API reads the expected token payload from Redis using `IBKR_ORDER_AUTH_REDIS_KEY`, which defaults to:
+
+```text
+OrderAuth::bearer_token
+```
+
+Configure it before using `/api/v1/orders/*`:
+
+```bash
+redis-cli SET OrderAuth::bearer_token 'replace-with-a-long-random-token'
+```
+
+If the Redis key is missing or Redis cannot be read, order endpoints fail closed with `503`. If the bearer token is missing or wrong, they return `401`. Swagger exposes this as `OrderBearerAuth`; use the **Authorize** button in `/docs` before trying order routes.
+
+Example order preview:
+
+```bash
+ORDER_TOKEN='replace-with-a-long-random-token'
+
+curl -X POST http://localhost:8000/api/v1/orders/preview \
+  -H "Authorization: Bearer ${ORDER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "symbol": "AAPL",
+    "sec_type": "STK",
+    "exchange": "SMART",
+    "currency": "USD",
+    "primary_exchange": "NASDAQ",
+    "action": "BUY",
+    "order_type": "LMT",
+    "quantity": 10,
+    "price": 150.0,
+    "account_id": "DU123"
+  }'
+```
+
+Example live order placement:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/orders/place \
+  -H "Authorization: Bearer ${ORDER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "symbol": "AAPL",
+    "sec_type": "STK",
+    "exchange": "SMART",
+    "currency": "USD",
+    "primary_exchange": "NASDAQ",
+    "action": "BUY",
+    "order_type": "LMT",
+    "quantity": 10,
+    "price": 150.0,
+    "tif": "DAY",
+    "account_id": "DU123"
+  }'
+```
+
+Order placement writes a pending UUID-tagged envelope, runs an IBKR what-if preflight, rejects obvious margin failures, then submits. Cancel and modify require `account_id` and reject account mismatches when IBKR exposes the order account. Cached order envelopes are stored without TTL by the order client so they can serve as an operational audit trail.
 
 Example OHLCV request:
 
@@ -516,6 +594,13 @@ OhlcvSnapshot::<JOB_NAME>::<SYMBOL>::<BAR_SIZE>:status
 OhlcvSnapshotCalendar::<ASSET_CLASS>::<EXCHANGE>::<SYMBOL>::<CONTRACT_FINGERPRINT>::<YYYY-MM-DD>::<true|false>:has_session
 ```
 
+Order auth and order envelopes:
+
+```text
+OrderAuth::bearer_token
+OrderCache::<order_uuid>
+```
+
 ## Verification
 
 ```bash
@@ -528,7 +613,7 @@ python3 -m json.tool schedulejob/reload_g10_index_composition.json >/dev/null
 Current expected test status:
 
 ```text
-221 passed
+371 passed
 ```
 
 ## Important Quant And IBKR Caveats
@@ -540,6 +625,7 @@ Current expected test status:
 - Full option chains should not be requested as market data in one shot. Discover the chain, filter contracts, then request selected analytics.
 - Option skew scans sample a bounded set of strikes per maturity. Increase `max_expirations`, `max_strikes_per_expiry`, and `max_concurrent_requests` carefully because each strike/right pair consumes a temporary market-data line while the short-lived subscription is open.
 - REST PnL endpoints use short-lived subscriptions; durable streaming PnL should live in a dedicated risk-engine process.
+- Order endpoints are protected by a Redis-backed bearer token and run a what-if preflight, but this is not a full execution risk engine. Add portfolio-level limits, user identity, strategy IDs, approval workflows, and durable database-backed audit before exposing live trading beyond a trusted internal environment.
 
 ## More Detail
 

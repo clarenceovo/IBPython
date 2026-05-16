@@ -8,6 +8,7 @@ from __future__ import annotations
 import uuid as _uuid
 from datetime import datetime, timezone
 from enum import StrEnum
+import math
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -21,9 +22,9 @@ class OrderType(StrEnum):
     MARKET = "MKT"
     LIMIT = "LMT"
     STOP = "STP"
-    STOP_LIMIT = "STP_LMT"
+    STOP_LIMIT = "STP LMT"
     TRAIL = "TRAIL"
-    TRAIL_LIMIT = "TRAIL_LMT"
+    TRAIL_LIMIT = "TRAIL LIMIT"
     MIDPRICE = "MIDPRICE"
     LIMIT_ON_CLOSE = "LOC"
     MARKET_ON_CLOSE = "MOC"
@@ -64,15 +65,22 @@ class PlaceOrderRequest(BaseModel):
     sec_type: str = "STK"
     exchange: str = "SMART"
     currency: str = "USD"
+    primary_exchange: str | None = None
+    last_trade_date_or_contract_month: str | None = None
+    multiplier: str | None = None
+    local_symbol: str | None = None
+    sec_id_type: str | None = None
+    sec_id: str | None = None
+    con_id: int | None = Field(default=None, gt=0)
     action: OrderAction
     order_type: OrderType
     quantity: float = Field(gt=0)
-    price: float | None = None
-    aux_price: float | None = None
+    price: float | None = Field(default=None, gt=0)
+    aux_price: float | None = Field(default=None, gt=0)
     tif: TIF = TIF.DAY
-    account_id: str | None = None
+    account_id: str | None = Field(default=None, min_length=1)
     trailing_type: str | None = None
-    trailing_amount: float | None = None
+    trailing_amount: float | None = Field(default=None, gt=0)
     outside_rth: bool = False
 
     @field_validator("symbol", mode="before")
@@ -81,6 +89,32 @@ class PlaceOrderRequest(BaseModel):
         if value is None:
             raise ValueError("symbol is required")
         return str(value).strip().upper()
+
+    @field_validator(
+        "sec_type",
+        "exchange",
+        "currency",
+        "primary_exchange",
+        "last_trade_date_or_contract_month",
+        "multiplier",
+        "local_symbol",
+        "sec_id_type",
+        "sec_id",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_upper_tokens(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip().upper()
+        return normalized or None
+
+    @field_validator("quantity", "price", "aux_price", "trailing_amount")
+    @classmethod
+    def validate_finite_number(cls, value: float | None) -> float | None:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("order numeric fields must be finite")
+        return value
 
     @field_validator("trailing_type", mode="after")
     @classmethod
@@ -98,8 +132,14 @@ class PlaceOrderRequest(BaseModel):
             if self.aux_price is None:
                 raise ValueError(f"aux_price is required for {self.order_type.value} orders")
         if self.order_type in (OrderType.TRAIL, OrderType.TRAIL_LIMIT):
-            if self.trailing_type is not None and self.trailing_amount is None:
-                raise ValueError("trailing_amount is required when trailing_type is set")
+            if self.trailing_type is None:
+                raise ValueError(f"trailing_type is required for {self.order_type.value} orders")
+            if self.trailing_amount is None:
+                raise ValueError(f"trailing_amount is required for {self.order_type.value} orders")
+        if self.sec_type == "FUT" and not (
+            self.last_trade_date_or_contract_month or self.local_symbol or self.con_id
+        ):
+            raise ValueError("future orders require last_trade_date_or_contract_month, local_symbol, or con_id")
         return self
 
 
@@ -111,7 +151,7 @@ class OrderResponse(BaseModel):
     order_id: int
     status: OrderStatus
     message: str | None = None
-    warnings: list[str] = []
+    warnings: list[str] = Field(default_factory=list)
     order_uuid: str | None = None
 
 
@@ -135,7 +175,7 @@ class OrderEnvelope(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     account_id: str | None = None
     parent_uuid: str | None = None  # Links modify/cancel to original place UUID
-    metadata: dict[str, Any] = {}
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("order_uuid", mode="before")
     @classmethod
@@ -175,13 +215,13 @@ class ModifyOrderRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    price: float | None = None
-    quantity: float | None = None
+    price: float | None = Field(default=None, gt=0)
+    quantity: float | None = Field(default=None, gt=0)
     order_type: OrderType | None = None
     tif: TIF | None = None
-    aux_price: float | None = None
+    aux_price: float | None = Field(default=None, gt=0)
     trailing_type: str | None = None
-    trailing_amount: float | None = None
+    trailing_amount: float | None = Field(default=None, gt=0)
 
     @field_validator("trailing_type", mode="after")
     @classmethod
@@ -189,6 +229,28 @@ class ModifyOrderRequest(BaseModel):
         if value is not None and value not in ("amt", "%"):
             raise ValueError("trailing_type must be 'amt' or '%'")
         return value
+
+    @field_validator("price", "quantity", "aux_price", "trailing_amount")
+    @classmethod
+    def validate_finite_number(cls, value: float | None) -> float | None:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("order numeric fields must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def validate_modification_fields(self) -> "ModifyOrderRequest":
+        if self.trailing_amount is not None and self.trailing_type is None:
+            raise ValueError("trailing_type is required when trailing_amount is set")
+        if self.order_type in (OrderType.LIMIT, OrderType.STOP_LIMIT, OrderType.TRAIL_LIMIT, OrderType.LIMIT_ON_CLOSE):
+            if self.price is None:
+                raise ValueError(f"price is required when changing to {self.order_type.value}")
+        if self.order_type in (OrderType.STOP, OrderType.STOP_LIMIT):
+            if self.aux_price is None:
+                raise ValueError(f"aux_price is required when changing to {self.order_type.value}")
+        if self.order_type in (OrderType.TRAIL, OrderType.TRAIL_LIMIT):
+            if self.trailing_type is None or self.trailing_amount is None:
+                raise ValueError(f"trailing_type and trailing_amount are required when changing to {self.order_type.value}")
+        return self
 
 
 class CancelOrderResponse(BaseModel):
@@ -283,7 +345,7 @@ class WhatIfOrderResponse(BaseModel):
     equity_with_loan: float | None = None
     init_margin_before: float | None = None
     maint_margin_before: float | None = None
-    warnings: list[str] = []
+    warnings: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -417,20 +479,23 @@ def normalize_completed_order(trade: Any) -> CompletedOrder:
 def normalize_what_if_response(trade: Any) -> WhatIfOrderResponse:
     """Normalize a what-if order result into WhatIfOrderResponse."""
     order_status = getattr(trade, "orderStatus", None) or SimpleNamespaceHelper()
-    init_margin = _safe_float(getattr(order_status, "initMarginBefore", None))
-    maint_margin = _safe_float(getattr(order_status, "maintMarginBefore", None))
+    init_margin_before = _safe_float(getattr(order_status, "initMarginBefore", None))
+    maint_margin_before = _safe_float(getattr(order_status, "maintMarginBefore", None))
+    init_margin_after = _safe_float(getattr(order_status, "initMarginAfter", None))
+    maint_margin_after = _safe_float(getattr(order_status, "maintMarginAfter", None))
+    equity_with_loan = _safe_float(getattr(order_status, "equityWithLoanAfter", None))
     warnings: list[str] = []
-    if init_margin is not None and init_margin > 0:
-        pct = init_margin
+    if init_margin_after is not None and equity_with_loan and equity_with_loan > 0:
+        pct = init_margin_after / equity_with_loan
         if pct > 0.8:
             warnings.append(f"Initial margin utilization after trade: {pct:.1%}")
     return WhatIfOrderResponse(
-        initial_margin=_safe_float(getattr(order_status, "initMarginAfter", None)),
-        maintenance_margin=_safe_float(getattr(order_status, "maintMarginAfter", None)),
+        initial_margin=init_margin_after,
+        maintenance_margin=maint_margin_after,
         commission=_safe_float(getattr(order_status, "commission", None)),
-        equity_with_loan=_safe_float(getattr(order_status, "equityWithLoanAfter", None)),
-        init_margin_before=init_margin,
-        maint_margin_before=maint_margin,
+        equity_with_loan=equity_with_loan,
+        init_margin_before=init_margin_before,
+        maint_margin_before=maint_margin_before,
         warnings=warnings,
     )
 
