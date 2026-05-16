@@ -116,10 +116,12 @@ class FakeTrade:
         contract: FakeContract | None = None,
         order: FakeOrder | None = None,
         orderStatus: FakeOrderStatus | None = None,
+        orderState: Any | None = None,
     ) -> None:
         self.contract = contract or FakeContract()
         self.order = order or FakeOrder()
         self.orderStatus = orderStatus or FakeOrderStatus()
+        self.orderState = orderState
         self.orderId = self.order.orderId
 
 
@@ -163,6 +165,7 @@ class FakeIB:
         self._placed_orders: list[tuple[Any, Any]] = []
         self._what_if_orders: list[tuple[Any, Any]] = []
         self._cancelled_orders: list[FakeOrder] = []
+        self._open_order_requests = 0
         self._connected = True
         self._next_order_id = 1001
 
@@ -193,6 +196,8 @@ class FakeIB:
         return list(self._open_trades)
 
     def reqOpenOrdersAsync(self) -> Any:
+        self._open_order_requests += 1
+
         async def _req() -> list[FakeTrade]:
             return list(self._open_trades)
         return _req()
@@ -299,6 +304,36 @@ class TestPlaceOrderRequest:
         )
         assert req.trailing_type == "%"
 
+    def test_trailing_stop_limit_contract_fields(self) -> None:
+        schema_properties = set(PlaceOrderRequest.model_json_schema()["properties"])
+        assert {"trail_stop_price", "limit_price_offset"} <= schema_properties
+        req = PlaceOrderRequest(
+            symbol="AAPL",
+            action=OrderAction.SELL,
+            order_type=OrderType.TRAIL_LIMIT,
+            quantity=100,
+            trailing_type="amt",
+            trailing_amount=1.0,
+            trail_stop_price=145.0,
+            limit_price_offset=0.25,
+        )
+        assert req.trail_stop_price == pytest.approx(145.0)
+        assert req.limit_price_offset == pytest.approx(0.25)
+
+    def test_trailing_stop_limit_rejects_limit_price(self) -> None:
+        with pytest.raises(ValueError, match="limit_price_offset, not price"):
+            PlaceOrderRequest(
+                symbol="AAPL",
+                action=OrderAction.SELL,
+                order_type=OrderType.TRAIL_LIMIT,
+                quantity=100,
+                price=144.75,
+                trailing_type="amt",
+                trailing_amount=1.0,
+                trail_stop_price=145.0,
+                limit_price_offset=0.25,
+            )
+
     def test_invalid_trailing_type_raises(self) -> None:
         with pytest.raises(ValueError, match="trailing_type must be"):
             PlaceOrderRequest(
@@ -329,15 +364,20 @@ class TestPlaceOrderRequest:
 
     def test_all_order_types_valid(self) -> None:
         for ot in OrderType:
+            trail_limit_fields = {
+                "trail_stop_price": 145.0,
+                "limit_price_offset": 0.25,
+            } if ot == OrderType.TRAIL_LIMIT else {}
             req = PlaceOrderRequest(
                 symbol="AAPL",
                 action=OrderAction.BUY,
                 order_type=ot,
                 quantity=100,
-                price=150.0 if ot in (OrderType.LIMIT, OrderType.STOP_LIMIT, OrderType.TRAIL_LIMIT, OrderType.LIMIT_ON_CLOSE) else None,
+                price=150.0 if ot in (OrderType.LIMIT, OrderType.STOP_LIMIT, OrderType.LIMIT_ON_CLOSE) else None,
                 aux_price=140.0 if ot in (OrderType.STOP, OrderType.STOP_LIMIT) else None,
                 trailing_type="%" if ot in (OrderType.TRAIL, OrderType.TRAIL_LIMIT) else None,
                 trailing_amount=5.0 if ot in (OrderType.TRAIL, OrderType.TRAIL_LIMIT) else None,
+                **trail_limit_fields,
             )
             assert req.order_type == ot
 
@@ -354,19 +394,22 @@ class TestPlaceOrderRequest:
 
 
 class TestModifyOrderRequest:
-    def test_empty_modification(self) -> None:
-        req = ModifyOrderRequest()
-        assert req.price is None
-        assert req.quantity is None
+    def test_empty_modification_rejected(self) -> None:
+        with pytest.raises(ValueError, match="at least one of price, quantity, or tif is required"):
+            ModifyOrderRequest()
 
     def test_partial_modification(self) -> None:
         req = ModifyOrderRequest(price=155.0, quantity=200)
         assert req.price == 155.0
         assert req.quantity == 200.0
 
-    def test_invalid_trailing_type_raises(self) -> None:
-        with pytest.raises(ValueError, match="trailing_type must be"):
-            ModifyOrderRequest(trailing_type="bad")
+    def test_modify_contract_allows_only_price_quantity_and_tif(self) -> None:
+        schema_properties = set(ModifyOrderRequest.model_json_schema()["properties"])
+        assert schema_properties == {"price", "quantity", "tif"}
+
+    def test_trailing_fields_rejected(self) -> None:
+        with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+            ModifyOrderRequest(trailing_type="amt")
 
 
 class TestOrderResponse:
@@ -572,6 +615,27 @@ class TestNormalizeWhatIfResponse:
         assert result.initial_margin is None
         assert result.warnings == []
 
+    def test_reads_margin_from_order_state(self) -> None:
+        trade = FakeTrade(
+            orderState=SimpleNamespace(
+                initMarginAfter="5000",
+                maintMarginAfter="2500",
+                equityWithLoanAfter="100000",
+                initMarginBefore="4000",
+                maintMarginBefore="2000",
+                commissionAndFees="1.25",
+                warningText="IBKR warning",
+            ),
+        )
+        result = normalize_what_if_response(trade)
+        assert result.initial_margin == pytest.approx(5000)
+        assert result.maintenance_margin == pytest.approx(2500)
+        assert result.equity_with_loan == pytest.approx(100000)
+        assert result.init_margin_before == pytest.approx(4000)
+        assert result.maint_margin_before == pytest.approx(2000)
+        assert result.commission == pytest.approx(1.25)
+        assert "IBKR warning" in result.warnings
+
 
 # ---------------------------------------------------------------------------
 # Sub-client tests (with mocked IB)
@@ -639,6 +703,7 @@ class TestIBKROrderClientCancelOrder:
         result = asyncio.run(run())
         assert result.status == "cancel_requested"
         assert len(fake_ib._cancelled_orders) == 1
+        assert fake_ib._open_order_requests >= 1
 
     def test_cancel_nonexistent_order(self) -> None:
         fake_ib = FakeIB()
@@ -650,6 +715,18 @@ class TestIBKROrderClientCancelOrder:
 
         result = asyncio.run(run())
         assert result.status == "not_found"
+        assert fake_ib._open_order_requests >= 1
+
+    def test_cancel_unbound_order_id_rejected(self) -> None:
+        fake_ib = FakeIB()
+        conn = FakeConnection(fake_ib)
+        client = IBKROrderClient(conn)
+
+        async def run() -> None:
+            with pytest.raises(RuntimeError, match="bound IBKR order_id"):
+                await client.cancel_order("DU123", 0)
+
+        asyncio.run(run())
 
 
 class TestIBKROrderClientModifyOrder:
@@ -673,6 +750,7 @@ class TestIBKROrderClientModifyOrder:
         result = asyncio.run(run())
         assert result.order_id >= 0
         assert result.status in (OrderStatus.SUBMITTED, OrderStatus.PENDING)
+        assert fake_ib._open_order_requests >= 1
 
     def test_modify_nonexistent_order_raises(self) -> None:
         fake_ib = FakeIB()
@@ -682,6 +760,18 @@ class TestIBKROrderClientModifyOrder:
         async def run() -> None:
             with pytest.raises(RuntimeError, match="not found"):
                 await client.modify_order("DU123", 9999, ModifyOrderRequest(price=155.0))
+
+        asyncio.run(run())
+        assert fake_ib._open_order_requests >= 1
+
+    def test_modify_unbound_order_id_rejected(self) -> None:
+        fake_ib = FakeIB()
+        conn = FakeConnection(fake_ib)
+        client = IBKROrderClient(conn)
+
+        async def run() -> None:
+            with pytest.raises(RuntimeError, match="bound IBKR order_id"):
+                await client.modify_order("DU123", 0, ModifyOrderRequest(price=155.0))
 
         asyncio.run(run())
 
@@ -752,6 +842,49 @@ class TestIBKROrderClientPreviewOrder:
         assert not fake_ib._placed_orders
         for _, order in fake_ib._what_if_orders:
             assert getattr(order, "whatIf", False) is True
+        assert len(fake_ib._cancelled_orders) == 1
+
+    def test_trailing_stop_limit_mapping(self) -> None:
+        fake_ib = FakeIB()
+        conn = FakeConnection(fake_ib)
+        client = IBKROrderClient(conn)
+
+        order = client._build_ibkr_order(PlaceOrderRequest(
+            symbol="AAPL",
+            action=OrderAction.SELL,
+            order_type=OrderType.TRAIL_LIMIT,
+            quantity=100,
+            trail_stop_price=145.0,
+            trailing_type="amt",
+            trailing_amount=1.0,
+            limit_price_offset=0.25,
+        ))
+        assert order.orderType == "TRAIL LIMIT"
+        assert order.trailStopPrice == pytest.approx(145.0)
+        assert order.auxPrice == pytest.approx(1.0)
+        assert order.lmtPriceOffset == pytest.approx(0.25)
+        assert not hasattr(order, "trailingType") or order.trailingType == ""
+        assert getattr(order, "lmtPrice", 1.7976931348623157e308) == pytest.approx(1.7976931348623157e308)
+
+    def test_trailing_percent_mapping(self) -> None:
+        fake_ib = FakeIB()
+        conn = FakeConnection(fake_ib)
+        client = IBKROrderClient(conn)
+
+        order = client._build_ibkr_order(PlaceOrderRequest(
+            symbol="AAPL",
+            action=OrderAction.SELL,
+            order_type=OrderType.TRAIL,
+            quantity=100,
+            trail_stop_price=145.0,
+            trailing_type="%",
+            trailing_amount=5.0,
+        ))
+        assert order.orderType == "TRAIL"
+        assert order.trailStopPrice == pytest.approx(145.0)
+        assert order.trailingPercent == pytest.approx(5.0)
+        assert not hasattr(order, "trailingType") or order.trailingType == ""
+        assert getattr(order, "lmtPrice", 1.7976931348623157e308) == pytest.approx(1.7976931348623157e308)
 
 
 class TestIBKROrderClientLoadCompletedOrders:
@@ -891,6 +1024,20 @@ class TestOrdersRouter:
             assert "order_id" in data
             assert data["status"] in ("submitted", "pending")
 
+    def test_place_order_endpoint_does_not_auto_preview_every_order(self) -> None:
+        app, fake_ib = self._make_app()
+        with TestClient(app) as client:
+            response = client.post("/api/v1/orders/place", json={
+                "symbol": "AAPL",
+                "action": "BUY",
+                "order_type": "LMT",
+                "quantity": 100,
+                "price": 150.0,
+            }, headers=self.AUTH_HEADERS)
+            assert response.status_code == 200
+            assert len(fake_ib._placed_orders) == 1
+            assert fake_ib._what_if_orders == []
+
     def test_preview_order_endpoint(self) -> None:
         app, fake_ib = self._make_app()
         with TestClient(app) as client:
@@ -904,6 +1051,11 @@ class TestOrdersRouter:
             assert response.status_code == 200
             data = response.json()
             assert "warnings" in data
+            assert fake_ib._placed_orders == []
+            assert len(fake_ib._what_if_orders) == 1
+            assert len(fake_ib._cancelled_orders) == 1
+            for _, order in fake_ib._what_if_orders:
+                assert getattr(order, "whatIf", False) is True
 
     def test_open_orders_endpoint(self) -> None:
         app, fake_ib = self._make_app()

@@ -50,7 +50,7 @@ def create_app(
             "- **Market Data** — OHLCV bars, option analytics/skew, bond yields, latest bars, equity snapshots\n"
             "- **Reference Data** — Option chains, fundamentals, WSH events, news, contract search\n"
             "- **Account** — Positions, portfolio, P&L snapshots\n"
-            "- **Orders** — Place, cancel, modify orders; execution details; what-if margin preview\n"
+            "- **Orders** — Place, cancel, modify orders; execution details; explicit what-if margin preview\n"
             "- **Streaming** — Real-time market data via SSE\n"
             "- **Scanner** — Contract search across IBKR's security database\n"
             "- **System** — Health check, cache management\n\n"
@@ -60,6 +60,11 @@ def create_app(
             "(default `OrderAuth::bearer_token`). Non-order endpoints are currently open "
             "when the service is reachable, so bind this API to trusted networks or add "
             "an upstream gateway before production exposure.\n\n"
+            "## Order Contract Notes\n"
+            "- `/orders/preview` is the explicit IBKR what-if endpoint for margin and commission checks.\n"
+            "- `/orders/place` is the live submission endpoint and must not automatically run what-if for every order.\n"
+            "- Trailing stop limit requests should include `trail_stop_price` and `limit_price_offset`.\n"
+            "- In-place modify is limited to `price`, `quantity`, and `tif`.\n\n"
             "## Rate Limits\n"
             "IBKR pacing limits apply. Historical data: 60 requests per 10 min window. "
             "TTL cache reduces redundant calls."
@@ -74,7 +79,7 @@ def create_app(
             {"name": "market-data", "description": "OHLCV bars, option analytics/skew, bond yields, and latest bar queries"},
             {"name": "reference-data", "description": "Option chains, fundamental data, Wall Street Horizon events, news, and contract search"},
             {"name": "account", "description": "Account summary, positions, portfolio items, and P&L snapshots"},
-            {"name": "orders", "description": "Order management — place, cancel, modify; execution details; pre-trade margin preview"},
+            {"name": "orders", "description": "Order management — live place/cancel/modify, execution details, and explicit what-if preview"},
             {"name": "scanner", "description": "Contract search and scanning across IBKR's security database"},
             {"name": "streaming", "description": "Real-time market data streaming via Server-Sent Events (SSE)"},
         ],

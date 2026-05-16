@@ -301,6 +301,8 @@ curl -X POST http://localhost:8000/api/v1/orders/preview \
   }'
 ```
 
+Use `/api/v1/orders/preview` for IBKR what-if margin and commission checks. The live `/api/v1/orders/place` endpoint is the submission path and must not automatically run a what-if request for every order; clients that require pre-trade margin review should call preview explicitly before placing.
+
 Example live order placement:
 
 ```bash
@@ -322,7 +324,32 @@ curl -X POST http://localhost:8000/api/v1/orders/place \
   }'
 ```
 
-Order placement writes a pending UUID-tagged envelope, runs an IBKR what-if preflight, rejects obvious margin failures, then submits. Cancel and modify require `account_id` and reject account mismatches when IBKR exposes the order account. Cached order envelopes are stored without TTL by the order client so they can serve as an operational audit trail.
+Example trailing stop limit order:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/orders/place \
+  -H "Authorization: Bearer ${ORDER_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "symbol": "AAPL",
+    "sec_type": "STK",
+    "exchange": "SMART",
+    "currency": "USD",
+    "action": "SELL",
+    "order_type": "TRAIL LIMIT",
+    "quantity": 10,
+    "trail_stop_price": 145.0,
+    "trailing_type": "amt",
+    "trailing_amount": 1.0,
+    "limit_price_offset": 0.25,
+    "tif": "DAY",
+    "account_id": "DU123"
+  }'
+```
+
+Trailing stop limit payloads should expose both `trail_stop_price` and `limit_price_offset` so clients can distinguish the initial trailing stop trigger from the limit offset submitted to IBKR.
+
+Order placement writes a pending UUID-tagged envelope and submits the live order. Cancel and modify require `account_id` and reject account mismatches when IBKR exposes the order account. In-place modify is intentionally narrow: only `price`, `quantity`, and `tif` are accepted for an existing order. Cached order envelopes are stored without TTL by the order client so they can serve as an operational audit trail.
 
 Example OHLCV request:
 
@@ -613,7 +640,7 @@ python3 -m json.tool schedulejob/reload_g10_index_composition.json >/dev/null
 Current expected test status:
 
 ```text
-371 passed
+380 passed
 ```
 
 ## Important Quant And IBKR Caveats
@@ -625,7 +652,7 @@ Current expected test status:
 - Full option chains should not be requested as market data in one shot. Discover the chain, filter contracts, then request selected analytics.
 - Option skew scans sample a bounded set of strikes per maturity. Increase `max_expirations`, `max_strikes_per_expiry`, and `max_concurrent_requests` carefully because each strike/right pair consumes a temporary market-data line while the short-lived subscription is open.
 - REST PnL endpoints use short-lived subscriptions; durable streaming PnL should live in a dedicated risk-engine process.
-- Order endpoints are protected by a Redis-backed bearer token and run a what-if preflight, but this is not a full execution risk engine. Add portfolio-level limits, user identity, strategy IDs, approval workflows, and durable database-backed audit before exposing live trading beyond a trusted internal environment.
+- Order endpoints are protected by a Redis-backed bearer token, but this is not a full execution risk engine. Use `/api/v1/orders/preview` deliberately for IBKR what-if checks, and add portfolio-level limits, user identity, strategy IDs, approval workflows, event-sourced order lifecycle callbacks, and durable database-backed audit before exposing live trading beyond a trusted internal environment.
 
 ## More Detail
 

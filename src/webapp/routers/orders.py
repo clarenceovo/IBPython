@@ -107,7 +107,7 @@ async def modify_order(
     account_id: str = Query(..., min_length=1, alias="account_id"),
     state: IBKRRestAppState = Depends(require_order_bearer_token),
 ) -> OrderResponse:
-    """Modify an existing order — price, quantity, type, TIF, trailing params.
+    """Modify an existing order — limited to price, quantity, and TIF.
 
     Creates a modify envelope linked to the original order's UUID.
     """

@@ -171,14 +171,23 @@ class IBKROrderClient:
         if request.account_id:
             order.account = request.account_id
 
-        if request.price is not None:
+        if request.price is not None and request.order_type in (
+            OrderType.LIMIT,
+            OrderType.STOP_LIMIT,
+            OrderType.LIMIT_ON_CLOSE,
+        ):
             order.lmtPrice = request.price
 
         if request.aux_price is not None:
             order.auxPrice = request.aux_price
 
+        if request.trail_stop_price is not None:
+            order.trailStopPrice = request.trail_stop_price
+
+        if request.limit_price_offset is not None:
+            order.lmtPriceOffset = request.limit_price_offset
+
         if request.trailing_type is not None and request.trailing_amount is not None:
-            order.trailingType = request.trailing_type
             if request.trailing_type == "%":
                 order.trailingPercent = request.trailing_amount
             else:
@@ -201,18 +210,48 @@ class IBKROrderClient:
         if qualified:
             contract = qualified[0]
         trade = self._ib.placeOrder(contract, order)
-        await asyncio.sleep(0.5)
-        result = normalize_what_if_response(trade)
-        if (
-            result.initial_margin is not None
-            and result.equity_with_loan is not None
-            and result.equity_with_loan > 0
-            and result.initial_margin > result.equity_with_loan
-        ):
-            raise RuntimeError(
-                "pre-trade risk rejected order: initial margin after trade exceeds equity with loan"
-            )
-        return result
+        try:
+            await asyncio.sleep(0.5)
+            result = normalize_what_if_response(trade)
+            if (
+                result.initial_margin is not None
+                and result.equity_with_loan is not None
+                and result.equity_with_loan > 0
+                and result.initial_margin > result.equity_with_loan
+            ):
+                raise RuntimeError(
+                    "pre-trade risk rejected order: initial margin after trade exceeds equity with loan"
+                )
+            return result
+        finally:
+            try:
+                self._ib.cancelOrder(order)
+            except Exception:
+                logger.debug("_preflight_order: uuid=%s what-if cancel skipped", envelope.order_uuid, exc_info=True)
+
+    async def _load_open_trades_for_action(self, *, operation: str) -> list[Any]:
+        """Refresh open orders from IBKR before cancel/modify, with local cache fallback."""
+        if hasattr(self._ib, "reqOpenOrdersAsync"):
+            try:
+                trades = await self._connection.with_retry(
+                    lambda: self._ib.reqOpenOrdersAsync(),
+                    operation=operation,
+                )
+                if trades is not None:
+                    return list(trades)
+            except Exception:
+                logger.warning("%s: reqOpenOrdersAsync failed; falling back to openTrades", operation, exc_info=True)
+        if hasattr(self._ib, "openTrades"):
+            return list(self._ib.openTrades())
+        return []
+
+    @staticmethod
+    def _find_trade_by_order_id(trades: list[Any], order_id: int) -> Any | None:
+        for trade in trades:
+            trade_order = getattr(trade, "order", None)
+            if trade_order and getattr(trade_order, "orderId", None) == order_id:
+                return trade
+        return None
 
     async def _wait_for_order_status(
         self,
@@ -274,9 +313,6 @@ class IBKROrderClient:
 
         await self._cache_envelope(envelope, ttl_seconds=0)
         try:
-            what_if = await self._preflight_order(request, envelope=envelope)
-            envelope.metadata["what_if"] = what_if.model_dump()
-
             # Qualify the contract first.
             qualified = await self._connection.with_retry(
                 lambda: self._ib.qualifyContractsAsync(contract),
@@ -345,6 +381,8 @@ class IBKROrderClient:
         await self._connection.ensure_connected()
         if not account_id.strip():
             raise RuntimeError("account_id is required to cancel orders")
+        if order_id <= 0:
+            raise RuntimeError("bound IBKR order_id is required to cancel orders")
 
         cancel_uuid = str(_uuid.uuid4())
         logger.info("cancel_order: uuid=%s account=%s order_id=%d", cancel_uuid, account_id, order_id)
@@ -358,14 +396,9 @@ class IBKROrderClient:
             metadata={"cancel_of_order_id": order_id},
         )
 
-        # Find the order in open trades.
-        open_trades = self._ib.openTrades() if hasattr(self._ib, "openTrades") else []
-        target_order = None
-        for trade in open_trades:
-            trade_order = getattr(trade, "order", None)
-            if trade_order and getattr(trade_order, "orderId", None) == order_id:
-                target_order = trade_order
-                break
+        open_trades = await self._load_open_trades_for_action(operation="cancel_open_orders_refresh")
+        target_trade = self._find_trade_by_order_id(open_trades, order_id)
+        target_order = getattr(target_trade, "order", None) if target_trade is not None else None
 
         if target_order is None:
             logger.warning("cancel_order: order_id=%d not found in open trades", order_id)
@@ -374,7 +407,7 @@ class IBKROrderClient:
                 status="not_found",
                 message=f"Order {order_id} not found in open orders",
             )
-            envelope.status = OrderStatus.CANCELLED
+            envelope.status = OrderStatus.PENDING
             envelope.response = result.model_dump()
             await self._cache_envelope(envelope, ttl_seconds=0)
             return result
@@ -383,7 +416,8 @@ class IBKROrderClient:
         if target_account and target_account != account_id:
             raise RuntimeError(f"Order {order_id} belongs to account {target_account}, not {account_id}")
 
-        current_status = str(getattr(target_order, "status", "")).lower()
+        order_status = getattr(target_trade, "orderStatus", None) or target_order
+        current_status = str(getattr(order_status, "status", "")).lower()
         if current_status in ("filled", "cancelled", "api cancelled"):
             logger.info("cancel_order: order_id=%d already %s", order_id, current_status)
             result = CancelOrderResponse(
@@ -404,7 +438,7 @@ class IBKROrderClient:
             status="cancel_requested",
             message="Cancel request sent",
         )
-        envelope.status = OrderStatus.CANCELLED
+        envelope.status = OrderStatus.PENDING
         envelope.response = result.model_dump()
         await self._cache_envelope(envelope, ttl_seconds=0)
         return result
@@ -423,6 +457,8 @@ class IBKROrderClient:
         await self._connection.ensure_connected()
         if not account_id.strip():
             raise RuntimeError("account_id is required to modify orders")
+        if order_id <= 0:
+            raise RuntimeError("bound IBKR order_id is required to modify orders")
 
         modify_uuid = str(_uuid.uuid4())
         logger.info("modify_order: uuid=%s account=%s order_id=%d", modify_uuid, account_id, order_id)
@@ -436,13 +472,8 @@ class IBKROrderClient:
             metadata={"modify_of_order_id": order_id},
         )
 
-        open_trades = self._ib.openTrades() if hasattr(self._ib, "openTrades") else []
-        target_trade = None
-        for trade in open_trades:
-            trade_order = getattr(trade, "order", None)
-            if trade_order and getattr(trade_order, "orderId", None) == order_id:
-                target_trade = trade
-                break
+        open_trades = await self._load_open_trades_for_action(operation="modify_open_orders_refresh")
+        target_trade = self._find_trade_by_order_id(open_trades, order_id)
 
         if target_trade is None:
             raise RuntimeError(f"Order {order_id} not found in open orders")
@@ -458,19 +489,8 @@ class IBKROrderClient:
             order.lmtPrice = modifications.price
         if modifications.quantity is not None:
             order.totalQuantity = modifications.quantity
-        if modifications.order_type is not None:
-            order.orderType = modifications.order_type.value
         if modifications.tif is not None:
             order.tif = modifications.tif.value
-        if modifications.aux_price is not None:
-            order.auxPrice = modifications.aux_price
-        if modifications.trailing_type is not None:
-            order.trailingType = modifications.trailing_type
-        if modifications.trailing_amount is not None:
-            if modifications.trailing_type == "%":
-                order.trailingPercent = modifications.trailing_amount
-            elif modifications.trailing_type == "amt":
-                order.auxPrice = modifications.trailing_amount
         order.orderRef = modify_uuid
 
         modified_trade = self._ib.placeOrder(contract, order)
@@ -592,12 +612,18 @@ class IBKROrderClient:
         if qualified:
             contract = qualified[0]
 
+        order.orderRef = preview_uuid
         trade = self._ib.placeOrder(contract, order)
 
-        # For what-if orders, the response is typically immediate.
-        await asyncio.sleep(0.5)
-
-        result = normalize_what_if_response(trade)
+        try:
+            # For what-if orders, the response is typically immediate.
+            await asyncio.sleep(0.5)
+            result = normalize_what_if_response(trade)
+        finally:
+            try:
+                self._ib.cancelOrder(order)
+            except Exception:
+                logger.debug("preview_order: uuid=%s what-if cancel skipped", preview_uuid, exc_info=True)
 
         envelope.status = OrderStatus.PENDING
         envelope.response = result.model_dump()
