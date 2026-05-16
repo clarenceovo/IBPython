@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from src.config.settings import Settings, load_settings
 from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
-from src.webapp.routers import account, business, fixed_income, market_data, reference_data, scanner, snapshot, streaming, system
+from src.webapp.routers import account, business, fixed_income, market_data, orders, reference_data, scanner, snapshot, streaming, system, tick_data
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,7 @@ def create_app(
             "- **Market Data** — OHLCV bars, option analytics/skew, bond yields, latest bars, equity snapshots\n"
             "- **Reference Data** — Option chains, fundamentals, WSH events, news, contract search\n"
             "- **Account** — Positions, portfolio, P&L snapshots\n"
+            "- **Orders** — Place, cancel, modify orders; execution details; what-if margin preview\n"
             "- **Streaming** — Real-time market data via SSE\n"
             "- **Scanner** — Contract search across IBKR's security database\n"
             "- **System** — Health check, cache management\n\n"
@@ -69,6 +70,7 @@ def create_app(
             {"name": "market-data", "description": "OHLCV bars, option analytics/skew, bond yields, and latest bar queries"},
             {"name": "reference-data", "description": "Option chains, fundamental data, Wall Street Horizon events, news, and contract search"},
             {"name": "account", "description": "Account summary, positions, portfolio items, and P&L snapshots"},
+            {"name": "orders", "description": "Order management — place, cancel, modify; execution details; pre-trade margin preview"},
             {"name": "scanner", "description": "Contract search and scanning across IBKR's security database"},
             {"name": "streaming", "description": "Real-time market data streaming via Server-Sent Events (SSE)"},
         ],
@@ -82,9 +84,11 @@ def create_app(
     fastapi_app.include_router(market_data.router, prefix="/api/v1")
     fastapi_app.include_router(reference_data.router, prefix="/api/v1")
     fastapi_app.include_router(account.router, prefix="/api/v1")
+    fastapi_app.include_router(orders.router, prefix="/api/v1")
     fastapi_app.include_router(scanner.router, prefix="/api/v1")
     fastapi_app.include_router(streaming.router, prefix="/api/v1")
     fastapi_app.include_router(snapshot.router, prefix="/api/v1")
+    fastapi_app.include_router(tick_data.router, prefix="/api/v1")
 
     @fastapi_app.exception_handler(RuntimeError)
     async def runtime_error_handler(_request: Request, exc: RuntimeError) -> JSONResponse:

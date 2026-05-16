@@ -120,6 +120,19 @@ from src.feeds.ibkr_reference_feed import (
     _float_or_none,
     _build_wsh_event_data,
 )
+from src.feeds.ibkr_order_client import IBKROrderClient
+from src.feeds.orders import (
+    CancelOrderResponse,
+    CompletedOrder,
+    ExecutionRequest,
+    ExecutionResponse,
+    ModifyOrderRequest,
+    OpenOrder,
+    OrderResponse,
+    PlaceOrderRequest,
+    WhatIfOrderResponse,
+)
+from src.feeds.ibkr_marketdata_ext import IBKRMarketDataExtClient
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +179,8 @@ class IBKRFeedClient:
         self._options = IBKROptionsFeedClient(self._connection, self._historical)
         self._account = IBKRAccountFeedClient(self._connection)
         self._reference = IBKRReferenceFeedClient(self._connection, self._historical)
+        self._order_client = IBKROrderClient(self._connection)
+        self._marketdata_ext = IBKRMarketDataExtClient(self._connection)
 
     # Backward-compatible internal accessors
     @property
@@ -515,6 +530,43 @@ class IBKRFeedClient:
         return await self._reference.cancel_equity_tickers(tickers)
 
     # ------------------------------------------------------------------
+    # Order management — delegated to order client
+    # ------------------------------------------------------------------
+
+    async def place_order(self, request: PlaceOrderRequest) -> OrderResponse:
+        """Submit a new order to IBKR."""
+        return await self._order_client.place_order(request)
+
+    async def cancel_order(self, account_id: str, order_id: int) -> CancelOrderResponse:
+        """Cancel an existing order."""
+        return await self._order_client.cancel_order(account_id, order_id)
+
+    async def modify_order(
+        self,
+        account_id: str,
+        order_id: int,
+        modifications: ModifyOrderRequest,
+    ) -> OrderResponse:
+        """Modify an existing order."""
+        return await self._order_client.modify_order(account_id, order_id, modifications)
+
+    async def load_open_orders(self) -> list[OpenOrder]:
+        """Load all currently open (working) orders."""
+        return await self._order_client.load_open_orders()
+
+    async def load_executions(self, request: ExecutionRequest) -> ExecutionResponse:
+        """Load execution/fill details with optional filtering."""
+        return await self._order_client.load_executions(request)
+
+    async def preview_order(self, request: PlaceOrderRequest) -> WhatIfOrderResponse:
+        """Pre-trade margin & commission preview (what-if)."""
+        return await self._order_client.preview_order(request)
+
+    async def load_completed_orders(self) -> list[CompletedOrder]:
+        """Load completed (filled/cancelled) order history."""
+        return await self._order_client.load_completed_orders()
+
+    # ------------------------------------------------------------------
     # IBKR event handlers — delegated to connection manager
     # ------------------------------------------------------------------
 
@@ -533,6 +585,66 @@ class IBKRFeedClient:
 
     async def _reconnect(self) -> None:
         await self._connection._reconnect()
+
+    # ------------------------------------------------------------------
+    # Market data extensions — delegated to marketdata_ext client
+    # ------------------------------------------------------------------
+
+    async def start_tick_by_tick(
+        self,
+        symbol: str,
+        sec_type: str = "STK",
+        exchange: str = "SMART",
+        currency: str = "USD",
+        tick_type: "TickType | None" = None,
+        max_ticks: int = 10_000,
+        on_tick: "Any | None" = None,
+    ) -> Any:
+        from src.feeds.tick_data import TickType
+        tt = tick_type or TickType.ALL_LAST
+        if isinstance(tt, str):
+            tt = TickType(tt)
+        return await self._marketdata_ext.start_tick_by_tick(
+            symbol, sec_type, exchange, currency, tt, max_ticks, on_tick,
+        )
+
+    async def stop_tick_by_tick(
+        self,
+        symbol: str,
+        sec_type: str = "STK",
+        exchange: str = "SMART",
+    ) -> None:
+        return await self._marketdata_ext.stop_tick_by_tick(symbol, sec_type, exchange)
+
+    def get_latest_ticks(
+        self,
+        symbol: str,
+        sec_type: str = "STK",
+        exchange: str = "SMART",
+        n: int = 100,
+    ) -> "list":
+        return self._marketdata_ext.get_latest_ticks(symbol, sec_type, exchange, n)
+
+    async def load_historical_ticks(self, request: "Any") -> "Any":
+        return await self._marketdata_ext.load_historical_ticks(request)
+
+    async def load_market_rule(self, price_magnitude: int) -> "Any":
+        return await self._marketdata_ext.load_market_rule(price_magnitude)
+
+    async def load_smart_components(self, exchange: str) -> "list":
+        return await self._marketdata_ext.load_smart_components(exchange)
+
+    async def load_head_timestamp(self, request: "Any") -> "Any":
+        return await self._marketdata_ext.load_head_timestamp(request)
+
+    async def calculate_iv(self, contract: Any, option_price: float, under_price: float) -> float:
+        return await self._marketdata_ext.calculate_iv(contract, option_price, under_price)
+
+    async def calculate_option_price(self, contract: Any, volatility: float, under_price: float) -> float:
+        return await self._marketdata_ext.calculate_option_price(contract, volatility, under_price)
+
+    async def search_matching_symbols(self, pattern: str) -> "list":
+        return await self._marketdata_ext.search_matching_symbols(pattern)
 
 
 class IBKRHistoricalPacingGuard:

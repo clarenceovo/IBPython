@@ -164,6 +164,48 @@ class FakeFeed:
             )
         ]
 
+    # -- Order management stubs for FakeFeed --
+
+    async def place_order(self, request: object) -> object:
+        from src.feeds.orders import OrderResponse, OrderStatus
+        return OrderResponse(order_id=1001, status=OrderStatus.SUBMITTED)
+
+    async def cancel_order(self, account_id: str, order_id: int) -> object:
+        from src.feeds.orders import CancelOrderResponse
+        return CancelOrderResponse(order_id=order_id, status="cancel_requested")
+
+    async def modify_order(self, account_id: str, order_id: int, modifications: object) -> object:
+        from src.feeds.orders import OrderResponse, OrderStatus
+        return OrderResponse(order_id=order_id, status=OrderStatus.SUBMITTED)
+
+    async def load_open_orders(self) -> list:
+        from src.feeds.orders import OpenOrder
+        return [OpenOrder(
+            order_id=1001,
+            symbol="AAPL",
+            sec_type="STK",
+            action="BUY",
+            order_type="LMT",
+            quantity=100,
+            price=150.0,
+            status="Submitted",
+        )]
+
+    async def load_executions(self, request: object) -> object:
+        from src.feeds.orders import ExecutionResponse
+        return ExecutionResponse(executions=[], total_count=0)
+
+    async def preview_order(self, request: object) -> object:
+        from src.feeds.orders import WhatIfOrderResponse
+        return WhatIfOrderResponse(
+            initial_margin=5000.0,
+            maintenance_margin=2500.0,
+            commission=1.0,
+        )
+
+    async def load_completed_orders(self) -> list:
+        return []
+
 
 class FakeFixedIncomeProvider:
     name = "test_fixed_income_provider"
