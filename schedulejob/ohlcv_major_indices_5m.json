@@ -1,0 +1,70 @@
+{
+  "name": "ohlcv_major_indices_5m",
+  "job_type": "ohlcv_snapshot",
+  "interval_seconds": 300,
+  "cron": "*/5 * * * *",
+  "timezone": "UTC",
+  "enabled": true,
+  "run_immediately": false,
+  "params": {
+    "start_time": "00:00",
+    "end_time": "23:59",
+    "timezone": "UTC",
+    "snap_interval_seconds": 300,
+    "snap_days": ["mon", "tue", "wed", "thu", "fri"],
+    "detect_holiday": true,
+    "capture_rth": true,
+    "defaults": {
+      "asset_class": "index",
+      "exchange": "CBOE",
+      "currency": "USD",
+      "bar_size": "5 mins",
+      "duration": "1 D",
+      "what_to_show": "TRADES",
+      "persist": true,
+      "cache_latest": true
+    },
+    "symbols": [
+      {
+        "symbol": "SPX",
+        "exchange": "CBOE",
+        "currency": "USD"
+      },
+      {
+        "symbol": "NDX",
+        "exchange": "CBOE",
+        "currency": "USD"
+      },
+      {
+        "symbol": "VIX",
+        "exchange": "CBOE",
+        "currency": "USD"
+      },
+      {
+        "symbol": "HSI",
+        "exchange": "SEHK",
+        "currency": "HKD"
+      },
+      {
+        "symbol": "DAX",
+        "exchange": "EUREX",
+        "currency": "EUR"
+      },
+      {
+        "symbol": "FTSE100",
+        "exchange": "LSE",
+        "currency": "GBP"
+      },
+      {
+        "symbol": "NIKKEI",
+        "exchange": "TSEJ",
+        "currency": "JPY"
+      },
+      {
+        "symbol": "SMI",
+        "exchange": "EBS",
+        "currency": "CHF"
+      }
+    ]
+  }
+}

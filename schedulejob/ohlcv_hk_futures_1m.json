@@ -1,0 +1,36 @@
+{
+  "name": "ohlcv_hk_futures_1m",
+  "job_type": "ohlcv_snapshot",
+  "interval_seconds": 60,
+  "enabled": true,
+  "run_immediately": false,
+  "params": {
+    "start_time": "09:15",
+    "end_time": "16:30",
+    "timezone": "Asia/Hong_Kong",
+    "snap_interval_seconds": 60,
+    "snap_days": ["mon", "tue", "wed", "thu", "fri"],
+    "detect_holiday": true,
+    "capture_rth": true,
+    "defaults": {
+      "asset_class": "future",
+      "exchange": "HKFE",
+      "currency": "HKD",
+      "bar_size": "1 min",
+      "duration": "1 D",
+      "what_to_show": "TRADES",
+      "persist": true,
+      "cache_latest": true
+    },
+    "symbols": [
+      {
+        "symbol": "HSI",
+        "last_trade_date_or_contract_month": "202606"
+      },
+      {
+        "symbol": "HTI",
+        "last_trade_date_or_contract_month": "202606"
+      }
+    ]
+  }
+}
