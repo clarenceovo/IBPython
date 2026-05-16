@@ -106,4 +106,6 @@ def get_app() -> FastAPI:
     return create_app()
 
 
-app = create_app()
+# NOTE: Do NOT instantiate app at module level. Use `get_app()` via
+# uvicorn --factory or `python -m src.webapp` entrypoint.
+# This avoids importing heavy dependencies and reading .env at import time.

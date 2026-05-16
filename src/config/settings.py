@@ -72,6 +72,20 @@ class Settings(BaseModel):
         gt=0,
     )
 
+    # Telegram alerting
+    telegram_bot_token: str = Field(
+        default=constants.DEFAULT_TELEGRAM_BOT_TOKEN,
+        alias=constants.TELEGRAM_BOT_TOKEN_ENV,
+    )
+    telegram_chat_id: str = Field(
+        default=constants.DEFAULT_TELEGRAM_CHAT_ID,
+        alias=constants.TELEGRAM_CHAT_ID_ENV,
+    )
+    telegram_log_level: str = Field(
+        default=constants.DEFAULT_TELEGRAM_LOG_LEVEL,
+        alias=constants.TELEGRAM_LOG_LEVEL_ENV,
+    )
+
     def __init__(self, **data: Any) -> None:
         env_file = data.pop("_env_file", ".env")
         include_os_environ = data.pop("_include_os_environ", True)

@@ -130,6 +130,8 @@ async def stream_ticker(
     spec = _resolve_stream_contract(request)
     subscription_id = uuid.uuid4().hex[:12]
 
+    stop_event = asyncio.Event()
+
     subscription = StreamSubscription(
         subscription_id=subscription_id,
         symbol=spec.symbol,
@@ -138,6 +140,7 @@ async def stream_ticker(
         currency=spec.currency,
         connected_at=datetime.now(timezone.utc),
     )
+    subscription._set_stop_event(stop_event)
     _active_subscriptions[subscription_id] = subscription
 
     async def event_generator():
@@ -145,7 +148,7 @@ async def stream_ticker(
         updates_sent = 0
         try:
             ticker = await state.feed.subscribe_ticker(spec)
-            while True:
+            while not stop_event.is_set():
                 if request.max_updates > 0 and updates_sent >= request.max_updates:
                     yield f'event: done\ndata: {{"subscription_id": "{subscription_id}", "reason": "max_updates_reached"}}\n\n'
                     break
@@ -156,7 +159,12 @@ async def stream_ticker(
                 updates_sent += 1
                 subscription.updates_sent = updates_sent
 
-                await asyncio.sleep(request.update_interval_seconds)
+                # Sleep but wake early if stopped
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=request.update_interval_seconds)
+                    break  # stop_event was set
+                except TimeoutError:
+                    pass  # normal tick interval elapsed
         except asyncio.CancelledError:
             logger.info("SSE stream cancelled: subscription_id=%s updates_sent=%d", subscription_id, updates_sent)
         except Exception:
@@ -198,6 +206,7 @@ async def stop_subscription(subscription_id: str) -> dict[str, str]:
     sub = _active_subscriptions.get(subscription_id)
     if sub is None:
         raise HTTPException(status_code=404, detail=f"Subscription {subscription_id} not found")
-    # The subscription will be cleaned up by the event generator's finally block
+    # Signal the SSE generator to stop, then clean up
+    sub.stop()
     _active_subscriptions.pop(subscription_id, None)
     return {"status": "stopped", "subscription_id": subscription_id}

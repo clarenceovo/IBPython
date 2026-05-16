@@ -8,14 +8,23 @@ from src.feeds.account import (
     PortfolioItemDTO,
     PositionPnLDTO,
 )
-from src.feeds.bond_curve import (
-    BondCurveRenderPoint,
-    BondCurveRequest,
-    BondCurveResponse,
-    StandardTenorCTDPoint,
-    build_standard_bond_curve,
-    resolve_bond_curve_market,
-)
+try:
+    from src.feeds.bond_curve import (
+        BondCurveRenderPoint,
+        BondCurveRequest,
+        BondCurveResponse,
+        StandardTenorCTDPoint,
+        build_standard_bond_curve,
+        resolve_bond_curve_market,
+    )
+except ImportError:
+    # bond_curve module not yet available; symbols will be missing from __all__
+    BondCurveRenderPoint = None  # type: ignore[assignment,misc]
+    BondCurveRequest = None  # type: ignore[assignment,misc]
+    BondCurveResponse = None  # type: ignore[assignment,misc]
+    StandardTenorCTDPoint = None  # type: ignore[assignment,misc]
+    build_standard_bond_curve = None  # type: ignore[assignment,misc]
+    resolve_bond_curve_market = None  # type: ignore[assignment,misc]
 from src.feeds.bonds import (
     BondInstrument,
     BondYieldBar,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -17,7 +17,7 @@ class StreamingTickerSnapshot(BaseModel):
     asset_class: AssetClass
     exchange: str = Field(min_length=1)
     currency: str = Field(min_length=1)
-    timestamp: datetime = Field(default_factory=lambda: datetime.now())
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last: float | None = None
     bid: float | None = None
     ask: float | None = None
@@ -42,7 +42,7 @@ class StreamingTickerSnapshot(BaseModel):
 class StreamSubscription(BaseModel):
     """Track an active SSE stream subscription."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
     subscription_id: str = Field(min_length=1)
     symbol: str = Field(min_length=1)
@@ -51,6 +51,15 @@ class StreamSubscription(BaseModel):
     currency: str = Field(min_length=1)
     connected_at: datetime
     updates_sent: int = 0
+
+    def stop(self) -> None:
+        """Signal the SSE generator to stop via the internal stop event."""
+        event = self.__dict__.get("_stop_event")
+        if event is not None:
+            event.set()
+
+    def _set_stop_event(self, event: asyncio.Event) -> None:
+        self.__dict__["_stop_event"] = event
 
 
 class StreamRequest(BaseModel):
