@@ -12,13 +12,16 @@ router = APIRouter(prefix="/system", tags=["system"])
 class HealthResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    status: str
+    status: str  # "ok", "degraded", "down"
     app_name: str
     ibkr_connection: str | None = None
+    redis_connection: str | None = None
+    questdb_connection: str | None = None
 
 
 @router.get("/health", response_model=HealthResponse)
 async def health(state: IBKRRestAppState = Depends(get_rest_state)) -> HealthResponse:
+    # IBKR status
     ibkr_status = None
     feed = getattr(state, "feed", None)
     if feed is not None:
@@ -28,10 +31,35 @@ async def health(state: IBKRRestAppState = Depends(get_rest_state)) -> HealthRes
             ibkr_status = "connected"
         else:
             ibkr_status = "disconnected"
+
+    # Redis status
+    redis_status = None
+    if state.redis is not None:
+        redis_ok = await state.redis.health_check()
+        redis_status = "connected" if redis_ok else "down"
+
+    # QuestDB status
+    questdb_status = None
+    if hasattr(state, "questdb") and state.questdb is not None:
+        questdb_ok = await state.questdb.health_check() if hasattr(state.questdb, "health_check") else None
+        if questdb_ok is not None:
+            questdb_status = "connected" if questdb_ok else "down"
+
+    # Aggregate status
+    statuses = [s for s in [ibkr_status, redis_status, questdb_status] if s is not None]
+    if any(s == "down" for s in statuses):
+        overall = "degraded"
+    elif ibkr_status == "connected":
+        overall = "ok"
+    else:
+        overall = "degraded"
+
     return HealthResponse(
-        status="ok",
+        status=overall,
         app_name=state.settings.ibkr_rest_app_name,
         ibkr_connection=ibkr_status,
+        redis_connection=redis_status,
+        questdb_connection=questdb_status,
     )
 
 

@@ -206,6 +206,7 @@ class IBKROptionsFeedClient:
             raise RuntimeError(f"IBKR returned no matching expirations for {request.chain_request.symbol}")
 
         semaphore = asyncio.Semaphore(request.max_concurrent_requests)
+        total_lines_planned = 0
         maturities = []
         for expiry in expirations:
             strikes = select_skew_strikes(
@@ -220,6 +221,16 @@ class IBKROptionsFeedClient:
                 expiry=expiry,
                 strikes=strikes,
             )
+            total_lines_planned += len(contracts)
+            if total_lines_planned > request.max_total_lines:
+                logger.warning(
+                    "load_option_skew_surface: budget cap hit at expiry=%s — "
+                    "planned=%d lines, max_total_lines=%d. Stopping surface scan.",
+                    expiry,
+                    total_lines_planned,
+                    request.max_total_lines,
+                )
+                break
             snapshots, warnings = await self._load_skew_contract_snapshots(
                 contracts,
                 generic_ticks=request.generic_ticks,
@@ -259,6 +270,9 @@ class IBKROptionsFeedClient:
                 "max_strikes_per_expiry": request.max_strikes_per_expiry,
                 "target_abs_delta": request.target_abs_delta,
                 "sampled_expirations": expirations,
+                "total_lines_used": total_lines_planned,
+                "max_total_lines": request.max_total_lines,
+                "budget_exhausted": total_lines_planned > request.max_total_lines,
             },
         )
 

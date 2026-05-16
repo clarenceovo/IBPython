@@ -51,6 +51,9 @@ class FakeRedis:
         self.latest_call: tuple[AssetClass, str, str | None] | None = None
         self.compositions: dict[str, IndexCompositionPayload] = {}
 
+    async def health_check(self) -> bool:
+        return True
+
     async def get_latest_bar(self, asset_class: AssetClass, bar_size: str, symbol: str | None = None) -> OHLCVBar:
         self.latest_call = (asset_class, bar_size, symbol)
         return OHLCVBar(
@@ -651,6 +654,9 @@ def test_webapp_builds_runtime_state_inside_lifespan(monkeypatch) -> None:
         response = client.get("/api/v1/system/health")
 
     assert response.status_code == 200
+    body = response.json()
+    assert body["ibkr_connection"] == "disconnected"  # FakeFeed has no _ib
+    assert body["redis_connection"] == "connected"  # FakeRedis.health_check returns True
     assert state.closed is True
 
 

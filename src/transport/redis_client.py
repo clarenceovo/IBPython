@@ -115,6 +115,15 @@ class MarketDataRedisClient:
         if self._client is not None:
             await self._client.aclose()
 
+    async def health_check(self) -> bool:
+        """Return True if Redis is reachable, False otherwise."""
+        try:
+            if self._client is None:
+                return False
+            return bool(await self._client.ping())
+        except Exception:
+            return False
+
     async def __aenter__(self) -> "MarketDataRedisClient":
         await self.connect()
         return self

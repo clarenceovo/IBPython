@@ -130,6 +130,17 @@ class QuestDBClient(MarketOHLCVStore):
             self._connection = None
             self._connected = False
 
+    async def health_check(self) -> bool:
+        """Return True if QuestDB is reachable, False otherwise."""
+        try:
+            if not self._connected or self._connection is None:
+                return False
+            async with self._connection.cursor() as cur:
+                await cur.execute("SELECT 1")
+                return True
+        except Exception:
+            return False
+
     async def __aenter__(self) -> "QuestDBClient":
         await self.connect()
         return self

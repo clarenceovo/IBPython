@@ -174,6 +174,21 @@ class OptionSkewSurfaceRequest(BaseModel):
     strike_window_pct: float = Field(default=0.30, gt=0, le=2.0)
     max_expirations: int = Field(default=6, ge=1, le=36)
     max_strikes_per_expiry: int = Field(default=11, ge=3, le=50)
+    # IBKR default market data line budget is 100 per account (shared with
+    # TWS watchlist and other API clients).  max_total_lines caps the total
+    # number of reqMktData snapshot calls across all expirations and strikes
+    # to stay within budget.  Each snapshot call holds one market data line
+    # for the duration of the request.
+    max_total_lines: int = Field(
+        default=60,
+        ge=10,
+        le=500,
+        description=(
+            "Hard cap on total snapshot reqMktData calls for the entire surface. "
+            "IBKR default is 100 market data lines per account; reserve headroom "
+            "for other subscriptions (TWS watchlist, equity snapshots, etc.)."
+        ),
+    )
     target_abs_delta: float = Field(default=0.25, gt=0, lt=1)
     fallback_moneyness_pct: float = Field(default=0.05, ge=0, le=1)
     snapshot_wait_seconds: float = Field(default=2.0, gt=0)
@@ -211,6 +226,14 @@ class OptionSkewSurfaceRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_sampling(self) -> "OptionSkewSurfaceRequest":
+        # Cap max_strikes_per_expiry so that total lines stay within budget.
+        # max_total_lines is the absolute ceiling; max_expirations * max_strikes
+        # must not exceed it.
+        max_feasible_strikes = max(3, self.max_total_lines // max(1, self.max_expirations))
+        if self.max_strikes_per_expiry > max_feasible_strikes:
+            self.max_strikes_per_expiry = max_feasible_strikes if max_feasible_strikes % 2 == 1 else max_feasible_strikes - 1
+            if self.max_strikes_per_expiry < 3:
+                self.max_strikes_per_expiry = 3
         if self.max_strikes_per_expiry % 2 == 0:
             self.max_strikes_per_expiry += 1 if self.max_strikes_per_expiry < 50 else -1
         return self

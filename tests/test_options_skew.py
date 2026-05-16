@@ -138,3 +138,29 @@ def test_select_chain_expirations_strikes_and_contracts_for_skew() -> None:
     assert strikes == (230.0, 240.0, 250.0, 260.0, 270.0)
     assert len(contracts) == 10
     assert {contract.right for contract in contracts} == {OptionRight.CALL, OptionRight.PUT}
+
+
+def test_skew_surface_request_budget_cap_reduces_strikes() -> None:
+    """max_total_lines should automatically reduce max_strikes_per_expiry to fit."""
+    request = OptionSkewSurfaceRequest(
+        chain_request=OptionChainRequest(symbol="SPY", asset_class="equity", primary_exchange="ARCA"),
+        max_expirations=6,
+        max_strikes_per_expiry=50,
+        max_total_lines=60,
+        spot_price=500,
+    )
+    # 60 lines / 6 expirations = 10 strikes max (rounded to odd = 9)
+    assert request.max_strikes_per_expiry <= 10
+
+
+def test_skew_surface_request_default_budget_fits() -> None:
+    """Default budget (60) with default max_expirations (6) and max_strikes (11) fits."""
+    request = OptionSkewSurfaceRequest(
+        chain_request=OptionChainRequest(symbol="SPY", asset_class="equity", primary_exchange="ARCA"),
+        spot_price=500,
+    )
+    # 6 expirations * 11 strikes = 66 > 60, so max_strikes should be capped
+    # 60 / 6 = 10, rounded to odd = 9
+    assert request.max_strikes_per_expiry <= 10
+    assert request.max_strikes_per_expiry % 2 == 1  # always odd
+    assert request.max_total_lines == 60
