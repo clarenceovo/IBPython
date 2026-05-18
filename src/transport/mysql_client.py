@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.config import config_constant as constants
-from src.feeds.models import AssetClass, OHLCVBar
+from src.feeds.models import AssetClass, OHLCVBar, ohlcv_contract_identity
 from src.transport.market_data_store import MarketOHLCVStore
 
 logger = logging.getLogger(__name__)
@@ -41,9 +41,20 @@ CREATE TABLE IF NOT EXISTS {constants.MARKET_OHLCV_TABLE} (
     volume DOUBLE NOT NULL,
     bar_size VARCHAR(32) NOT NULL,
     source VARCHAR(64) NOT NULL,
+    contract_key VARCHAR(255) NOT NULL,
+    con_id BIGINT NULL,
+    local_symbol VARCHAR(128) NULL,
+    contract_month VARCHAR(32) NULL,
+    expiry VARCHAR(32) NULL,
+    strike DOUBLE NULL,
+    `right` VARCHAR(8) NULL,
+    trading_class VARCHAR(64) NULL,
+    what_to_show VARCHAR(32) NULL,
+    use_rth BOOLEAN NULL,
     metadata JSON NULL,
-    PRIMARY KEY (symbol, asset_class, bar_size, timestamp),
+    PRIMARY KEY (contract_key, bar_size, timestamp),
     KEY idx_market_ohlcv_latest (asset_class, bar_size, symbol, timestamp),
+    KEY idx_market_ohlcv_contract_time (contract_key, timestamp),
     KEY idx_market_ohlcv_symbol_time (symbol, timestamp)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 """.strip()
@@ -51,8 +62,9 @@ CREATE TABLE IF NOT EXISTS {constants.MARKET_OHLCV_TABLE} (
 
 INSERT_MYSQL_MARKET_OHLCV_SQL = f"""
 INSERT INTO {constants.MARKET_OHLCV_TABLE}
-(symbol, asset_class, exchange, currency, timestamp, open, high, low, close, volume, bar_size, source, metadata)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+(symbol, asset_class, exchange, currency, timestamp, open, high, low, close, volume, bar_size, source,
+ contract_key, con_id, local_symbol, contract_month, expiry, strike, `right`, trading_class, what_to_show, use_rth, metadata)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON DUPLICATE KEY UPDATE
     exchange = VALUES(exchange),
     currency = VALUES(currency),
@@ -62,8 +74,30 @@ ON DUPLICATE KEY UPDATE
     close = VALUES(close),
     volume = VALUES(volume),
     source = VALUES(source),
+    con_id = VALUES(con_id),
+    local_symbol = VALUES(local_symbol),
+    contract_month = VALUES(contract_month),
+    expiry = VALUES(expiry),
+    strike = VALUES(strike),
+    `right` = VALUES(`right`),
+    trading_class = VALUES(trading_class),
+    what_to_show = VALUES(what_to_show),
+    use_rth = VALUES(use_rth),
     metadata = VALUES(metadata)
 """.strip()
+
+MYSQL_MARKET_OHLCV_IDENTITY_ALTER_SQL = (
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN IF NOT EXISTS contract_key VARCHAR(255) NULL",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN IF NOT EXISTS con_id BIGINT NULL",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN IF NOT EXISTS local_symbol VARCHAR(128) NULL",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN IF NOT EXISTS contract_month VARCHAR(32) NULL",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN IF NOT EXISTS expiry VARCHAR(32) NULL",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN IF NOT EXISTS strike DOUBLE NULL",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN IF NOT EXISTS `right` VARCHAR(8) NULL",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN IF NOT EXISTS trading_class VARCHAR(64) NULL",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN IF NOT EXISTS what_to_show VARCHAR(32) NULL",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN IF NOT EXISTS use_rth BOOLEAN NULL",
+)
 
 
 class MySQLClient(MarketOHLCVStore):
@@ -264,6 +298,11 @@ class MySQLClient(MarketOHLCVStore):
 
     async def create_market_ohlcv_table(self) -> None:
         await self.create_table(CREATE_MYSQL_MARKET_OHLCV_TABLE_SQL)
+        for sql in MYSQL_MARKET_OHLCV_IDENTITY_ALTER_SQL:
+            try:
+                await self.execute(sql)
+            except Exception:
+                logger.debug("MySQL identity column migration skipped/already applied: %s", sql, exc_info=True)
 
     async def insert_bars(self, bars: Sequence[OHLCVBar]) -> int:
         return await self.execute_many(INSERT_MYSQL_MARKET_OHLCV_SQL, [mysql_bar_to_row(bar) for bar in bars])
@@ -274,6 +313,7 @@ class MySQLClient(MarketOHLCVStore):
         symbol: str,
         asset_class: AssetClass | str | None = None,
         bar_size: str | None = None,
+        contract_key: str | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int = 10_000,
@@ -282,6 +322,7 @@ class MySQLClient(MarketOHLCVStore):
             symbol=symbol,
             asset_class=asset_class,
             bar_size=bar_size,
+            contract_key=contract_key,
             start=start,
             end=end,
             limit=limit,
@@ -293,13 +334,15 @@ class MySQLClient(MarketOHLCVStore):
         *,
         asset_class: AssetClass | str | None = None,
         bar_size: str | None = None,
+        contract_key: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        sql, params = build_mysql_latest_query(asset_class=asset_class, bar_size=bar_size, limit=limit)
+        sql, params = build_mysql_latest_query(asset_class=asset_class, bar_size=bar_size, contract_key=contract_key, limit=limit)
         return await self.fetch_all(sql, params)
 
 
 def mysql_bar_to_row(bar: OHLCVBar) -> tuple[Any, ...]:
+    identity = ohlcv_contract_identity(bar)
     return (
         bar.symbol,
         str(bar.asset_class),
@@ -313,6 +356,16 @@ def mysql_bar_to_row(bar: OHLCVBar) -> tuple[Any, ...]:
         bar.volume,
         bar.bar_size,
         bar.source,
+        identity["contract_key"],
+        identity["con_id"],
+        identity["local_symbol"],
+        identity["contract_month"],
+        identity["expiry"],
+        identity["strike"],
+        identity["right"],
+        identity["trading_class"],
+        identity["what_to_show"],
+        identity["use_rth"],
         bar.metadata_json(),
     )
 
@@ -322,6 +375,7 @@ def build_mysql_historical_query(
     symbol: str,
     asset_class: AssetClass | str | None = None,
     bar_size: str | None = None,
+    contract_key: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
     limit: int = 10_000,
@@ -334,6 +388,9 @@ def build_mysql_historical_query(
     if bar_size is not None:
         clauses.append("bar_size = %s")
         params.append(bar_size)
+    if contract_key is not None:
+        clauses.append("contract_key = %s")
+        params.append(contract_key)
     if start is not None:
         clauses.append("timestamp >= %s")
         params.append(_mysql_timestamp(start))
@@ -354,6 +411,7 @@ def build_mysql_latest_query(
     *,
     asset_class: AssetClass | str | None = None,
     bar_size: str | None = None,
+    contract_key: str | None = None,
     limit: int = 100,
 ) -> tuple[str, list[Any]]:
     clauses: list[str] = []
@@ -364,13 +422,18 @@ def build_mysql_latest_query(
     if bar_size is not None:
         clauses.append("bar_size = %s")
         params.append(bar_size)
+    if contract_key is not None:
+        clauses.append("contract_key = %s")
+        params.append(contract_key)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
     sql = (
-        "SELECT symbol, asset_class, exchange, currency, timestamp, open, high, low, close, volume, bar_size, source, metadata "
+        "SELECT symbol, asset_class, exchange, currency, timestamp, open, high, low, close, volume, bar_size, source, "
+        "contract_key, con_id, local_symbol, contract_month, expiry, strike, `right`, trading_class, what_to_show, use_rth, metadata "
         "FROM ("
-        "SELECT symbol, asset_class, exchange, currency, timestamp, open, high, low, close, volume, bar_size, source, metadata, "
-        f"ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY timestamp DESC) AS rn FROM {constants.MARKET_OHLCV_TABLE} {where}"
+        "SELECT symbol, asset_class, exchange, currency, timestamp, open, high, low, close, volume, bar_size, source, "
+        "contract_key, con_id, local_symbol, contract_month, expiry, strike, `right`, trading_class, what_to_show, use_rth, metadata, "
+        f"ROW_NUMBER() OVER (PARTITION BY symbol, contract_key ORDER BY timestamp DESC) AS rn FROM {constants.MARKET_OHLCV_TABLE} {where}"
         ") ranked WHERE rn = 1 ORDER BY timestamp DESC LIMIT %s"
     )
     return sql, params

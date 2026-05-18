@@ -9,9 +9,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time as monotonic_time
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from src.config import config_constant as constants
+
+if TYPE_CHECKING:
+    from src.feeds.contracts import ContractSpec
+    from src.feeds.ibkr_feed import IBKRHistoricalPacingGuard
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +142,7 @@ class IBKRConnectionManager:
         retry_attempts: int = 3,
         retry_base_delay_seconds: float = 0.5,
         pacing_guard: "IBKRHistoricalPacingGuard | None" = None,
+        rate_limiter: Any | None = None,
     ) -> None:
         self.host = host
         self.port = port
@@ -146,6 +151,7 @@ class IBKRConnectionManager:
         self.retry_base_delay_seconds = retry_base_delay_seconds
         self._ib: Any | None = None
         self._pacing_guard = pacing_guard  # set later if not provided
+        self._rate_limiter = rate_limiter
         self._shutting_down = False
         self._reconnect_lock = asyncio.Lock()
         self._last_ibkr_error: tuple[int, str] | None = None
@@ -168,6 +174,14 @@ class IBKRConnectionManager:
     @pacing_guard.setter
     def pacing_guard(self, value: "IBKRHistoricalPacingGuard | None") -> None:
         self._pacing_guard = value
+
+    @property
+    def rate_limiter(self) -> Any | None:
+        return self._rate_limiter
+
+    @rate_limiter.setter
+    def rate_limiter(self, value: Any | None) -> None:
+        self._rate_limiter = value
 
     @property
     def shutting_down(self) -> bool:
@@ -415,6 +429,7 @@ class IBKRConnectionManager:
         last_error: BaseException | None = None
         for attempt in range(1, self.retry_attempts + 1):
             try:
+                await self.wait_for_ibkr_request(operation=operation)
                 return await call()
             except Exception as exc:  # pragma: no cover - exercised with live gateways.
                 last_error = exc
@@ -429,6 +444,31 @@ class IBKRConnectionManager:
     async def _with_retry(self, call: Any, *, operation: str) -> Any:
         return await self.with_retry(call, operation=operation)
 
+    async def wait_for_ibkr_request(self, *, operation: str, weight: int = 1) -> None:
+        if self._rate_limiter is None:
+            return
+        await self._rate_limiter.wait_for_request(operation=operation, weight=weight)
+
+    async def acquire_market_data_line(
+        self,
+        *,
+        contract_key: str,
+        operation: str,
+        ttl_seconds: float | None = None,
+    ) -> Any:
+        if self._rate_limiter is None:
+            return _NoopMarketDataLease()
+        return await self._rate_limiter.acquire_market_data_line(
+            contract_key=contract_key,
+            operation=operation,
+            ttl_seconds=ttl_seconds,
+        )
+
+    async def rate_limit_snapshot(self) -> dict[str, Any]:
+        if self._rate_limiter is None:
+            return {"enabled": False, "reason": "not_configured"}
+        return await self._rate_limiter.snapshot()
+
     def _disconnect_stale_client(self) -> None:
         if self._ib is None:
             return
@@ -438,3 +478,29 @@ class IBKRConnectionManager:
             logger.debug("error disconnecting stale IBKR client", exc_info=True)
         finally:
             self._ib = None
+
+
+class _NoopMarketDataLease:
+    released = False
+
+    async def release(self) -> None:
+        self.released = True
+
+
+async def wait_for_ibkr_request(connection: Any, *, operation: str, weight: int = 1) -> None:
+    wait = getattr(connection, "wait_for_ibkr_request", None)
+    if callable(wait):
+        await wait(operation=operation, weight=weight)
+
+
+async def acquire_market_data_line(
+    connection: Any,
+    *,
+    contract_key: str,
+    operation: str,
+    ttl_seconds: float | None = None,
+) -> Any:
+    acquire = getattr(connection, "acquire_market_data_line", None)
+    if callable(acquire):
+        return await acquire(contract_key=contract_key, operation=operation, ttl_seconds=ttl_seconds)
+    return _NoopMarketDataLease()

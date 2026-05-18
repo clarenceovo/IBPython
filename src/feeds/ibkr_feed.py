@@ -21,7 +21,7 @@ import time as monotonic_time
 from collections import defaultdict, deque
 from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from src.config import config_constant as constants
 from src.feeds.contracts import ContractSpec, OptionChain, OptionChainRequest, build_ibkr_contract
@@ -94,6 +94,8 @@ from src.feeds.ibkr_connection import (
     _contract_text,
     _contract_int,
     _qualification_hint,
+    acquire_market_data_line,
+    wait_for_ibkr_request,
 )
 from src.feeds.ibkr_historical import (
     IBKRHistoricalClient,
@@ -146,6 +148,23 @@ DETECTION_TIMEOUT = 180
 # Re-export _ibkr_sec_type_for_option_underlying from options module
 from src.feeds.ibkr_options_feed import _ibkr_sec_type_for_option_underlying  # noqa: E402
 
+if TYPE_CHECKING:
+    from src.feeds.tick_data import TickType
+
+
+def _ibkr_rate_limit_contract_key(contract: Any, fallback: str) -> str:
+    con_id = getattr(contract, "conId", None)
+    if con_id:
+        return f"conId:{con_id}"
+    local_symbol = getattr(contract, "localSymbol", None)
+    if local_symbol:
+        return f"localSymbol:{local_symbol}"
+    symbol = getattr(contract, "symbol", fallback)
+    sec_type = getattr(contract, "secType", "")
+    exchange = getattr(contract, "exchange", "")
+    currency = getattr(contract, "currency", "")
+    return f"{sec_type}:{symbol}:{exchange}:{currency}:{fallback}"
+
 
 class IBKRFeedClient:
     """Async IBKR market data adapter — facade composing domain sub-clients.
@@ -163,8 +182,20 @@ class IBKRFeedClient:
         retry_attempts: int = 3,
         retry_base_delay_seconds: float = 0.5,
         pacing_guard: "IBKRHistoricalPacingGuard | None" = None,
+        rate_limiter: Any | None = None,
         redis: Any | None = None,
     ) -> None:
+        if rate_limiter is None:
+            try:
+                from src.transport.ibkr_rate_limit import IBKRRateLimitController
+
+                rate_limiter = IBKRRateLimitController(
+                    redis_client=redis,
+                    pacing_guard=pacing_guard or IBKRHistoricalPacingGuard(),
+                )
+                pacing_guard = rate_limiter.pacing_guard
+            except Exception:
+                logger.debug("failed to initialize IBKR rate limiter; using historical pacing only", exc_info=True)
         self._connection = IBKRConnectionManager(
             host=host,
             port=port,
@@ -172,6 +203,7 @@ class IBKRFeedClient:
             retry_attempts=retry_attempts,
             retry_base_delay_seconds=retry_base_delay_seconds,
             pacing_guard=pacing_guard or IBKRHistoricalPacingGuard(),
+            rate_limiter=rate_limiter,
         )
         # Expose top-level attributes for backward compatibility
         self.host = self._connection.host
@@ -413,13 +445,25 @@ class IBKRFeedClient:
             use_snapshot,
             generic_tick_list or "none",
         )
-        ticker = self._ib.reqMktData(
-            contract,
-            genericTickList=generic_tick_list,
-            snapshot=use_snapshot,
-            regulatorySnapshot=request.regulatory_snapshot if use_snapshot else False,
-            mktDataOptions=[],
+        operation = f"option_analytics:{request.contract.underlying_symbol}:{request.contract.expiry}"
+        lease = await acquire_market_data_line(
+            self._connection,
+            contract_key=_ibkr_rate_limit_contract_key(contract, operation),
+            operation=operation,
+            ttl_seconds=max(30.0, request.snapshot_wait_seconds + 10.0),
         )
+        await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
+        try:
+            ticker = self._ib.reqMktData(
+                contract,
+                genericTickList=generic_tick_list,
+                snapshot=use_snapshot,
+                regulatorySnapshot=request.regulatory_snapshot if use_snapshot else False,
+                mktDataOptions=[],
+            )
+        except Exception:
+            await lease.release()
+            raise
         try:
             await asyncio.sleep(request.snapshot_wait_seconds)
             result = normalize_option_analytics_from_ticker(ticker, request.contract)
@@ -427,9 +471,11 @@ class IBKRFeedClient:
             return result
         finally:
             try:
+                await wait_for_ibkr_request(self._connection, operation=f"{operation}:cancelMktData")
                 self._ib.cancelMktData(contract)
             except Exception:
                 logger.debug("Failed to cancel market data subscription for %s", request.contract.underlying_symbol, exc_info=True)
+            await lease.release()
 
     async def capture_fx_option_snapshots(
         self,

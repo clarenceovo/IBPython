@@ -917,6 +917,13 @@ def _contract_fingerprint(request: OHLCVRequest) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+def _loader_quality_summary(loader: object) -> dict[str, Any] | None:
+    report = getattr(loader, "last_quality_report", None)
+    if report is None or not hasattr(report, "summary"):
+        return None
+    return report.summary()
+
+
 class MarketSnapshotJobHandler:
     """Handler for Redis job_type='market_snapshot' jobs."""
 
@@ -943,7 +950,11 @@ class MarketSnapshotJobHandler:
         )
         bars = await self.loader.load(request, persist=persist, cache_latest=cache_latest)
         bars_expected = estimate_expected_bars(request.duration, request.bar_size)
-        return SchedulerRunResult(status="success", metrics={"bars_captured": len(bars or []), "bars_expected": bars_expected})
+        metrics: dict[str, Any] = {"bars_captured": len(bars or []), "bars_expected": bars_expected}
+        quality_summary = _loader_quality_summary(self.loader)
+        if quality_summary is not None:
+            metrics["data_quality"] = quality_summary
+        return SchedulerRunResult(status="success", metrics=metrics)
 
 
 class OHLCVSnapshotJobHandler:
@@ -1020,6 +1031,7 @@ class OHLCVSnapshotJobHandler:
         failed_count = sum(1 for result in results if result["status"] == "failed")
         bars_captured = sum(int(result.get("bars_captured", 0)) for result in results)
         bars_expected = sum(int(result.get("bars_expected", 0)) for result in results)
+        quality_reports = [result["data_quality"] for result in results if result.get("data_quality") is not None]
         if failed_count == len(results):
             status = "failed"
         elif failed_count > 0:
@@ -1040,6 +1052,8 @@ class OHLCVSnapshotJobHandler:
                 "bars_expected": bars_expected,
                 "estimated_historical_requests": estimated_requests,
                 "max_concurrency": self.max_concurrency,
+                "data_quality_reports": quality_reports,
+                "data_quality_issue_symbols": sum(1 for report in quality_reports if report.get("issue_codes")),
             },
         )
 
@@ -1110,6 +1124,7 @@ class OHLCVSnapshotJobHandler:
                 cache_latest,
             )
             bars = await self.loader.load(request, persist=persist, cache_latest=cache_latest)
+            quality_summary = _loader_quality_summary(self.loader)
             if bars:
                 latest_timestamp = max(bar.timestamp for bar in bars)
                 await self._write_bookmark(job, request, latest_timestamp)
@@ -1129,6 +1144,7 @@ class OHLCVSnapshotJobHandler:
                     "last_run_at": self.clock().astimezone(timezone.utc).isoformat(),
                     "latest_bar_timestamp": max((bar.timestamp for bar in bars), default=None),
                     "duration_ms": (monotonic_time.monotonic() - started) * 1000.0,
+                    "data_quality": quality_summary,
                 },
             )
             execution_logger.info(
@@ -1140,7 +1156,13 @@ class OHLCVSnapshotJobHandler:
                 len(bars),
             )
             bars_expected = estimate_expected_bars(request.duration, request.bar_size)
-            return {"status": "success", "symbol": request.symbol, "bars_captured": len(bars), "bars_expected": bars_expected}
+            return {
+                "status": "success",
+                "symbol": request.symbol,
+                "bars_captured": len(bars),
+                "bars_expected": bars_expected,
+                "data_quality": quality_summary,
+            }
         except Exception as exc:
             execution_logger.exception(
                 "job_state=failed job=%s run_id=%s symbol=%s error=%s",
@@ -1448,5 +1470,3 @@ class EquitySnapshotJobHandler:
             len(failed),
             duration,
         )
-
-

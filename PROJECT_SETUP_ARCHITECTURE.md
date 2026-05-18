@@ -21,6 +21,7 @@ src/
     settings.py             # Pydantic validation over ConfigLoader output
   feeds/
     models.py               # BaseOHLCVBar, OHLCVBar, FutureOHLCVBar, FXOHLCVBar, OptionOHLCVBar, OHLCVRequest, AssetClass
+    data_quality.py         # OHLCV data-quality reports and fatal/warning checks before persistence
     contracts.py            # Vendor-neutral contract specs -> IBKR mapping
     account.py              # Account, portfolio, live position, and PnL DTOs
     bonds.py                # Bond yield, CTD, and yield curve DTOs
@@ -504,7 +505,7 @@ Both backends expose the same operational surface:
 - `query_historical_bars(...)`
 - `query_latest_bars(...)`
 
-QuestDB should remain the default for high-volume time-series capture because the table is timestamped and day-partitioned. MySQL is useful when operators want the snapshotter to land bars beside relational portfolio, strategy, or reporting tables. The MySQL schema uses a deterministic primary key `(symbol, asset_class, bar_size, timestamp)` and `ON DUPLICATE KEY UPDATE`, so repeated snapshots are idempotent.
+QuestDB should remain the default for high-volume time-series capture because the table is timestamped and day-partitioned. MySQL is useful when operators want the snapshotter to land bars beside relational portfolio, strategy, or reporting tables. Both stores persist a deterministic `contract_key` plus nullable IBKR contract identity fields (`con_id`, `local_symbol`, `contract_month`, `expiry`, `strike`, `right`, `trading_class`, `what_to_show`, and `use_rth`). MySQL keys bars by `(contract_key, bar_size, timestamp)` with `ON DUPLICATE KEY UPDATE`, so same-root futures or options at the same timestamp stay distinct and repeated snapshots remain idempotent.
 
 ## OHLCV Snapshot Jobs
 
@@ -543,7 +544,7 @@ OhlcvSnapshot::<JOB_NAME>::<SYMBOL>::<BAR_SIZE>:status
 OhlcvSnapshotCalendar::<ASSET_CLASS>::<EXCHANGE>::<SYMBOL>::<CONTRACT_FINGERPRINT>::<YYYY-MM-DD>::<true|false>:has_session
 ```
 
-The handler updates `last_ts` only after successful load/persist/cache for that symbol. On restart, an existing bookmark is used as `OHLCVRequest.start_datetime` when the job request does not already specify one. Symbol-level failures roll up to job-level `partial_success` or `failed`, and telemetry/status write failures are logged without masking the original market-data result.
+The handler updates `last_ts` only after successful load/persist/cache for that symbol. On restart, an existing bookmark is used as `OHLCVRequest.start_datetime` when the job request does not already specify one. Symbol-level failures roll up to job-level `partial_success` or `failed`, and telemetry/status write failures are logged without masking the original market-data result. Successful runs include the loader's data-quality summary in per-symbol Redis status and aggregate scheduler metrics; fatal data-quality invariants fail before persistence/cache.
 
 ## Schedule Job Definitions
 
@@ -786,8 +787,8 @@ Documented standards:
 
 | Area | IBKR Standard | Project Control |
 |---|---:|---|
-| General API request pacing | Maximum requests per second equals maximum market data lines divided by 2. Default 100 lines implies 50 requests/second. | Snapshot jobs are periodic; no general high-frequency request loop is created. |
-| Market data lines | Default minimum is 100 concurrent real-time market data lines, shared across TWS watchlists and API clients. | Current implementation uses historical snapshots, not persistent streaming lines. Future streaming feeds must track active subscriptions. |
+| General API request pacing | Maximum requests per second equals maximum market data lines divided by 2. Default 100 lines implies 50 requests/second. | `IBKRRateLimitController` enforces a global outgoing-message bucket before IBKR socket calls; default cap is 50/sec. |
+| Market data lines | Default minimum is 100 concurrent real-time market data lines, shared across TWS watchlists and API clients. | The controller leases active app-owned market-data lines for `reqMktData`, snapshots, option analytics, FX option capture, tick streams, and streaming flows. |
 | Historical small-bar pacing | Avoid identical historical requests inside 15 seconds. | `IBKRHistoricalPacingGuard` enforces identical request cooldown. |
 | Historical same-contract burst | Avoid six or more historical requests for the same contract, exchange, and tick type within 2 seconds. | Guard allows at most five in the 2-second window. |
 | Historical rolling window | Avoid more than 60 historical requests in 10 minutes. `BID_ASK` counts twice. | Guard enforces 60 weighted requests per 600 seconds. |
@@ -796,9 +797,9 @@ Documented standards:
 
 Will this setup hit IBKR pacing limits?
 
-For the default snapshot design, it should not hit limits if you keep the number of Redis `market_snapshot` jobs conservative. The implementation sends one historical request per snapshot job run, then lets `IBKRHistoricalPacingGuard` throttle bursts across all jobs sharing the same `IBKRFeedClient`.
+For the default snapshot design, it should not hit limits if you keep the number of Redis `market_snapshot` jobs conservative. The implementation sends one historical request per snapshot job run, then lets `IBKRRateLimitController` throttle bursts across all jobs sharing the same Redis pacing namespace.
 
-In `main.py`, the system uses `RedisIBKRHistoricalPacingGuard`, which stores pacing bookmarks in Redis with atomic Lua checks. This is safer than a pure in-memory limiter because notebooks, background workers, and multiple scheduler processes share the same request budget.
+The REST app and scheduler use `IBKRRateLimitController`, which stores historical bookmarks, the global outgoing-message window, and active market-data-line leases in Redis with atomic Lua checks. This is safer than a pure in-memory limiter because notebooks, background workers, and multiple scheduler processes share the same request budget. If Redis is unavailable, the controller falls back to local in-process limiting rather than sending an unbounded burst.
 
 Redis pacing keys:
 
@@ -806,9 +807,11 @@ Redis pacing keys:
 IBKRRateLimit:historical:window
 IBKRRateLimit:historical:identical:<request_hash>
 IBKRRateLimit:historical:same_contract:<contract_hash>
+IBKRRateLimit:global:window
+IBKRRateLimit:market_data:leases
 ```
 
-The limiter uses sorted sets for rolling windows and short-lived keys for identical-request cooldowns. If Redis is unavailable, the guard falls back to the local in-process limiter so the application fails conservatively instead of sending an unbounded burst.
+The limiter uses sorted sets for rolling windows and market-data-line leases, plus short-lived keys for identical-request cooldowns. Market-data leases are released after `cancelMktData` and also have a TTL safety net for process crashes. The app cannot see TWS watchlists or external API clients, so keep a reserve with `IBKR_RATE_LIMIT_MARKET_DATA_RESERVE`.
 
 Capacity rule of thumb:
 
@@ -839,9 +842,9 @@ Operational recommendations:
 
 Main table: `market_ohlcv`
 
-QuestDB schema: timestamped on `timestamp`, partitioned by day, stores metadata as JSON text.
+QuestDB schema: timestamped on `timestamp`, partitioned by day, stores metadata as JSON text plus nullable contract identity columns.
 
-MySQL schema: InnoDB table with `(symbol, asset_class, bar_size, timestamp)` primary key, secondary indexes for latest/history reads, and `metadata JSON`.
+MySQL schema: InnoDB table with `(contract_key, bar_size, timestamp)` primary key, secondary indexes for latest/history reads, nullable contract identity columns, and `metadata JSON`.
 
 Both query builders are parameterized to avoid unsafe string interpolation.
 

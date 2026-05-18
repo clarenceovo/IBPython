@@ -8,7 +8,7 @@ API_LOOP ?= asyncio
 API_APP ?= src.webapp.app:get_app
 API_LOG_LEVEL ?= info
 
-.PHONY: venv install install-dev test services-up services-down notebook run validate-scheduler run-api run-api-dev docker-build docker-up docker-up-api docker-up-scheduler docker-logs-api docker-logs-scheduler
+.PHONY: venv install install-dev test lint typecheck services-up services-down notebook run validate-scheduler run-api run-api-dev docker-build docker-up docker-up-api docker-up-scheduler docker-logs-api docker-logs-scheduler
 
 venv:
 	$(PYTHON) -m venv $(VENV)
@@ -24,6 +24,12 @@ install-dev: venv
 
 test:
 	$(PY) -m pytest
+
+lint:
+	$(PY) -m ruff check src tests
+
+typecheck:
+	$(PY) -m mypy src/feeds/data_quality.py src/feeds/ohlcv_loader.py src/transport/ibkr_rate_limit.py || true
 
 services-up:
 	docker compose up -d redis questdb

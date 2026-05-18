@@ -12,7 +12,6 @@ Rules (applied in order):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +73,7 @@ _SUFFIX_MAP: dict[str, tuple[str, str, str]] = {
 }
 
 # IBKR exchange codes for specific US exchanges (used as primary_exchange)
-_US_PRIMARY_EXCHANGES: ClassVar[dict[str, str]] = {
+_US_PRIMARY_EXCHANGES: dict[str, str] = {
     # Common ETFs
     "SPY": "ARCA",
     "QQQ": "ARCA",
@@ -118,7 +117,6 @@ _US_PRIMARY_EXCHANGES: ClassVar[dict[str, str]] = {
     "CMCSA": "NASDAQ",
     "ADBE": "NASDAQ",
     "CRM": "NASDAQ",
-    "NFLX": "NASDAQ",
     "FISV": "NASDAQ",
     "GILD": "NASDAQ",
     "MRVL": "NASDAQ",

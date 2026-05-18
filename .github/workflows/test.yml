@@ -44,6 +44,12 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
+      - name: Run Ruff
+        run: python -m ruff check src tests
+
+      - name: Advisory type check
+        run: python -m mypy src/feeds/data_quality.py src/feeds/ohlcv_loader.py src/transport/ibkr_rate_limit.py || true
+
       - name: Compile source and tests
         run: python -m compileall -q src tests
 

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from src.feeds.contracts import build_ibkr_contract, ContractSpec
-from src.feeds.ibkr_connection import IBKRConnectionManager
+from src.feeds.ibkr_connection import IBKRConnectionManager, acquire_market_data_line, wait_for_ibkr_request
 from src.feeds.models import AssetClass
 from src.feeds.tick_data import (
     HeadTimestampRequest,
@@ -136,6 +136,7 @@ class IBKRMarketDataExtClient:
         self._tick_buffers: dict[tuple[str, str, str], deque[TickByTickData]] = {}
         # Active subscription handles: key = (symbol, sec_type, exchange) → ib_insync ticker handle
         self._tick_subscriptions: dict[tuple[str, str, str], Any] = {}
+        self._tick_subscription_leases: dict[tuple[str, str, str], Any] = {}
         # Optional callback per symbol key
         self._on_tick_callbacks: dict[tuple[str, str, str], Callable[[TickByTickData], None] | None] = {}
 
@@ -169,6 +170,11 @@ class IBKRMarketDataExtClient:
             await self.stop_tick_by_tick(symbol, sec_type, exchange)
 
         contract = _build_contract(symbol, sec_type, exchange, currency)
+        lease = await acquire_market_data_line(
+            self._connection,
+            contract_key=f"tick_by_tick:{sec_type.upper()}:{symbol.upper()}:{exchange.upper()}:{currency.upper()}",
+            operation=f"tick_by_tick:{symbol}",
+        )
 
         # Store buffer and callback
         self._tick_buffers[key] = deque(maxlen=max_ticks)
@@ -199,17 +205,22 @@ class IBKRMarketDataExtClient:
             except Exception:
                 logger.debug("error processing tick-by-tick data for %s", symbol, exc_info=True)
 
-        handle = await self._connection.with_retry(
-            lambda: self._ib.reqTickByTickDataAsync(
-                contract,
-                tick_type.value,
-                numberOfTicks=0,
-                ignoreSize=True,
-            ),
-            operation=f"tick_by_tick:{symbol}",
-        )
+        try:
+            handle = await self._connection.with_retry(
+                lambda: self._ib.reqTickByTickDataAsync(
+                    contract,
+                    tick_type.value,
+                    numberOfTicks=0,
+                    ignoreSize=True,
+                ),
+                operation=f"tick_by_tick:{symbol}",
+            )
+        except Exception:
+            await lease.release()
+            raise
 
         self._tick_subscriptions[key] = handle
+        self._tick_subscription_leases[key] = lease
         logger.info(
             "started tick-by-tick subscription: symbol=%s sec_type=%s exchange=%s tick_type=%s max_ticks=%d",
             symbol, sec_type, exchange, tick_type.value, max_ticks,
@@ -227,9 +238,13 @@ class IBKRMarketDataExtClient:
         handle = self._tick_subscriptions.pop(key, None)
         if handle is not None and self._ib is not None:
             try:
+                await wait_for_ibkr_request(self._connection, operation=f"tick_by_tick_cancel:{symbol}")
                 self._ib.cancelTickByTickData(handle)
             except Exception:
                 logger.debug("error cancelling tick-by-tick for %s", symbol, exc_info=True)
+        lease = self._tick_subscription_leases.pop(key, None)
+        if lease is not None:
+            await lease.release()
         self._on_tick_callbacks.pop(key, None)
         logger.info("stopped tick-by-tick subscription: symbol=%s sec_type=%s exchange=%s", symbol, sec_type, exchange)
 

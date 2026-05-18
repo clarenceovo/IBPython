@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.config import config_constant as constants
-from src.feeds.models import AssetClass, OHLCVBar
+from src.feeds.models import AssetClass, OHLCVBar, ohlcv_contract_identity
 from src.feeds.snapshotter import EquitySnapshot, FXOptionSnapshot
 from src.transport.market_data_store import MarketOHLCVStore
 
@@ -28,6 +28,16 @@ CREATE TABLE IF NOT EXISTS {constants.MARKET_OHLCV_TABLE} (
     volume DOUBLE,
     bar_size SYMBOL,
     source SYMBOL,
+    contract_key SYMBOL,
+    con_id LONG,
+    local_symbol SYMBOL,
+    contract_month SYMBOL,
+    expiry SYMBOL,
+    strike DOUBLE,
+    right SYMBOL,
+    trading_class SYMBOL,
+    what_to_show SYMBOL,
+    use_rth BOOLEAN,
     metadata STRING
 ) TIMESTAMP(timestamp) PARTITION BY DAY WAL
 """.strip()
@@ -35,9 +45,23 @@ CREATE TABLE IF NOT EXISTS {constants.MARKET_OHLCV_TABLE} (
 
 INSERT_MARKET_OHLCV_SQL = f"""
 INSERT INTO {constants.MARKET_OHLCV_TABLE}
-(symbol, asset_class, exchange, currency, timestamp, open, high, low, close, volume, bar_size, source, metadata)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+(symbol, asset_class, exchange, currency, timestamp, open, high, low, close, volume, bar_size, source,
+ contract_key, con_id, local_symbol, contract_month, expiry, strike, right, trading_class, what_to_show, use_rth, metadata)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """.strip()
+
+MARKET_OHLCV_IDENTITY_ALTER_SQL = (
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN contract_key SYMBOL",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN con_id LONG",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN local_symbol SYMBOL",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN contract_month SYMBOL",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN expiry SYMBOL",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN strike DOUBLE",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN right SYMBOL",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN trading_class SYMBOL",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN what_to_show SYMBOL",
+    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN use_rth BOOLEAN",
+)
 
 
 CREATE_EQUITY_SNAPSHOT_TABLE_SQL = f"""
@@ -229,6 +253,11 @@ class QuestDBClient(MarketOHLCVStore):
         async with self._lock:
             async with self._connection.cursor() as cur:
                 await cur.execute(CREATE_MARKET_OHLCV_TABLE_SQL)
+                for sql in MARKET_OHLCV_IDENTITY_ALTER_SQL:
+                    try:
+                        await cur.execute(sql)
+                    except Exception:
+                        logger.debug("QuestDB identity column migration skipped/already applied: %s", sql, exc_info=True)
             await self._connection.commit()
 
     async def create_equity_snapshot_table(self) -> None:
@@ -357,6 +386,7 @@ class QuestDBClient(MarketOHLCVStore):
         symbol: str,
         asset_class: AssetClass | str | None = None,
         bar_size: str | None = None,
+        contract_key: str | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int = 10_000,
@@ -365,6 +395,7 @@ class QuestDBClient(MarketOHLCVStore):
             symbol=symbol,
             asset_class=asset_class,
             bar_size=bar_size,
+            contract_key=contract_key,
             start=start,
             end=end,
             limit=limit,
@@ -376,9 +407,10 @@ class QuestDBClient(MarketOHLCVStore):
         *,
         asset_class: AssetClass | str | None = None,
         bar_size: str | None = None,
+        contract_key: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        sql, params = build_latest_query(asset_class=asset_class, bar_size=bar_size, limit=limit)
+        sql, params = build_latest_query(asset_class=asset_class, bar_size=bar_size, contract_key=contract_key, limit=limit)
         return await self._fetch_dicts(sql, params)
 
     async def _fetch_dicts(self, sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:
@@ -392,6 +424,7 @@ class QuestDBClient(MarketOHLCVStore):
 
 
 def bar_to_row(bar: OHLCVBar) -> tuple[Any, ...]:
+    identity = ohlcv_contract_identity(bar)
     return (
         bar.symbol,
         str(bar.asset_class),
@@ -405,6 +438,16 @@ def bar_to_row(bar: OHLCVBar) -> tuple[Any, ...]:
         bar.volume,
         bar.bar_size,
         bar.source,
+        identity["contract_key"],
+        identity["con_id"],
+        identity["local_symbol"],
+        identity["contract_month"],
+        identity["expiry"],
+        identity["strike"],
+        identity["right"],
+        identity["trading_class"],
+        identity["what_to_show"],
+        identity["use_rth"],
         bar.metadata_json(),
     )
 
@@ -414,6 +457,7 @@ def build_historical_query(
     symbol: str,
     asset_class: AssetClass | str | None = None,
     bar_size: str | None = None,
+    contract_key: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
     limit: int = 10_000,
@@ -426,6 +470,9 @@ def build_historical_query(
     if bar_size is not None:
         clauses.append("bar_size = %s")
         params.append(bar_size)
+    if contract_key is not None:
+        clauses.append("contract_key = %s")
+        params.append(contract_key)
     if start is not None:
         clauses.append("timestamp >= %s")
         params.append(_questdb_timestamp(start))
@@ -446,6 +493,7 @@ def build_latest_query(
     *,
     asset_class: AssetClass | str | None = None,
     bar_size: str | None = None,
+    contract_key: str | None = None,
     limit: int = 100,
 ) -> tuple[str, list[Any]]:
     clauses: list[str] = []
@@ -456,12 +504,15 @@ def build_latest_query(
     if bar_size is not None:
         clauses.append("bar_size = %s")
         params.append(bar_size)
+    if contract_key is not None:
+        clauses.append("contract_key = %s")
+        params.append(contract_key)
     where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
     params.append(limit)
     sql = (
         f"SELECT * FROM {constants.MARKET_OHLCV_TABLE} "
         f"{where}"
-        "LATEST ON timestamp PARTITION BY symbol "
+        "LATEST ON timestamp PARTITION BY symbol, contract_key "
         "LIMIT %s"
     )
     return sql, params

@@ -233,6 +233,7 @@ class FakeConnection:
 
     def __init__(self, ib: FakeIB | None = None) -> None:
         self._ib_instance = ib or FakeIB()
+        self.rate_limit_calls: list[tuple[str, int]] = []
 
     @property
     def ib(self) -> FakeIB:
@@ -243,7 +244,11 @@ class FakeConnection:
             raise RuntimeError("IBKR not available")
 
     async def with_retry(self, call: Any, *, operation: str) -> Any:
+        await self.wait_for_ibkr_request(operation=operation)
         return await call()
+
+    async def wait_for_ibkr_request(self, *, operation: str, weight: int = 1) -> None:
+        self.rate_limit_calls.append((operation, weight))
 
 
 # ---------------------------------------------------------------------------
@@ -660,6 +665,8 @@ class TestIBKROrderClientPlaceOrder:
         assert result.order_id >= 0
         assert result.status in (OrderStatus.SUBMITTED, OrderStatus.PENDING)
         assert len(fake_ib._placed_orders) == 1
+        assert ("qualify_order_contract:AAPL", 1) in conn.rate_limit_calls
+        assert ("place_order:AAPL", 1) in conn.rate_limit_calls
 
     def test_place_limit_order(self) -> None:
         fake_ib = FakeIB()

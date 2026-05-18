@@ -1,4 +1,7 @@
-"""Market data line budget tracker for IBKR concurrent subscription limits.
+"""Deprecated market data line budget tracker for IBKR concurrent subscription limits.
+
+New IBKR-facing code should use :mod:`src.transport.ibkr_rate_limit` so global
+socket pacing and market-data line leases share one app-wide source of truth.
 
 IBKR imposes a limit on concurrent market data lines (subscriptions).
 Default is ~100 lines, configurable via TWS/Gateway settings.

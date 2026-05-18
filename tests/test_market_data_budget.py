@@ -1,63 +1,64 @@
-"""Tests for MarketDataLineBudget."""
+"""Regression tests for the shared IBKR market-data line controller."""
 
-import asyncio
+from __future__ import annotations
+
 import pytest
 
-from src.feeds.market_data_budget import MarketDataBudgetExhausted, MarketDataLineBudget
+from src.transport.ibkr_rate_limit import IBKRRateLimitController
 
 
 @pytest.mark.asyncio
-async def test_budget_acquire_and_release() -> None:
-    budget = MarketDataLineBudget(max_lines=10)
-    assert budget.active == 0
-    assert budget.available == 10
+async def test_controller_acquires_and_releases_market_data_line() -> None:
+    controller = IBKRRateLimitController(redis_client=None, market_data_lines=10, market_data_line_reserve=0)
 
-    async with await budget.acquire(3):
-        assert budget.active == 3
-        assert budget.available == 7
+    lease = await controller.acquire_market_data_line(
+        contract_key="STK:SPY:SMART:USD",
+        operation="snapshot:SPY",
+    )
+    snapshot = await controller.snapshot()
 
-    assert budget.active == 0
-    assert budget.available == 10
+    assert snapshot["active_market_data_lines"] == 1
 
-
-@pytest.mark.asyncio
-async def test_budget_raises_when_exhausted() -> None:
-    budget = MarketDataLineBudget(max_lines=5)
-
-    async with await budget.acquire(5):
-        assert budget.available == 0
-        with pytest.raises(MarketDataBudgetExhausted):
-            await budget.acquire(1)
+    await lease.release()
+    snapshot = await controller.snapshot()
+    assert snapshot["active_market_data_lines"] == 0
 
 
 @pytest.mark.asyncio
-async def test_budget_status() -> None:
-    budget = MarketDataLineBudget(max_lines=100)
-    status = budget.status()
-    assert status["max_lines"] == 100
-    assert status["active"] == 0
-    assert status["available"] == 100
-    assert status["utilization_pct"] == 0.0
+async def test_controller_market_data_context_releases_after_exception() -> None:
+    controller = IBKRRateLimitController(redis_client=None, market_data_lines=3, market_data_line_reserve=0)
+
+    with pytest.raises(RuntimeError, match="subscription failed"):
+        async with controller.market_data_line(contract_key="OPT:EURUSD:202606:C", operation="fx_option_snapshot"):
+            snapshot = await controller.snapshot()
+            assert snapshot["active_market_data_lines"] == 1
+            raise RuntimeError("subscription failed")
+
+    snapshot = await controller.snapshot()
+    assert snapshot["active_market_data_lines"] == 0
 
 
 @pytest.mark.asyncio
-async def test_budget_utilization_pct() -> None:
-    budget = MarketDataLineBudget(max_lines=100)
-    async with await budget.acquire(50):
-        assert budget.utilization_pct == 50.0
+async def test_controller_market_data_release_is_idempotent() -> None:
+    controller = IBKRRateLimitController(redis_client=None, market_data_lines=2, market_data_line_reserve=0)
+    lease = await controller.acquire_market_data_line(
+        contract_key="FUT:CL:202606:NYMEX:USD",
+        operation="commodity_option_analytics",
+    )
+
+    await lease.release()
+    await lease.release()
+
+    snapshot = await controller.snapshot()
+    assert snapshot["active_market_data_lines"] == 0
 
 
 @pytest.mark.asyncio
-async def test_budget_rejects_non_positive_count() -> None:
-    budget = MarketDataLineBudget(max_lines=10)
-    with pytest.raises(ValueError):
-        await budget.acquire(0)
-    with pytest.raises(ValueError):
-        await budget.acquire(-1)
+async def test_controller_respects_market_data_reserve() -> None:
+    controller = IBKRRateLimitController(redis_client=None, market_data_lines=10, market_data_line_reserve=2)
 
+    snapshot = await controller.snapshot()
 
-def test_budget_rejects_non_positive_max_lines() -> None:
-    with pytest.raises(ValueError):
-        MarketDataLineBudget(max_lines=0)
-    with pytest.raises(ValueError):
-        MarketDataLineBudget(max_lines=-1)
+    assert snapshot["market_data_lines"] == 10
+    assert snapshot["market_data_line_reserve"] == 2
+    assert snapshot["max_active_market_data_lines"] == 8

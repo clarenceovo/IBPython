@@ -377,6 +377,7 @@ def test_webapp_registers_domain_routers() -> None:
     paths = {route.path for route in app.routes}
 
     assert "/api/v1/system/health" in paths
+    assert "/api/v1/system/rate-limits" in paths
     assert "/api/v1/market-data/ohlcv" in paths
     assert "/api/v1/market-data/ohlcv/equity" in paths
     assert "/api/v1/market-data/ohlcv/futures" in paths
@@ -841,6 +842,16 @@ def test_webapp_builds_runtime_state_inside_lifespan(monkeypatch) -> None:
     assert body["ibkr_connection"] == "disconnected"  # FakeFeed has no _ib
     assert body["redis_connection"] == "connected"  # FakeRedis.health_check returns True
     assert state.closed is True
+
+
+def test_system_rate_limits_endpoint_returns_not_configured_for_fake_state() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+    with TestClient(app) as client:
+        response = client.get("/api/v1/system/rate-limits")
+
+    assert response.status_code == 200
+    assert response.json()["enabled"] is False
 
 
 def test_generic_ohlcv_endpoint_supports_start_and_end_datetime_range() -> None:

@@ -7,13 +7,15 @@ import logging
 import math
 import time as monotonic_time
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.feeds.contracts import OptionChain, OptionChainRequest, build_ibkr_contract
 from src.feeds.ibkr_connection import (
     IBKRConnectionManager,
+    acquire_market_data_line,
     _contract_int,
     _root_cause_message,
+    wait_for_ibkr_request,
 )
 from src.feeds.models import AssetClass
 from src.feeds.options import (
@@ -33,7 +35,24 @@ from src.feeds.options import (
 )
 from src.feeds.snapshotter import FXOptionSnapshot, ticker_to_fx_option_snapshot
 
+if TYPE_CHECKING:
+    from src.feeds.ibkr_historical import IBKRHistoricalClient
+
 logger = logging.getLogger(__name__)
+
+
+def _rate_limit_contract_key(contract: Any, fallback: str) -> str:
+    con_id = getattr(contract, "conId", None)
+    if con_id:
+        return f"conId:{con_id}"
+    local_symbol = getattr(contract, "localSymbol", None)
+    if local_symbol:
+        return f"localSymbol:{local_symbol}"
+    symbol = getattr(contract, "symbol", fallback)
+    sec_type = getattr(contract, "secType", "OPT")
+    exchange = getattr(contract, "exchange", "")
+    currency = getattr(contract, "currency", "")
+    return f"{sec_type}:{symbol}:{exchange}:{currency}:{fallback}"
 
 
 def _finite_positive(value: Any) -> float | None:
@@ -168,13 +187,25 @@ class IBKROptionsFeedClient:
             use_snapshot,
             generic_tick_list or "none",
         )
-        ticker = self._ib.reqMktData(
-            contract,
-            genericTickList=generic_tick_list,
-            snapshot=use_snapshot,
-            regulatorySnapshot=request.regulatory_snapshot if use_snapshot else False,
-            mktDataOptions=[],
+        operation = f"option_analytics:{request.contract.underlying_symbol}:{request.contract.expiry}"
+        lease = await acquire_market_data_line(
+            self._connection,
+            contract_key=_rate_limit_contract_key(contract, operation),
+            operation=operation,
+            ttl_seconds=max(30.0, request.snapshot_wait_seconds + 10.0),
         )
+        await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
+        try:
+            ticker = self._ib.reqMktData(
+                contract,
+                genericTickList=generic_tick_list,
+                snapshot=use_snapshot,
+                regulatorySnapshot=request.regulatory_snapshot if use_snapshot else False,
+                mktDataOptions=[],
+            )
+        except Exception:
+            await lease.release()
+            raise
         try:
             await asyncio.sleep(request.snapshot_wait_seconds)
             result = normalize_option_analytics_from_ticker(ticker, request.contract)
@@ -182,9 +213,11 @@ class IBKROptionsFeedClient:
             return result
         finally:
             try:
+                await wait_for_ibkr_request(self._connection, operation=f"{operation}:cancelMktData")
                 self._ib.cancelMktData(contract)
             except Exception:
                 logger.debug("Failed to cancel market data subscription for %s", request.contract.underlying_symbol, exc_info=True)
+            await lease.release()
 
     async def capture_fx_option_snapshots(
         self,
@@ -209,21 +242,35 @@ class IBKROptionsFeedClient:
                 contract = qualified[0]
                 if getattr(contract, "conId", None):
                     contract_spec = contract_spec.model_copy(update={"con_id": int(getattr(contract, "conId"))})
-            ticker = self._ib.reqMktData(
-                contract,
-                genericTickList=generic_tick_list,
-                snapshot=False,
-                regulatorySnapshot=False,
-                mktDataOptions=[],
+            operation = f"fx_option_snapshot:{pair_symbol}:{contract_spec.expiry}"
+            lease = await acquire_market_data_line(
+                self._connection,
+                contract_key=_rate_limit_contract_key(contract, operation),
+                operation=operation,
+                ttl_seconds=max(30.0, snapshot_wait_seconds + 10.0),
             )
+            await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
+            try:
+                ticker = self._ib.reqMktData(
+                    contract,
+                    genericTickList=generic_tick_list,
+                    snapshot=False,
+                    regulatorySnapshot=False,
+                    mktDataOptions=[],
+                )
+            except Exception:
+                await lease.release()
+                raise
             try:
                 await asyncio.sleep(snapshot_wait_seconds)
                 snapshots.append(ticker_to_fx_option_snapshot(ticker, contract_spec, symbol=pair_symbol))
             finally:
                 try:
+                    await wait_for_ibkr_request(self._connection, operation=f"{operation}:cancelMktData")
                     self._ib.cancelMktData(contract)
                 except Exception:
                     logger.debug("Failed to cancel FX option market data for %s", pair_symbol, exc_info=True)
+                await lease.release()
         return snapshots
 
     async def load_option_skew_surface(self, request: OptionSkewSurfaceRequest) -> OptionSkewSurfaceResponse:
@@ -357,13 +404,25 @@ class IBKROptionsFeedClient:
     ) -> float:
         spec = request.to_contract_spec()
         contract = build_ibkr_contract(spec) if request.underlying_con_id else await self._historical.qualify_contract(spec)
-        ticker = self._ib.reqMktData(
-            contract,
-            genericTickList="",
-            snapshot=True,
-            regulatorySnapshot=False,
-            mktDataOptions=[],
+        operation = f"underlying_snapshot:{request.symbol}"
+        lease = await acquire_market_data_line(
+            self._connection,
+            contract_key=_rate_limit_contract_key(contract, operation),
+            operation=operation,
+            ttl_seconds=max(30.0, wait_seconds + 10.0),
         )
+        await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
+        try:
+            ticker = self._ib.reqMktData(
+                contract,
+                genericTickList="",
+                snapshot=True,
+                regulatorySnapshot=False,
+                mktDataOptions=[],
+            )
+        except Exception:
+            await lease.release()
+            raise
         try:
             await asyncio.sleep(wait_seconds)
             price = _ticker_snapshot_price(ticker)
@@ -375,6 +434,8 @@ class IBKROptionsFeedClient:
             return price
         finally:
             try:
+                await wait_for_ibkr_request(self._connection, operation=f"{operation}:cancelMktData")
                 self._ib.cancelMktData(contract)
             except Exception:
                 logger.debug("Failed to cancel underlying snapshot market data for %s", request.symbol, exc_info=True)
+            await lease.release()

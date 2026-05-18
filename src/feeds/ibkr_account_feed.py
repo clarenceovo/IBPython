@@ -19,7 +19,7 @@ from src.feeds.account import (
     normalize_position_pnl,
     normalize_positions,
 )
-from src.feeds.ibkr_connection import IBKRConnectionManager
+from src.feeds.ibkr_connection import IBKRConnectionManager, wait_for_ibkr_request
 
 logger = logging.getLogger(__name__)
 
@@ -70,12 +70,14 @@ class IBKRAccountFeedClient:
         """Start a live account PnL subscription and return the ib_insync PnL object."""
         await self._connection.ensure_connected()
         logger.info("subscribe_account_pnl: account=%s model_code=%s", account, model_code)
+        await wait_for_ibkr_request(self._connection, operation=f"account_pnl_subscribe:{account or 'all'}")
         return self._ib.reqPnL(account, model_code)
 
     async def subscribe_position_pnl(self, account: str, con_id: int, model_code: str = "") -> object:
         """Start a live position PnL subscription and return the ib_insync PnLSingle object."""
         await self._connection.ensure_connected()
         logger.info("subscribe_position_pnl: account=%s con_id=%d model_code=%s", account, con_id, model_code)
+        await wait_for_ibkr_request(self._connection, operation=f"position_pnl_subscribe:{con_id}")
         return self._ib.reqPnLSingle(account, model_code, con_id)
 
     async def load_account_pnl_snapshot(
@@ -95,6 +97,7 @@ class IBKRAccountFeedClient:
         finally:
             cancel = getattr(self._ib, "cancelPnL", None)
             if cancel is not None:
+                await wait_for_ibkr_request(self._connection, operation=f"account_pnl_cancel:{account or 'all'}")
                 cancel(account, model_code)
 
     async def load_position_pnl_snapshot(
@@ -115,6 +118,7 @@ class IBKRAccountFeedClient:
         finally:
             cancel = getattr(self._ib, "cancelPnLSingle", None)
             if cancel is not None:
+                await wait_for_ibkr_request(self._connection, operation=f"position_pnl_cancel:{con_id}")
                 cancel(account, model_code, con_id)
 
     def account_pnl_snapshot(self, pnl_subscription: object, account: str, model_code: str = "") -> AccountPnLDTO:

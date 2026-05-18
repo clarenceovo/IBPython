@@ -80,6 +80,25 @@ class Settings(BaseModel):
         alias=constants.IBKR_ORDER_AUTH_REDIS_KEY_ENV,
         min_length=1,
     )
+    ibkr_rate_limit_enabled: bool = Field(
+        default=constants.DEFAULT_IBKR_RATE_LIMIT_ENABLED,
+        alias=constants.IBKR_RATE_LIMIT_ENABLED_ENV,
+    )
+    ibkr_rate_limit_global_messages_per_second: int = Field(
+        default=constants.DEFAULT_IBKR_RATE_LIMIT_GLOBAL_MESSAGES_PER_SECOND,
+        alias=constants.IBKR_RATE_LIMIT_GLOBAL_MESSAGES_PER_SECOND_ENV,
+        gt=0,
+    )
+    ibkr_rate_limit_market_data_reserve: int | None = Field(
+        default=None,
+        alias=constants.IBKR_RATE_LIMIT_MARKET_DATA_RESERVE_ENV,
+        ge=0,
+    )
+    ibkr_rate_limit_market_data_lease_ttl_seconds: float = Field(
+        default=constants.DEFAULT_IBKR_RATE_LIMIT_MARKET_DATA_LEASE_TTL_SECONDS,
+        alias=constants.IBKR_RATE_LIMIT_MARKET_DATA_LEASE_TTL_SECONDS_ENV,
+        gt=0,
+    )
 
     # Telegram alerting
     telegram_bot_token: str = Field(

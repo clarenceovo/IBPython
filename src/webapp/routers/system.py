@@ -74,6 +74,17 @@ async def clear_market_data_cache(state: IBKRRestAppState = Depends(get_rest_sta
     return await state.market_data_cache.stats()
 
 
+@router.get("/rate-limits")
+async def ibkr_rate_limits(state: IBKRRestAppState = Depends(get_rest_state)) -> dict:
+    """Return the internal IBKR pacing controller snapshot."""
+    feed = getattr(state, "feed", None)
+    connection = getattr(feed, "_connection", None)
+    snapshot = getattr(connection, "rate_limit_snapshot", None)
+    if callable(snapshot):
+        return await snapshot()
+    return {"enabled": False, "reason": "not_configured"}
+
+
 @router.get("/scheduler/health")
 async def scheduler_health(state: IBKRRestAppState = Depends(get_rest_state)) -> dict:
     """Return scheduler health status for all tracked jobs.

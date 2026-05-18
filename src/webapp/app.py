@@ -53,7 +53,7 @@ def create_app(
             "- **Orders** — Place, cancel, modify orders; execution details; explicit what-if margin preview\n"
             "- **Streaming** — Real-time market data via SSE\n"
             "- **Scanner** — Contract search across IBKR's security database\n"
-            "- **System** — Health check, cache management\n\n"
+            "- **System** — Health check, rate-limit diagnostics, cache management\n\n"
             "## Authentication\n"
             "Order endpoints require `Authorization: Bearer <token>`. The expected bearer "
             "token payload is read from Redis using `IBKR_ORDER_AUTH_REDIS_KEY` "
@@ -66,8 +66,9 @@ def create_app(
             "- Trailing stop limit requests should include `trail_stop_price` and `limit_price_offset`.\n"
             "- In-place modify is limited to `price`, `quantity`, and `tif`.\n\n"
             "## Rate Limits\n"
-            "IBKR pacing limits apply. Historical data: 60 requests per 10 min window. "
-            "TTL cache reduces redundant calls."
+            "IBKR pacing limits apply. The app uses an internal controller for historical pacing, "
+            "global outgoing messages, and market-data-line leases. "
+            "`GET /api/v1/system/rate-limits` exposes the current limiter snapshot."
         ),
         lifespan=lifespan,
         servers=[
@@ -75,7 +76,7 @@ def create_app(
         ],
         openapi_tags=[
             {"name": "business", "description": "Research-friendly wrappers for curves, symbol news, market panels, returns, option skew, and commodity futures"},
-            {"name": "system", "description": "Health checks and cache management"},
+            {"name": "system", "description": "Health checks, rate-limit diagnostics, and cache management"},
             {"name": "market-data", "description": "OHLCV bars, FX/commodity options, option analytics/skew, snapshots, bond yields, and latest bar queries"},
             {"name": "reference-data", "description": "Option chains, fundamental data, Wall Street Horizon events, news, and contract search"},
             {"name": "account", "description": "Account summary, positions, portfolio items, and P&L snapshots"},

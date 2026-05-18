@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.feeds.models import OHLCVBar
+from src.feeds.models import FutureOHLCVBar, OHLCVBar
 from src.transport.market_data_store import MarketOHLCVStore
 from src.transport.mysql_client import (
     CREATE_MYSQL_MARKET_OHLCV_TABLE_SQL,
@@ -248,9 +248,35 @@ def test_mysql_query_builders_are_parameterized() -> None:
     assert "asset_class = %s" in sql
     assert params == ["SPY", "equity", "1 min", 50]
 
-    latest_sql, latest_params = build_mysql_latest_query(asset_class="future", bar_size="5 mins", limit=10)
+    latest_sql, latest_params = build_mysql_latest_query(asset_class="future", bar_size="5 mins", contract_key="FUTURE:CL:202606:NYMEX:USD", limit=10)
     assert "ROW_NUMBER() OVER" in latest_sql
-    assert latest_params == ["future", "5 mins", 10]
+    assert "PARTITION BY symbol, contract_key" in latest_sql
+    assert "contract_key = %s" in latest_sql
+    assert latest_params == ["future", "5 mins", "FUTURE:CL:202606:NYMEX:USD", 10]
+
+
+def test_mysql_bar_to_row_preserves_contract_identity() -> None:
+    bar = FutureOHLCVBar(
+        symbol="CL",
+        exchange="NYMEX",
+        currency="USD",
+        timestamp="2026-01-01T00:00:00Z",
+        open=70,
+        high=71,
+        low=69,
+        close=70.5,
+        volume=100,
+        bar_size="1 min",
+        contract_month="202606",
+        metadata={"what_to_show": "TRADES", "use_rth": False},
+    )
+
+    row = mysql_bar_to_row(bar)
+
+    assert row[12] == "FUTURE:CL:202606:NYMEX:USD"
+    assert row[15] == "202606"
+    assert row[20] == "TRADES"
+    assert row[21] is False
 
 
 def test_mysql_client_implements_market_ohlcv_store_interface(mock_pool) -> None:

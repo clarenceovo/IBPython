@@ -274,6 +274,13 @@ def normalize_ibkr_bars(bars: Sequence[Any], request: OHLCVRequest) -> list[OHLC
                     **request.metadata,
                     "what_to_show": request.what_to_show,
                     "use_rth": request.use_rth,
+                    "con_id": request.con_id,
+                    "local_symbol": request.local_symbol,
+                    "contract_month": request.last_trade_date_or_contract_month,
+                    "expiry": request.expiry,
+                    "strike": request.strike,
+                    "right": request.right,
+                    "trading_class": request.trading_class,
                 },
             )
         )

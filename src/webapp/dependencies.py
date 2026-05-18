@@ -12,7 +12,7 @@ from src.config.settings import Settings
 from src.feeds.fixed_income import FixedIncomeReferenceProvider
 from src.feeds.ibkr_feed import IBKRFeedClient
 from src.feeds.ohlcv_loader import OHLCVLoader
-from src.transport.ibkr_rate_limit import RedisIBKRHistoricalPacingGuard
+from src.transport.ibkr_rate_limit import IBKRRateLimitController
 from src.transport.market_data_store import MarketOHLCVStore
 from src.transport.mysql_client import MySQLClient
 from src.transport.questdb_client import QuestDBClient
@@ -97,12 +97,20 @@ def build_rest_app_state(settings: Settings) -> IBKRRestAppState:
         database=settings.questdb_database,
     )
     market_store = build_market_data_store(settings, questdb=questdb)
-    pacing_guard = RedisIBKRHistoricalPacingGuard(redis)
+    rate_limiter = IBKRRateLimitController(
+        redis,
+        enabled=settings.ibkr_rate_limit_enabled,
+        global_messages_per_second=settings.ibkr_rate_limit_global_messages_per_second,
+        market_data_lines=settings.ibkr_market_data_lines,
+        market_data_line_reserve=settings.ibkr_rate_limit_market_data_reserve,
+        market_data_lease_ttl_seconds=settings.ibkr_rate_limit_market_data_lease_ttl_seconds,
+    )
     feed = IBKRFeedClient(
         host=settings.ibkr_host,
         port=settings.ibkr_port,
         client_id=settings.ibkr_client_id,
-        pacing_guard=pacing_guard,
+        pacing_guard=rate_limiter.pacing_guard,
+        rate_limiter=rate_limiter,
     )
     loader = OHLCVLoader(feed, store=market_store, redis=redis)
     market_data_cache = AsyncTTLCache(

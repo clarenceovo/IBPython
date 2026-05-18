@@ -80,6 +80,10 @@ class BaseOHLCVBar(BaseModel):
         metadata = getattr(self, "metadata", {})
         return json.dumps(metadata, sort_keys=True, default=str)
 
+    @property
+    def contract_key(self) -> str:
+        return ohlcv_contract_key(self)
+
 
 class OHLCVBar(BaseOHLCVBar):
     """Vendor-neutral OHLCV bar with market metadata."""
@@ -334,3 +338,102 @@ class OHLCVRequest(BaseModel):
             if missing:
                 raise ValueError(f"option OHLCV requests require {', '.join(missing)}")
         return self
+
+
+def ohlcv_contract_identity(bar: Any) -> dict[str, Any]:
+    metadata = getattr(bar, "metadata", {}) or {}
+    con_id = getattr(bar, "con_id", None) or metadata.get("con_id")
+    local_symbol = getattr(bar, "local_symbol", None) or metadata.get("local_symbol")
+    contract_month = (
+        getattr(bar, "contract_month", None)
+        or metadata.get("contract_month")
+        or metadata.get("last_trade_date_or_contract_month")
+    )
+    expiry = getattr(bar, "expiry", None) or metadata.get("expiry")
+    strike = getattr(bar, "strike", None) or metadata.get("strike")
+    right = getattr(bar, "right", None) or metadata.get("right")
+    trading_class = getattr(bar, "trading_class", None) or metadata.get("trading_class")
+    return {
+        "contract_key": ohlcv_contract_key(bar),
+        "con_id": _positive_int_or_none(con_id),
+        "local_symbol": _optional_upper(local_symbol),
+        "contract_month": _optional_upper(contract_month),
+        "expiry": _optional_upper(expiry),
+        "strike": float(strike) if strike is not None else None,
+        "right": _normalize_option_right_or_none(right),
+        "trading_class": _optional_upper(trading_class),
+        "what_to_show": _optional_upper(metadata.get("what_to_show")),
+        "use_rth": metadata.get("use_rth") if isinstance(metadata.get("use_rth"), bool) else None,
+    }
+
+
+def ohlcv_contract_key(bar: Any) -> str:
+    metadata = getattr(bar, "metadata", {}) or {}
+    con_id = getattr(bar, "con_id", None) or metadata.get("con_id")
+    parsed_con_id = _positive_int_or_none(con_id)
+    if parsed_con_id is not None:
+        return f"conId:{parsed_con_id}"
+
+    local_symbol = getattr(bar, "local_symbol", None) or metadata.get("local_symbol")
+    normalized_local_symbol = _optional_upper(local_symbol)
+    if normalized_local_symbol:
+        return f"localSymbol:{normalized_local_symbol}"
+
+    asset_class = str(bar.asset_class)
+    if bar.asset_class is AssetClass.OPTION:
+        expiry = getattr(bar, "expiry", None) or metadata.get("expiry") or getattr(bar, "contract_month", None)
+        strike = getattr(bar, "strike", None) or metadata.get("strike")
+        right = _normalize_option_right_or_none(getattr(bar, "right", None) or metadata.get("right"))
+        underlying = getattr(bar, "underlying_symbol", None) or metadata.get("underlying_symbol") or bar.symbol
+        return _join_contract_key(
+            "option",
+            underlying,
+            expiry,
+            f"{float(strike):g}" if strike is not None else None,
+            right,
+            bar.exchange,
+            bar.currency,
+            getattr(bar, "trading_class", None) or metadata.get("trading_class"),
+        )
+
+    if bar.asset_class is AssetClass.FUTURE:
+        contract_month = (
+            getattr(bar, "contract_month", None)
+            or metadata.get("contract_month")
+            or metadata.get("last_trade_date_or_contract_month")
+        )
+        return _join_contract_key("future", bar.symbol, contract_month, bar.exchange, bar.currency)
+
+    return _join_contract_key(asset_class, bar.symbol, bar.exchange, bar.currency)
+
+
+def _join_contract_key(*parts: Any) -> str:
+    return ":".join(_contract_key_token(part) for part in parts if _contract_key_token(part))
+
+
+def _contract_key_token(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().upper().replace(" ", "_")
+
+
+def _optional_upper(value: Any) -> str | None:
+    token = _contract_key_token(value)
+    return token or None
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _normalize_option_right_or_none(value: Any) -> str | None:
+    normalized = _optional_upper(value)
+    if normalized in {"C", "CALL"}:
+        return "C"
+    if normalized in {"P", "PUT"}:
+        return "P"
+    return normalized

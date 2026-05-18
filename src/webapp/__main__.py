@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Run the webapp with ``python -m src.webapp``."""
+
+from __future__ import annotations
 
 import uvicorn
 

@@ -191,11 +191,10 @@ class AsyncTelegramLogHandler(logging.Handler):
         return self._session
 
     async def _async_send(self, html: str) -> None:
-        import time as _time
-
         session = await self._get_session()
         if session is None:
             return
+        import aiohttp
 
         url = _TELEGRAM_API.format(token=self._bot_token)
         payload: dict[str, Any] = {

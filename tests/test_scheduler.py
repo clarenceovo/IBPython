@@ -24,9 +24,10 @@ class FakeLoader:
 
 
 class FakeOHLCVLoader:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, quality_summary: dict | None = None) -> None:
         self.calls = []
         self.fail = fail
+        self.last_quality_report = _FakeQualityReport(quality_summary) if quality_summary is not None else None
 
     async def load(self, request, *, persist: bool, cache_latest: bool):
         self.calls.append((request, persist, cache_latest))
@@ -47,6 +48,14 @@ class FakeOHLCVLoader:
                 bar_size=request.bar_size,
             )
         ]
+
+
+class _FakeQualityReport:
+    def __init__(self, summary: dict) -> None:
+        self._summary = summary
+
+    def summary(self) -> dict:
+        return dict(self._summary)
 
 
 class FakeRedis:
@@ -295,6 +304,34 @@ def test_ohlcv_snapshot_handler_runs_inside_window_and_merges_symbols() -> None:
         assert cache_latest is True
         assert redis.last_ts[("ohlcv_test", "SPY", "1 min")] == datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc)
         assert redis.status[("ohlcv_test", "SPY", "1 min")]["status"] == "success"
+
+    asyncio.run(run())
+
+
+def test_ohlcv_snapshot_handler_records_data_quality_summary() -> None:
+    async def run() -> None:
+        quality = {
+            "symbol": "SPY",
+            "bar_size": "1 min",
+            "total_bars": 1,
+            "fatal_count": 0,
+            "error_count": 0,
+            "warning_count": 1,
+            "issue_codes": ["missing_interval_gap"],
+        }
+        loader = FakeOHLCVLoader(quality_summary=quality)
+        redis = FakeRedis()
+        handler = OHLCVSnapshotJobHandler(
+            loader,
+            redis=redis,
+            clock=lambda: datetime(2026, 1, 5, 10, 0, tzinfo=timezone.utc),
+        )
+
+        result = await handler(_ohlcv_job())
+
+        assert result.metrics["data_quality_reports"] == [quality]
+        assert result.metrics["data_quality_issue_symbols"] == 1
+        assert redis.status[("ohlcv_test", "SPY", "1 min")]["data_quality"] == quality
 
     asyncio.run(run())
 

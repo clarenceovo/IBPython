@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Protocol
 
+from src.feeds.data_quality import DataQualityReport, validate_ohlcv_bars
 from src.feeds.models import OHLCVBar, OHLCVRequest
 from src.transport.market_data_store import MarketOHLCVStore
 
@@ -29,6 +30,7 @@ class OHLCVLoader:
         self.store = store or questdb
         self.questdb = self.store
         self.redis = redis
+        self.last_quality_report: DataQualityReport | None = None
 
     async def load(
         self,
@@ -39,6 +41,11 @@ class OHLCVLoader:
     ) -> list[OHLCVBar]:
         bars = await self.feed.load_historical_ohlcv(request)
         bars.sort(key=lambda bar: bar.timestamp)
+        self.last_quality_report = validate_ohlcv_bars(bars, request=request)
+        if self.last_quality_report.issues:
+            logger.warning("OHLCV data quality report: %s", self.last_quality_report.summary())
+        if self.last_quality_report.has_fatal:
+            raise RuntimeError(f"fatal OHLCV data quality issue(s): {self.last_quality_report.summary()}")
 
         if persist and bars and self.store is not None:
             try:

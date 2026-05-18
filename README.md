@@ -104,11 +104,17 @@ Core variables:
 | `IBKR_REST_MARKET_DATA_TTL_SECONDS` | `5` | REST market-data TTL cache default |
 | `IBKR_REST_MARKET_DATA_CACHE_MAXSIZE` | `512` | REST TTL cache max entries |
 | `IBKR_ORDER_AUTH_REDIS_KEY` | `OrderAuth::bearer_token` | Redis key containing the bearer token payload required by `/api/v1/orders/*` |
+| `IBKR_RATE_LIMIT_ENABLED` | `true` | Enable the internal app-wide IBKR pacing controller |
+| `IBKR_RATE_LIMIT_GLOBAL_MESSAGES_PER_SECOND` | `50` | Outgoing IBKR socket messages per second; IBKR's documented default cap is 50 |
+| `IBKR_RATE_LIMIT_MARKET_DATA_RESERVE` | unset | Market-data-line reserve; unset means `max(5, ceil(IBKR_MARKET_DATA_LINES * 0.10))` |
+| `IBKR_RATE_LIMIT_MARKET_DATA_LEASE_TTL_SECONDS` | `3600` | TTL safety net for active market-data-line leases |
 
 ## Local Commands
 
 ```bash
 make install-dev
+make lint
+make typecheck
 make services-up
 make test
 make notebook
@@ -203,7 +209,7 @@ Main route groups:
 
 - `/api/v1/business/*`: research-friendly wrappers for curves, news, market panels, returns, option skew, and commodity futures
 - `/api/v1/business/fixed-income/*`: bond futures quotes, CTD analytics, futures-implied curves, and cash/futures curve comparison
-- `/api/v1/system/*`: health and TTL cache controls
+- `/api/v1/system/*`: health, rate-limit diagnostics, and TTL cache controls
 - `/api/v1/market-data/*`: OHLCV, latest Redis bars, option analytics, commodity futures/options, bond yield history
 - `/api/v1/reference-data/*`: option chains, fundamentals, WSH events, news
 - `/api/v1/account/*`: account summary, live positions, portfolio, PnL snapshots
@@ -227,6 +233,7 @@ POST /api/v1/business/fixed-income/getFuturesImpliedCurve
 POST /api/v1/business/fixed-income/getCashBondCurve
 POST /api/v1/business/fixed-income/getCurveComparison
 GET  /api/v1/system/health
+GET  /api/v1/system/rate-limits
 GET  /api/v1/system/cache/market-data
 POST /api/v1/market-data/ohlcv
 POST /api/v1/market-data/ohlcv/equity
@@ -454,7 +461,11 @@ MARKET_DATA_DB_BACKEND=questdb  # default main time-series store
 MARKET_DATA_DB_BACKEND=mysql    # alternate relational store
 ```
 
-QuestDB is preferred for high-volume time-series capture. MySQL uses the same `market_ohlcv` logical table with an idempotent primary key for operational/reporting deployments that need bars in a relational database.
+Every normalized bar now carries a deterministic `contract_key`. The strongest available identifier wins: IBKR `con_id`, then `local_symbol`, option identity, futures contract month, and finally symbol/exchange/currency. QuestDB and MySQL store this key plus nullable contract identity columns (`con_id`, `local_symbol`, `contract_month`, `expiry`, `strike`, `right`, `trading_class`, `what_to_show`, and `use_rth`) so same-root futures/options at the same timestamp do not collide.
+
+`OHLCVLoader` runs a data-quality report after sorting and before persistence/cache. It checks UTC timestamps, monotonic ordering, duplicates by `(contract_key, timestamp)`, interval gaps, non-finite values, invalid OHLC ranges, and stale latest bars when configured. Fatal invariants block persistence; warnings are logged and included in scheduler metrics.
+
+QuestDB is preferred for high-volume time-series capture. MySQL uses the same `market_ohlcv` logical table with an idempotent primary key on contract identity for operational/reporting deployments that need bars in a relational database.
 
 Example TSLA option-chain request:
 
@@ -587,6 +598,23 @@ Query parameters:
 
 The REST market-data cache is process-local and short-lived. It includes per-key single-flight protection so concurrent duplicate requests share one IBKR call. Redis remains the distributed cache for latest bars and scheduler/rate-limit state.
 
+## IBKR Rate Limits
+
+The app uses a central `IBKRRateLimitController` before IBKR socket calls. It preserves historical pacing and adds app-wide controls for global outgoing messages, active market-data subscriptions, snapshots, option analytics, FX option live capture, tick streams, PnL subscriptions, and order actions.
+
+Controller defaults are conservative:
+
+- Global IBKR messages: 50 per second.
+- Historical data: 60 weighted requests per 600 seconds, 15-second identical-request cooldown, at most five same-contract historical requests per 2 seconds, and `BID_ASK` counts twice.
+- Market-data lines: `IBKR_MARKET_DATA_LINES` minus a reserve of `max(5, ceil(lines * 0.10))` unless `IBKR_RATE_LIMIT_MARKET_DATA_RESERVE` is set.
+- Redis coordinates limits across API and scheduler processes; if Redis is unavailable, the controller falls back to local in-process limiting.
+
+Inspect current limiter state:
+
+```bash
+curl http://localhost:8000/api/v1/system/rate-limits
+```
+
 ## Scheduler Jobs
 
 Redis scheduler jobs are JSON payloads stored under:
@@ -661,6 +689,8 @@ IBKR historical pacing bookmarks:
 IBKRRateLimit:historical:window
 IBKRRateLimit:historical:identical:<request_hash>
 IBKRRateLimit:historical:same_contract:<contract_hash>
+IBKRRateLimit:global:window
+IBKRRateLimit:market_data:leases
 ```
 
 Scheduler leases and run history:

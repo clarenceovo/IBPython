@@ -17,7 +17,7 @@ import logging
 import uuid as _uuid
 from typing import Any
 
-from src.feeds.ibkr_connection import IBKRConnectionManager
+from src.feeds.ibkr_connection import IBKRConnectionManager, wait_for_ibkr_request
 from src.feeds.contracts import ContractSpec, build_ibkr_contract
 from src.feeds.models import AssetClass
 from src.feeds.orders import (
@@ -209,6 +209,7 @@ class IBKROrderClient:
         )
         if qualified:
             contract = qualified[0]
+        await wait_for_ibkr_request(self._connection, operation=f"preflight_order:place:{request.symbol}")
         trade = self._ib.placeOrder(contract, order)
         try:
             await asyncio.sleep(0.5)
@@ -225,6 +226,7 @@ class IBKROrderClient:
             return result
         finally:
             try:
+                await wait_for_ibkr_request(self._connection, operation=f"preflight_order:cancel:{request.symbol}")
                 self._ib.cancelOrder(order)
             except Exception:
                 logger.debug("_preflight_order: uuid=%s what-if cancel skipped", envelope.order_uuid, exc_info=True)
@@ -321,6 +323,7 @@ class IBKROrderClient:
             if qualified:
                 contract = qualified[0]
 
+            await wait_for_ibkr_request(self._connection, operation=f"place_order:{request.symbol}")
             trade = self._ib.placeOrder(contract, order)
             status = await self._wait_for_order_status(trade, timeout_seconds=5.0)
         except Exception as exc:
@@ -430,6 +433,7 @@ class IBKROrderClient:
             await self._cache_envelope(envelope, ttl_seconds=0)
             return result
 
+        await wait_for_ibkr_request(self._connection, operation="cancel_order")
         self._ib.cancelOrder(target_order)
         logger.info("cancel_order: cancel requested for order_id=%d", order_id)
 
@@ -493,6 +497,7 @@ class IBKROrderClient:
             order.tif = modifications.tif.value
         order.orderRef = modify_uuid
 
+        await wait_for_ibkr_request(self._connection, operation="modify_order")
         modified_trade = self._ib.placeOrder(contract, order)
         status = await self._wait_for_order_status(modified_trade, timeout_seconds=5.0)
 
@@ -613,6 +618,7 @@ class IBKROrderClient:
             contract = qualified[0]
 
         order.orderRef = preview_uuid
+        await wait_for_ibkr_request(self._connection, operation=f"preview_order:place:{request.symbol}")
         trade = self._ib.placeOrder(contract, order)
 
         try:
@@ -621,6 +627,7 @@ class IBKROrderClient:
             result = normalize_what_if_response(trade)
         finally:
             try:
+                await wait_for_ibkr_request(self._connection, operation=f"preview_order:cancel:{request.symbol}")
                 self._ib.cancelOrder(order)
             except Exception:
                 logger.debug("preview_order: uuid=%s what-if cancel skipped", preview_uuid, exc_info=True)

@@ -7,7 +7,7 @@ import logging
 import time as monotonic_time
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.feeds.bonds import (
     BondYieldBar,
@@ -23,6 +23,7 @@ from src.feeds.fundamental_data import (
     WSHMetadataReport,
 )
 from src.feeds.ibkr_connection import IBKRConnectionManager
+from src.feeds.ibkr_connection import acquire_market_data_line, wait_for_ibkr_request
 from src.feeds.ibkr_historical import _format_ibkr_end_datetime
 from src.feeds.news import (
     HistoricalNewsHeadline,
@@ -41,7 +42,24 @@ from src.feeds.scanner import (
     ContractSearchResult,
 )
 
+if TYPE_CHECKING:
+    from src.feeds.ibkr_historical import IBKRHistoricalClient
+
 logger = logging.getLogger(__name__)
+
+
+def _rate_limit_contract_key(contract: Any, fallback: str) -> str:
+    con_id = getattr(contract, "conId", None)
+    if con_id:
+        return f"conId:{con_id}"
+    local_symbol = getattr(contract, "localSymbol", None)
+    if local_symbol:
+        return f"localSymbol:{local_symbol}"
+    symbol = getattr(contract, "symbol", fallback)
+    sec_type = getattr(contract, "secType", "")
+    exchange = getattr(contract, "exchange", "")
+    currency = getattr(contract, "currency", "")
+    return f"{sec_type}:{symbol}:{exchange}:{currency}:{fallback}"
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -67,6 +85,7 @@ class IBKRReferenceFeedClient:
         self._connection = connection
         self._historical = historical_client
         self._wsh_metadata_loaded = False
+        self._market_data_leases_by_ticker_id: dict[int, Any] = {}
 
     @property
     def _ib(self) -> Any:
@@ -307,7 +326,19 @@ class IBKRReferenceFeedClient:
         """Subscribe to real-time market data for a contract."""
         await self._connection.ensure_connected()
         contract = build_ibkr_contract(spec)
-        ticker = self._ib.reqMktData(contract, "", False, False)
+        operation = f"subscribe_ticker:{spec.symbol}"
+        lease = await acquire_market_data_line(
+            self._connection,
+            contract_key=_rate_limit_contract_key(contract, operation),
+            operation=operation,
+        )
+        await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
+        try:
+            ticker = self._ib.reqMktData(contract, "", False, False)
+        except Exception:
+            await lease.release()
+            raise
+        self._market_data_leases_by_ticker_id[id(ticker)] = lease
         await asyncio.sleep(0.5)
         return ticker
 
@@ -316,9 +347,14 @@ class IBKRReferenceFeedClient:
         if self._ib is None:
             return
         try:
+            await wait_for_ibkr_request(self._connection, operation="unsubscribe_ticker:cancelMktData")
             self._ib.cancelMktData(ticker.contract)
         except Exception:
             logger.warning("error unsubscribing ticker", exc_info=True)
+        finally:
+            lease = self._market_data_leases_by_ticker_id.pop(id(ticker), None)
+            if lease is not None:
+                await lease.release()
 
     async def capture_equity_snapshots(
         self,
@@ -341,7 +377,20 @@ class IBKRReferenceFeedClient:
                 if con_id and con_id > 0:
                     kwargs["conId"] = con_id
                 contract = Contract(**kwargs)
-                ticker = self._ib.reqMktData(contract, "", False, False)
+                operation = f"equity_snapshot:{symbol}"
+                lease = await acquire_market_data_line(
+                    self._connection,
+                    contract_key=_rate_limit_contract_key(contract, operation),
+                    operation=operation,
+                    ttl_seconds=30.0,
+                )
+                await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
+                try:
+                    ticker = self._ib.reqMktData(contract, "", False, False)
+                except Exception:
+                    await lease.release()
+                    raise
+                self._market_data_leases_by_ticker_id[id(ticker)] = lease
                 tickers.append(ticker)
             except Exception:
                 logger.warning("failed to subscribe ticker for %s", symbol, exc_info=True)
@@ -356,6 +405,11 @@ class IBKRReferenceFeedClient:
             try:
                 contract = getattr(ticker, "contract", None)
                 if contract is not None:
+                    await wait_for_ibkr_request(self._connection, operation="equity_snapshot:cancelMktData")
                     self._ib.cancelMktData(contract)
             except Exception:
                 logger.debug("error cancelling ticker", exc_info=True)
+            finally:
+                lease = self._market_data_leases_by_ticker_id.pop(id(ticker), None)
+                if lease is not None:
+                    await lease.release()

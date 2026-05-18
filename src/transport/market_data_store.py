@@ -23,6 +23,7 @@ class MarketOHLCVStore(Protocol):
         symbol: str,
         asset_class: AssetClass | str | None = None,
         bar_size: str | None = None,
+        contract_key: str | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int = 10_000,
@@ -33,5 +34,6 @@ class MarketOHLCVStore(Protocol):
         *,
         asset_class: AssetClass | str | None = None,
         bar_size: str | None = None,
+        contract_key: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]: ...

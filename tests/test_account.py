@@ -17,6 +17,7 @@ from src.feeds.account import (
 )
 from src.feeds.ibkr_feed import IBKRFeedClient
 from src.feeds import ibkr_feed
+from src.feeds.ibkr_account_feed import IBKRAccountFeedClient
 
 
 def _contract() -> SimpleNamespace:
@@ -114,6 +115,43 @@ def test_ibkr_feed_short_lived_pnl_snapshots_cancel_subscriptions() -> None:
     assert position.position == pytest.approx(7)
     assert fake_ib.cancelled_account == ("DU123", "")
     assert fake_ib.cancelled_position == ("DU123", "", 123)
+
+
+def test_account_pnl_snapshot_uses_rate_limiter_for_subscribe_and_cancel() -> None:
+    class FakeIB:
+        def __init__(self) -> None:
+            self.cancelled: tuple[str, str] | None = None
+
+        def reqPnL(self, account: str, model_code: str) -> SimpleNamespace:
+            return SimpleNamespace(dailyPnL=1.0, unrealizedPnL=2.0, realizedPnL=3.0)
+
+        def cancelPnL(self, account: str, model_code: str) -> None:
+            self.cancelled = (account, model_code)
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.ib = FakeIB()
+            self.rate_limit_calls: list[tuple[str, int]] = []
+
+        async def ensure_connected(self) -> None:
+            return None
+
+        async def wait_for_ibkr_request(self, *, operation: str, weight: int = 1) -> None:
+            self.rate_limit_calls.append((operation, weight))
+
+    async def run() -> FakeConnection:
+        connection = FakeConnection()
+        client = IBKRAccountFeedClient(connection)  # type: ignore[arg-type]
+        await client.load_account_pnl_snapshot("DU123", wait_seconds=0)
+        return connection
+
+    connection = asyncio.run(run())
+
+    assert connection.rate_limit_calls == [
+        ("account_pnl_subscribe:DU123", 1),
+        ("account_pnl_cancel:DU123", 1),
+    ]
+    assert connection.ib.cancelled == ("DU123", "")
 
 
 def test_ibkr_ensure_connected_preserves_root_cause_in_error_message() -> None:
