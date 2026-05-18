@@ -45,9 +45,9 @@ def create_app(
             "# IBKR REST API\n\n"
             "Async FastAPI bridge for Interactive Brokers TWS/Gateway.\n\n"
             "## Modules\n"
-            "- **Business** — Research-friendly wrappers for curves, news, market panels, returns, and option skew\n"
+            "- **Business** — Research-friendly wrappers for curves, news, market panels, returns, option skew, and commodity futures\n"
             "- **Fixed Income** — IBKR bond futures prices, CTD analytics, and futures-implied curves\n"
-            "- **Market Data** — OHLCV bars, option analytics/skew, bond yields, latest bars, equity snapshots\n"
+            "- **Market Data** — OHLCV bars, FX/commodity options, option analytics/skew, bond yields, latest bars, snapshots\n"
             "- **Reference Data** — Option chains, fundamentals, WSH events, news, contract search\n"
             "- **Account** — Positions, portfolio, P&L snapshots\n"
             "- **Orders** — Place, cancel, modify orders; execution details; explicit what-if margin preview\n"
@@ -74,9 +74,9 @@ def create_app(
             {"url": "http://localhost:8000", "description": "Local development"},
         ],
         openapi_tags=[
-            {"name": "business", "description": "Research-friendly wrappers for curves, symbol news, market panels, returns, and option skew"},
+            {"name": "business", "description": "Research-friendly wrappers for curves, symbol news, market panels, returns, option skew, and commodity futures"},
             {"name": "system", "description": "Health checks and cache management"},
-            {"name": "market-data", "description": "OHLCV bars, option analytics/skew, bond yields, and latest bar queries"},
+            {"name": "market-data", "description": "OHLCV bars, FX/commodity options, option analytics/skew, snapshots, bond yields, and latest bar queries"},
             {"name": "reference-data", "description": "Option chains, fundamental data, Wall Street Horizon events, news, and contract search"},
             {"name": "account", "description": "Account summary, positions, portfolio items, and P&L snapshots"},
             {"name": "orders", "description": "Order management — live place/cancel/modify, execution details, and explicit what-if preview"},

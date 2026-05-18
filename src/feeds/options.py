@@ -36,6 +36,11 @@ class OptionContractSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
+    sec_type: str = Field(
+        default="OPT",
+        min_length=1,
+        description="IBKR option secType. Use OPT for stock/index options and FOP for futures options.",
+    )
     underlying_symbol: str = Field(min_length=1)
     expiry: str = Field(min_length=6)
     strike: float = Field(gt=0)
@@ -47,13 +52,20 @@ class OptionContractSpec(BaseModel):
     local_symbol: str | None = None
     con_id: int | None = Field(default=None, gt=0)
 
-    @field_validator("underlying_symbol", "exchange", "currency", "trading_class", "local_symbol", mode="before")
+    @field_validator("sec_type", "underlying_symbol", "exchange", "currency", "trading_class", "local_symbol", mode="before")
     @classmethod
     def normalize_text(cls, value: Any) -> str | None:
         if value is None:
             return None
         normalized = str(value).strip().upper()
         return normalized or None
+
+    @field_validator("sec_type")
+    @classmethod
+    def validate_sec_type(cls, value: str) -> str:
+        if value not in {"OPT", "FOP"}:
+            raise ValueError("sec_type must be OPT or FOP")
+        return value
 
 
 class OptionGreekSet(BaseModel):
@@ -292,18 +304,30 @@ class OptionSkewSurfaceResponse(BaseModel):
 
 def build_ibkr_option_contract(spec: OptionContractSpec) -> Any:
     try:
-        from ib_insync import Option
+        from ib_insync import Contract, Option
     except ImportError as exc:
         raise RuntimeError("ib_insync is required for option contract creation") from exc
-    contract = Option(
-        symbol=spec.underlying_symbol,
-        lastTradeDateOrContractMonth=spec.expiry,
-        strike=spec.strike,
-        right=spec.right.value,
-        exchange=spec.exchange,
-        currency=spec.currency,
-        multiplier=spec.multiplier,
-    )
+    if spec.sec_type == "FOP":
+        contract = Contract(
+            secType="FOP",
+            symbol=spec.underlying_symbol,
+            lastTradeDateOrContractMonth=spec.expiry,
+            strike=spec.strike,
+            right=spec.right.value,
+            exchange=spec.exchange,
+            currency=spec.currency,
+            multiplier=spec.multiplier,
+        )
+    else:
+        contract = Option(
+            symbol=spec.underlying_symbol,
+            lastTradeDateOrContractMonth=spec.expiry,
+            strike=spec.strike,
+            right=spec.right.value,
+            exchange=spec.exchange,
+            currency=spec.currency,
+            multiplier=spec.multiplier,
+        )
     if spec.trading_class:
         contract.tradingClass = spec.trading_class
     if spec.local_symbol:

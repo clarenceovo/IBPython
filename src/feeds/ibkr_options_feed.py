@@ -17,8 +17,10 @@ from src.feeds.ibkr_connection import (
 )
 from src.feeds.models import AssetClass
 from src.feeds.options import (
+    DEFAULT_OPTION_ANALYTICS_GENERIC_TICKS,
     OptionAnalyticsRequest,
     OptionAnalyticsSnapshot,
+    OptionContractSpec,
     OptionSkewSurfaceRequest,
     OptionSkewSurfaceResponse,
     build_ibkr_option_contract,
@@ -29,6 +31,7 @@ from src.feeds.options import (
     select_skew_expirations,
     select_skew_strikes,
 )
+from src.feeds.snapshotter import FXOptionSnapshot, ticker_to_fx_option_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +185,46 @@ class IBKROptionsFeedClient:
                 self._ib.cancelMktData(contract)
             except Exception:
                 logger.debug("Failed to cancel market data subscription for %s", request.contract.underlying_symbol, exc_info=True)
+
+    async def capture_fx_option_snapshots(
+        self,
+        contracts: Sequence[OptionContractSpec],
+        *,
+        symbols: Sequence[str],
+        generic_ticks: tuple[str, ...] = DEFAULT_OPTION_ANALYTICS_GENERIC_TICKS,
+        snapshot_wait_seconds: float = 2.0,
+    ) -> list[FXOptionSnapshot]:
+        """Capture short-lived FX option market-data snapshots and cancel subscriptions."""
+        await self._connection.ensure_connected()
+        snapshots: list[FXOptionSnapshot] = []
+        generic_tick_list = ",".join(generic_ticks)
+        for contract_spec, pair_symbol in zip(contracts, symbols, strict=True):
+            logger.info("capture_fx_option_snapshot: symbol=%s expiry=%s", pair_symbol, contract_spec.expiry)
+            contract = build_ibkr_option_contract(contract_spec)
+            qualified = await self._connection.with_retry(
+                lambda: self._ib.qualifyContractsAsync(contract),
+                operation=f"qualify_fx_option:{pair_symbol}:{contract_spec.expiry}",
+            )
+            if qualified:
+                contract = qualified[0]
+                if getattr(contract, "conId", None):
+                    contract_spec = contract_spec.model_copy(update={"con_id": int(getattr(contract, "conId"))})
+            ticker = self._ib.reqMktData(
+                contract,
+                genericTickList=generic_tick_list,
+                snapshot=False,
+                regulatorySnapshot=False,
+                mktDataOptions=[],
+            )
+            try:
+                await asyncio.sleep(snapshot_wait_seconds)
+                snapshots.append(ticker_to_fx_option_snapshot(ticker, contract_spec, symbol=pair_symbol))
+            finally:
+                try:
+                    self._ib.cancelMktData(contract)
+                except Exception:
+                    logger.debug("Failed to cancel FX option market data for %s", pair_symbol, exc_info=True)
+        return snapshots
 
     async def load_option_skew_surface(self, request: OptionSkewSurfaceRequest) -> OptionSkewSurfaceResponse:
         """Load bounded per-maturity option skew and open-interest summaries."""

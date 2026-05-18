@@ -223,6 +223,15 @@ class OHLCVRequest(BaseModel):
     last_trade_date_or_contract_month: str | None = None
     multiplier: str | None = None
     local_symbol: str | None = None
+    option_sec_type: str | None = Field(
+        default=None,
+        description="IBKR option secType. Use OPT for stock/index options and FOP for futures options.",
+    )
+    underlying_symbol: str | None = None
+    expiry: str | None = None
+    strike: float | None = Field(default=None, gt=0)
+    right: str | None = Field(default=None, description="Option right: C/CALL or P/PUT.")
+    trading_class: str | None = None
     sec_id_type: str | None = None
     sec_id: str | None = None
     con_id: int | None = Field(default=None, gt=0)
@@ -263,6 +272,11 @@ class OHLCVRequest(BaseModel):
         "last_trade_date_or_contract_month",
         "multiplier",
         "local_symbol",
+        "option_sec_type",
+        "underlying_symbol",
+        "expiry",
+        "right",
+        "trading_class",
         "sec_id_type",
         "sec_id",
         mode="before",
@@ -274,6 +288,26 @@ class OHLCVRequest(BaseModel):
         normalized = str(value).strip()
         return normalized.upper() or None
 
+    @field_validator("right")
+    @classmethod
+    def normalize_option_right(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value in {"C", "CALL"}:
+            return "C"
+        if value in {"P", "PUT"}:
+            return "P"
+        raise ValueError("right must be C/CALL or P/PUT")
+
+    @field_validator("option_sec_type")
+    @classmethod
+    def validate_option_sec_type(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value not in {"OPT", "FOP"}:
+            raise ValueError("option_sec_type must be OPT or FOP")
+        return value
+
     @model_validator(mode="after")
     def validate_contract_identifiers(self) -> Self:
         if self.start_datetime is not None and self.end_datetime is not None and self.start_datetime >= self.end_datetime:
@@ -284,4 +318,19 @@ class OHLCVRequest(BaseModel):
             raise ValueError("future OHLCV requests require last_trade_date_or_contract_month, local_symbol, or con_id")
         if self.asset_class is AssetClass.BOND and not (self.symbol or self.sec_id or self.con_id):
             raise ValueError("bond OHLCV requests require symbol, sec_id, or con_id")
+        if self.asset_class is AssetClass.OPTION:
+            if self.option_sec_type is None:
+                object.__setattr__(self, "option_sec_type", "OPT")
+            missing = [
+                name
+                for name, value in (
+                    ("underlying_symbol", self.underlying_symbol),
+                    ("expiry", self.expiry or self.last_trade_date_or_contract_month),
+                    ("strike", self.strike),
+                    ("right", self.right),
+                )
+                if value is None
+            ]
+            if missing:
+                raise ValueError(f"option OHLCV requests require {', '.join(missing)}")
         return self

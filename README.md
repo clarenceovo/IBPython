@@ -201,10 +201,10 @@ QuestDB remains the default market-data store. To route OHLCV snapshot persisten
 
 Main route groups:
 
-- `/api/v1/business/*`: research-friendly wrappers for curves, news, market panels, returns, and option skew
+- `/api/v1/business/*`: research-friendly wrappers for curves, news, market panels, returns, option skew, and commodity futures
 - `/api/v1/business/fixed-income/*`: bond futures quotes, CTD analytics, futures-implied curves, and cash/futures curve comparison
 - `/api/v1/system/*`: health and TTL cache controls
-- `/api/v1/market-data/*`: OHLCV, latest Redis bars, option analytics, bond yield history
+- `/api/v1/market-data/*`: OHLCV, latest Redis bars, option analytics, commodity futures/options, bond yield history
 - `/api/v1/reference-data/*`: option chains, fundamentals, WSH events, news
 - `/api/v1/account/*`: account summary, live positions, portfolio, PnL snapshots
 - `/api/v1/orders/*`: protected order lifecycle, execution lookup, what-if preview, and order-envelope cache
@@ -220,6 +220,7 @@ POST /api/v1/business/getMarketPanel
 POST /api/v1/business/getUniverseBars
 POST /api/v1/business/getReturns
 POST /api/v1/business/getOptionSkew
+POST /api/v1/business/commodities/getFutures
 POST /api/v1/business/fixed-income/getBondFutureQuotes
 POST /api/v1/business/fixed-income/getCTD
 POST /api/v1/business/fixed-income/getFuturesImpliedCurve
@@ -230,12 +231,22 @@ GET  /api/v1/system/cache/market-data
 POST /api/v1/market-data/ohlcv
 POST /api/v1/market-data/ohlcv/equity
 POST /api/v1/market-data/ohlcv/futures
+POST /api/v1/market-data/ohlcv/commodities
+POST /api/v1/market-data/ohlcv/commodity-options
 POST /api/v1/market-data/ohlcv/fx
+POST /api/v1/market-data/ohlcv/fx-options
 POST /api/v1/market-data/ohlcv/bond
 GET  /api/v1/market-data/latest-bar
 POST /api/v1/market-data/options/analytics
 POST /api/v1/market-data/options/skew
+POST /api/v1/market-data/commodities/options/analytics
+POST /api/v1/market-data/commodities/metadata
+POST /api/v1/market-data/commodities/historical-ticks
+POST /api/v1/market-data/commodities/news
 POST /api/v1/market-data/bonds/yields/history
+POST /api/v1/snapshot/fx-options/capture
+GET  /api/v1/snapshot/fx-options/latest
+POST /api/v1/snapshot/fx-options/query
 POST /api/v1/reference-data/options/chains
 POST /api/v1/reference-data/fundamentals
 GET  /api/v1/reference-data/news/providers
@@ -388,9 +399,21 @@ curl -X POST http://localhost:8000/api/v1/market-data/ohlcv/fx \
   -H "Content-Type: application/json" \
   -d '{"symbol":"EURUSD"}'
 
+curl -X POST http://localhost:8000/api/v1/market-data/ohlcv/fx-options \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"EURUSD","expiry":"20260619","strike":1.10,"right":"C"}'
+
 curl -X POST http://localhost:8000/api/v1/market-data/ohlcv/futures \
   -H "Content-Type: application/json" \
   -d '{"symbol":"ES","last_trade_date_or_contract_month":"202606"}'
+
+curl -X POST http://localhost:8000/api/v1/market-data/ohlcv/commodities \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"CL","last_trade_date_or_contract_month":"202606"}'
+
+curl -X POST http://localhost:8000/api/v1/market-data/ohlcv/commodity-options \
+  -H "Content-Type: application/json" \
+  -d '{"underlying_symbol":"CL","expiry":"20260617","strike":80,"right":"C","multiplier":"1000"}'
 
 curl -X POST http://localhost:8000/api/v1/market-data/ohlcv/bond \
   -H "Content-Type: application/json" \
@@ -398,6 +421,27 @@ curl -X POST http://localhost:8000/api/v1/market-data/ohlcv/bond \
 ```
 
 The asset-specific OHLCV wrappers are the business-friendly OHLCV API: callers pass minimal identifiers and the service presets `asset_class` plus common IBKR defaults. They accept the same optional controls as the generic OHLCV endpoint: `duration`, `bar_size`, `start_datetime`, `end_datetime`, `what_to_show`, `use_rth`, `persist`, `cache_latest`, `use_ttl_cache`, `cache_ttl_seconds`, and `metadata`.
+
+Commodity routes are futures-first. Commodity futures remain `asset_class="future"` and commodity futures options remain `asset_class="option"` with IBKR `secType="FOP"`. The commodity OHLCV wrapper presets common roots (`CL`/`NG` to `NYMEX`, `GC`/`SI`/`HG` to `COMEX`, and grain/oilseed roots such as `ZC`/`ZS`/`ZW`/`ZL`/`ZM` to `CBOT`) while allowing explicit exchange and currency overrides. Related IBKR-native commodity endpoints expose futures-option analytics, contract metadata, historical ticks, and historical news without adding external COT, weather, inventory, or shipping providers.
+
+FX option routes use pair-style inputs. For example, `EURUSD` maps to `option_sec_type="OPT"`, `underlying_symbol="EUR"`, and `currency="USD"` unless `currency`, `local_symbol`, or `con_id` is supplied to disambiguate an IBKR contract. Historical FX option bars return `OptionOHLCVBar`. Live FX option collection uses short-lived market-data subscriptions, stores latest snapshots in Redis, and can persist snapshots to a dedicated QuestDB `fx_option_snapshot` table.
+
+Example FX option live snapshot:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/snapshot/fx-options/capture \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contracts": [
+      {"symbol":"EURUSD","expiry":"20260619","strike":1.10,"right":"C","exchange":"SMART"}
+    ],
+    "snapshot_wait_seconds": 2.0,
+    "persist": true,
+    "cache_latest": true
+  }'
+```
+
+IBKR live option Greeks require market-data subscriptions for both the option and the underlying instrument. If an account lacks the required FX/option entitlements, the snapshot can still return available bid/ask/last fields while Greeks, OI, or volume fields remain `null`.
 
 When `start_datetime` is supplied, the API uses the paginated historical range loader and treats `end_datetime` as the end of the requested range. If `end_datetime` is omitted, the range ends at current UTC time. This is the preferred business payload for explicit backfill windows; `duration` remains useful for simple one-shot IBKR historical requests.
 
@@ -479,6 +523,20 @@ POST /api/v1/business/fixed-income/getCurveComparison
 ```
 
 `getBondFutureQuotes` uses IBKR historical OHLCV on futures contracts and accepts the business minimum: `market` plus `contract_month` for the default curve futures, or an explicit `futures` list. For IBKR futures qualification the generated contract request uses `symbol`, `exchange`, `currency`, and one of `contract_month`, `local_symbol`, or `con_id`. `getCTD`, `getFuturesImpliedCurve`, and `getCurveComparison` additionally require `FIXED_INCOME_REFERENCE_PROVIDER`, because IBKR does not provide a complete official CTD delivery basket or conversion-factor feed through the standard TWS historical bar API. IBKR currently documents historical/live bar limitations for OSE, so treat JGB futures as entitlement/feed dependent and validate with your gateway before relying on them in production.
+
+Commodity business endpoint:
+
+```text
+POST /api/v1/business/commodities/getFutures
+```
+
+`commodities/getFutures` derives the front contract and requested forward contracts from `as_of_date` using the root's listed-month cycle, then loads the latest IBKR OHLCV bar for each selected futures contract. For example, `GC` with `as_of_date="2026-05-18"` selects `202606` as front and `202608` as the first forward.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/business/commodities/getFutures \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"GC","as_of_date":"2026-05-18","forward_count":1,"bar_size":"5 mins"}'
+```
 
 Example business news request:
 

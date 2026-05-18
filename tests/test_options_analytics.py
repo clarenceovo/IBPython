@@ -45,6 +45,22 @@ def test_option_analytics_request_allows_empty_generic_ticks_for_true_snapshot()
     assert request.generic_tick_list == ""
 
 
+def test_option_contract_spec_supports_futures_options() -> None:
+    contract = OptionContractSpec(
+        sec_type="fop",
+        underlying_symbol="cl",
+        expiry="20260617",
+        strike=80,
+        right=OptionRight.CALL,
+        exchange="nymex",
+        multiplier="1000",
+    )
+
+    assert contract.sec_type == "FOP"
+    assert contract.underlying_symbol == "CL"
+    assert contract.exchange == "NYMEX"
+
+
 def test_normalize_option_analytics_snapshot_derives_greeks_oi_and_volume() -> None:
     contract = OptionContractSpec(
         underlying_symbol="SPX",

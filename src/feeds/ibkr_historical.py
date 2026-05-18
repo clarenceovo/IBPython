@@ -17,7 +17,7 @@ from src.feeds.ibkr_connection import (
     _qualification_hint,
     _root_cause_message,
 )
-from src.feeds.models import AssetClass, FXOHLCVBar, FutureOHLCVBar, OHLCVBar, OHLCVRequest
+from src.feeds.models import AssetClass, FXOHLCVBar, FutureOHLCVBar, OHLCVBar, OHLCVRequest, OptionOHLCVBar
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +210,8 @@ def _ohlcv_bar_model_for_request(request: OHLCVRequest) -> type[OHLCVBar]:
         return FutureOHLCVBar
     if request.asset_class is AssetClass.FX:
         return FXOHLCVBar
+    if request.asset_class is AssetClass.OPTION:
+        return OptionOHLCVBar
     return OHLCVBar
 
 
@@ -252,6 +254,20 @@ def normalize_ibkr_bars(bars: Sequence[Any], request: OHLCVRequest) -> list[OHLC
                         "quote_currency": request.metadata.get("quote_currency") or request.currency,
                     }
                     if request.asset_class is AssetClass.FX
+                    else {}
+                ),
+                **(
+                    {
+                        "underlying_symbol": request.underlying_symbol or request.symbol,
+                        "expiry": request.expiry or request.last_trade_date_or_contract_month,
+                        "strike": request.strike,
+                        "right": request.right,
+                        "multiplier": request.multiplier,
+                        "trading_class": request.trading_class,
+                        "contract_month": (request.expiry or request.last_trade_date_or_contract_month or "")[:6],
+                        "con_id": request.con_id,
+                    }
+                    if request.asset_class is AssetClass.OPTION
                     else {}
                 ),
                 metadata={

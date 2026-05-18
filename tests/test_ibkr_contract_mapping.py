@@ -86,3 +86,57 @@ def test_future_contract_mapping_supports_local_symbol_without_expiry() -> None:
         "currency": "USD",
         "localSymbol": "ESM6",
     }
+
+
+def test_futures_option_contract_mapping_uses_fop_sec_type() -> None:
+    spec = ContractSpec(
+        symbol="CL",
+        asset_class="option",
+        exchange="NYMEX",
+        currency="USD",
+        option_sec_type="FOP",
+        underlying_symbol="CL",
+        expiry="20260617",
+        strike=80,
+        right="call",
+        multiplier="1000",
+        trading_class="LO",
+    )
+
+    assert ibkr_contract_kwargs(spec) == {
+        "secType": "FOP",
+        "symbol": "CL",
+        "exchange": "NYMEX",
+        "currency": "USD",
+        "lastTradeDateOrContractMonth": "20260617",
+        "strike": 80.0,
+        "right": "C",
+        "multiplier": "1000",
+        "tradingClass": "LO",
+    }
+
+
+def test_fx_option_contract_mapping_uses_opt_with_base_and_quote() -> None:
+    spec = ContractSpec(
+        symbol="EURUSD 20260619C1.1",
+        asset_class="option",
+        exchange="SMART",
+        currency="USD",
+        option_sec_type="OPT",
+        underlying_symbol="EUR",
+        expiry="20260619",
+        strike=1.10,
+        right="call",
+        multiplier="100",
+    )
+
+    assert ibkr_contract_kwargs(spec) == {
+        "secType": "OPT",
+        "symbol": "EUR",
+        "exchange": "SMART",
+        "currency": "USD",
+        "lastTradeDateOrContractMonth": "20260619",
+        "strike": 1.10,
+        "right": "C",
+        "multiplier": "100",
+    }

@@ -113,6 +113,8 @@ REDIS_OHLCV_SNAPSHOT_CALENDAR_KEY_TEMPLATE = (
 
 EQUITY_SNAPSHOT_TABLE = "equity_snapshot"
 REDIS_EQUITY_SNAPSHOT_KEY_TEMPLATE = "EquitySnapshot::{symbol}:latest"
+FX_OPTION_SNAPSHOT_TABLE = "fx_option_snapshot"
+REDIS_FX_OPTION_SNAPSHOT_KEY_TEMPLATE = "FXOptionSnapshot::{contract_key}:latest"
 REDIS_SNAPSHOT_WATCHLIST_KEY_TEMPLATE = "SnapshotWatchlist::{name}"
 REDIS_ORDER_ENVELOPE_KEY_TEMPLATE = "OrderCache::{order_uuid}"
 REDIS_ORDER_ENVELOPE_TTL_SECONDS = 86_400  # 24h default TTL for cached orders

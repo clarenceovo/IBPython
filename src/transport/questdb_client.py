@@ -8,7 +8,7 @@ from typing import Any
 
 from src.config import config_constant as constants
 from src.feeds.models import AssetClass, OHLCVBar
-from src.feeds.snapshotter import EquitySnapshot
+from src.feeds.snapshotter import EquitySnapshot, FXOptionSnapshot
 from src.transport.market_data_store import MarketOHLCVStore
 
 logger = logging.getLogger(__name__)
@@ -76,6 +76,64 @@ INSERT INTO {constants.EQUITY_SNAPSHOT_TABLE}
  open, high, low, close, vwap, mark_price,
  mid_price, spread, spread_bps, halted, source)
 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+""".strip()
+
+CREATE_FX_OPTION_SNAPSHOT_TABLE_SQL = f"""
+CREATE TABLE IF NOT EXISTS {constants.FX_OPTION_SNAPSHOT_TABLE} (
+    symbol SYMBOL,
+    underlying_symbol SYMBOL,
+    expiry SYMBOL,
+    strike DOUBLE,
+    right SYMBOL,
+    exchange SYMBOL,
+    currency SYMBOL,
+    multiplier SYMBOL,
+    trading_class SYMBOL,
+    local_symbol SYMBOL,
+    con_id LONG,
+    timestamp TIMESTAMP,
+    last DOUBLE,
+    bid DOUBLE,
+    ask DOUBLE,
+    bid_size DOUBLE,
+    ask_size DOUBLE,
+    last_size DOUBLE,
+    volume DOUBLE,
+    mark_price DOUBLE,
+    implied_volatility DOUBLE,
+    historical_volatility DOUBLE,
+    option_volume DOUBLE,
+    average_option_volume DOUBLE,
+    open_interest DOUBLE,
+    call_open_interest DOUBLE,
+    put_open_interest DOUBLE,
+    call_volume DOUBLE,
+    put_volume DOUBLE,
+    bid_delta DOUBLE,
+    ask_delta DOUBLE,
+    last_delta DOUBLE,
+    model_delta DOUBLE,
+    model_gamma DOUBLE,
+    model_theta DOUBLE,
+    model_vega DOUBLE,
+    mid_price DOUBLE,
+    spread DOUBLE,
+    spread_bps DOUBLE,
+    source SYMBOL
+) TIMESTAMP(timestamp) PARTITION BY DAY WAL
+""".strip()
+
+INSERT_FX_OPTION_SNAPSHOT_SQL = f"""
+INSERT INTO {constants.FX_OPTION_SNAPSHOT_TABLE}
+(symbol, underlying_symbol, expiry, strike, right, exchange, currency,
+ multiplier, trading_class, local_symbol, con_id, timestamp,
+ last, bid, ask, bid_size, ask_size, last_size, volume, mark_price,
+ implied_volatility, historical_volatility, option_volume, average_option_volume,
+ open_interest, call_open_interest, put_open_interest, call_volume, put_volume,
+ bid_delta, ask_delta, last_delta, model_delta, model_gamma, model_theta, model_vega,
+ mid_price, spread, spread_bps, source)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """.strip()
 
 
@@ -180,6 +238,13 @@ class QuestDBClient(MarketOHLCVStore):
                 await cur.execute(CREATE_EQUITY_SNAPSHOT_TABLE_SQL)
             await self._connection.commit()
 
+    async def create_fx_option_snapshot_table(self) -> None:
+        await self._ensure_connection()
+        async with self._lock:
+            async with self._connection.cursor() as cur:
+                await cur.execute(CREATE_FX_OPTION_SNAPSHOT_TABLE_SQL)
+            await self._connection.commit()
+
     async def insert_snapshots(self, snapshots: Sequence[EquitySnapshot]) -> int:
         if not snapshots:
             return 0
@@ -189,6 +254,54 @@ class QuestDBClient(MarketOHLCVStore):
                 await cur.executemany(INSERT_EQUITY_SNAPSHOT_SQL, [snapshot_to_row(s) for s in snapshots])
             await self._connection.commit()
         return len(snapshots)
+
+    async def insert_fx_option_snapshots(self, snapshots: Sequence[FXOptionSnapshot]) -> int:
+        if not snapshots:
+            return 0
+        await self._ensure_connection()
+        async with self._lock:
+            async with self._connection.cursor() as cur:
+                await cur.executemany(INSERT_FX_OPTION_SNAPSHOT_SQL, [fx_option_snapshot_to_row(s) for s in snapshots])
+            await self._connection.commit()
+        return len(snapshots)
+
+    async def query_fx_option_snapshots(
+        self,
+        *,
+        symbol: str,
+        expiry: str | None = None,
+        strike: float | None = None,
+        right: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        clauses = ["symbol = %s"]
+        params: list[Any] = [symbol.replace("/", "").upper()]
+        if expiry is not None:
+            clauses.append("expiry = %s")
+            params.append(expiry.upper())
+        if strike is not None:
+            clauses.append("strike = %s")
+            params.append(strike)
+        if right is not None:
+            clauses.append("right = %s")
+            normalized_right = right.upper()
+            params.append("C" if normalized_right == "CALL" else "P" if normalized_right == "PUT" else normalized_right)
+        if start is not None:
+            clauses.append("timestamp >= %s")
+            params.append(_questdb_timestamp(start))
+        if end is not None:
+            clauses.append("timestamp < %s")
+            params.append(_questdb_timestamp(end))
+        params.append(limit)
+        sql = (
+            f"SELECT * FROM {constants.FX_OPTION_SNAPSHOT_TABLE} "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY timestamp DESC "
+            "LIMIT %s"
+        )
+        return await self._fetch_dicts(sql, params)
 
     async def query_snapshots(
         self,
@@ -385,5 +498,50 @@ def snapshot_to_row(snapshot: EquitySnapshot) -> tuple[Any, ...]:
         snapshot.spread,
         snapshot.spread_bps,
         snapshot.halted,
+        snapshot.source,
+    )
+
+
+def fx_option_snapshot_to_row(snapshot: FXOptionSnapshot) -> tuple[Any, ...]:
+    return (
+        snapshot.symbol,
+        snapshot.underlying_symbol,
+        snapshot.expiry,
+        snapshot.strike,
+        snapshot.right,
+        snapshot.exchange,
+        snapshot.currency,
+        snapshot.multiplier,
+        snapshot.trading_class,
+        snapshot.local_symbol,
+        snapshot.con_id,
+        snapshot.timestamp.astimezone(timezone.utc).replace(tzinfo=None),
+        snapshot.last,
+        snapshot.bid,
+        snapshot.ask,
+        snapshot.bid_size,
+        snapshot.ask_size,
+        snapshot.last_size,
+        snapshot.volume,
+        snapshot.mark_price,
+        snapshot.implied_volatility,
+        snapshot.historical_volatility,
+        snapshot.option_volume,
+        snapshot.average_option_volume,
+        snapshot.open_interest,
+        snapshot.call_open_interest,
+        snapshot.put_open_interest,
+        snapshot.call_volume,
+        snapshot.put_volume,
+        snapshot.bid_greeks.delta if snapshot.bid_greeks else None,
+        snapshot.ask_greeks.delta if snapshot.ask_greeks else None,
+        snapshot.last_greeks.delta if snapshot.last_greeks else None,
+        snapshot.model_greeks.delta if snapshot.model_greeks else None,
+        snapshot.model_greeks.gamma if snapshot.model_greeks else None,
+        snapshot.model_greeks.theta if snapshot.model_greeks else None,
+        snapshot.model_greeks.vega if snapshot.model_greeks else None,
+        snapshot.mid_price,
+        snapshot.spread,
+        snapshot.spread_bps,
         snapshot.source,
     )

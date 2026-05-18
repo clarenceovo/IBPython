@@ -4,8 +4,10 @@ from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
 
 from src.feeds.models import AssetClass, OHLCVBar
+from src.feeds.snapshotter import FXOptionSnapshot
 from src.transport.redis_client import (
     MarketDataRedisClient,
+    fx_option_snapshot_key,
     index_composition_key,
     latest_bar_key,
     ohlcv_snapshot_calendar_key,
@@ -56,6 +58,12 @@ def test_ohlcv_snapshot_calendar_key_includes_contract_fingerprint() -> None:
         date_value="2026-06-01",
         use_rth=True,
     ) == "OhlcvSnapshotCalendar::FUTURE::HKFE::HSI::202606::2026-06-01::true:has_session"
+
+
+def test_fx_option_snapshot_key_format() -> None:
+    assert fx_option_snapshot_key(symbol="eurusd", expiry="20260619", strike=1.10, right="call") == (
+        "FXOptionSnapshot::EURUSD::20260619::1.1::C::SMART:latest"
+    )
 
 
 def test_redis_client_stores_password() -> None:
@@ -126,6 +134,45 @@ def test_redis_client_sets_symbol_and_legacy_latest_bar_keys() -> None:
     assert symbol_loaded.symbol == "SPY"
     assert legacy_loaded is not None
     assert legacy_loaded.symbol == "SPY"
+
+
+def test_redis_client_sets_latest_fx_option_snapshot() -> None:
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.store: dict[str, str] = {}
+
+        async def set(self, key: str, value: str) -> None:
+            self.store[key] = value
+
+        async def get(self, key: str) -> str | None:
+            return self.store.get(key)
+
+    async def run() -> tuple[str, FXOptionSnapshot | None, dict[str, str]]:
+        fake = FakeRedis()
+        client = MarketDataRedisClient(client=fake)
+        snapshot = FXOptionSnapshot(
+            symbol="EURUSD",
+            underlying_symbol="EUR",
+            expiry="20260619",
+            strike=1.1,
+            right="C",
+            exchange="SMART",
+            currency="USD",
+            timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            bid=0.01,
+            ask=0.012,
+        )
+
+        key = await client.set_latest_fx_option_snapshot(snapshot)
+        loaded = await client.get_latest_fx_option_snapshot(symbol="EURUSD", expiry="20260619", strike=1.1, right="C")
+        return key, loaded, fake.store
+
+    key, loaded, store = asyncio.run(run())
+
+    assert key == "FXOptionSnapshot::EURUSD::20260619::1.1::C::SMART:latest"
+    assert key in store
+    assert loaded is not None
+    assert loaded.symbol == "EURUSD"
 
 
 def test_redis_client_records_scheduler_run_history() -> None:

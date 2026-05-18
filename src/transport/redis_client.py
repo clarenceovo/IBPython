@@ -7,7 +7,7 @@ from typing import Any
 from src.config import config_constant as constants
 from src.feeds.index_composition import IndexCompositionPayload
 from src.feeds.models import AssetClass, OHLCVBar
-from src.feeds.snapshotter import EquitySnapshot
+from src.feeds.snapshotter import EquitySnapshot, FXOptionSnapshot, fx_option_contract_key
 
 
 def latest_bar_key(asset_class: AssetClass | str, bar_size: str, symbol: str | None = None) -> str:
@@ -82,6 +82,28 @@ def ohlcv_snapshot_calendar_key(
 
 def _redis_token(value: str) -> str:
     return str(value).strip().upper().replace(" ", "_")
+
+
+def fx_option_snapshot_key(
+    *,
+    symbol: str,
+    expiry: str,
+    strike: float,
+    right: str,
+    exchange: str = "SMART",
+    local_symbol: str | None = None,
+    con_id: int | None = None,
+) -> str:
+    contract_key = fx_option_contract_key(
+        symbol=symbol,
+        expiry=expiry,
+        strike=strike,
+        right=right,
+        exchange=exchange,
+        local_symbol=local_symbol,
+        con_id=con_id,
+    ).replace(":", "::")
+    return constants.REDIS_FX_OPTION_SNAPSHOT_KEY_TEMPLATE.format(contract_key=contract_key)
 
 
 def order_envelope_key(order_uuid: str) -> str:
@@ -286,6 +308,50 @@ class MarketDataRedisClient:
                 except Exception:
                     pass
         return result
+
+    # ------------------------------------------------------------------
+    # FX option snapshot caching
+    # ------------------------------------------------------------------
+
+    async def set_latest_fx_option_snapshot(self, snapshot: FXOptionSnapshot) -> str:
+        await self.connect()
+        key = fx_option_snapshot_key(
+            symbol=snapshot.symbol,
+            expiry=snapshot.expiry,
+            strike=snapshot.strike,
+            right=snapshot.right,
+            exchange=snapshot.exchange,
+            local_symbol=snapshot.local_symbol,
+            con_id=snapshot.con_id,
+        )
+        await self._client.set(key, snapshot.to_redis_json())
+        return key
+
+    async def get_latest_fx_option_snapshot(
+        self,
+        *,
+        symbol: str,
+        expiry: str,
+        strike: float,
+        right: str,
+        exchange: str = "SMART",
+        local_symbol: str | None = None,
+        con_id: int | None = None,
+    ) -> FXOptionSnapshot | None:
+        await self.connect()
+        key = fx_option_snapshot_key(
+            symbol=symbol,
+            expiry=expiry,
+            strike=strike,
+            right=right,
+            exchange=exchange,
+            local_symbol=local_symbol,
+            con_id=con_id,
+        )
+        payload = await self._client.get(key)
+        if payload is None:
+            return None
+        return FXOptionSnapshot.from_redis_json(payload)
 
     async def set_snapshot_watchlist(self, watchlist_name: str, payload_json: str) -> str:
         await self.connect()

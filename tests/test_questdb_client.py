@@ -1,20 +1,24 @@
 from datetime import datetime, timezone
 
 from src.feeds.models import AssetClass, OHLCVBar
+from src.feeds.snapshotter import FXOptionSnapshot
 from src.transport.market_data_store import MarketOHLCVStore
 from src.transport.questdb_client import (
+    CREATE_FX_OPTION_SNAPSHOT_TABLE_SQL,
     CREATE_MARKET_OHLCV_TABLE_SQL,
     INSERT_MARKET_OHLCV_SQL,
     QuestDBClient,
     bar_to_row,
     build_historical_query,
     build_latest_query,
+    fx_option_snapshot_to_row,
 )
 
 
 def test_create_table_sql_uses_partitioned_market_table() -> None:
     assert "CREATE TABLE IF NOT EXISTS market_ohlcv" in CREATE_MARKET_OHLCV_TABLE_SQL
     assert "TIMESTAMP(timestamp) PARTITION BY DAY" in CREATE_MARKET_OHLCV_TABLE_SQL
+    assert "CREATE TABLE IF NOT EXISTS fx_option_snapshot" in CREATE_FX_OPTION_SNAPSHOT_TABLE_SQL
 
 
 def test_insert_sql_targets_market_table() -> None:
@@ -44,6 +48,29 @@ def test_bar_to_row_serializes_metadata() -> None:
     assert row[1] == "equity"
     assert row[4] == datetime(2026, 1, 1)
     assert row[-1] == '{"a": 1}'
+
+
+def test_fx_option_snapshot_to_row_serializes_contract_identity() -> None:
+    snapshot = FXOptionSnapshot(
+        symbol="EURUSD",
+        underlying_symbol="EUR",
+        expiry="20260619",
+        strike=1.1,
+        right="C",
+        exchange="SMART",
+        currency="USD",
+        timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        bid=0.01,
+        ask=0.012,
+    )
+
+    row = fx_option_snapshot_to_row(snapshot)
+
+    assert row[0] == "EURUSD"
+    assert row[1] == "EUR"
+    assert row[2] == "20260619"
+    assert row[3] == 1.1
+    assert row[4] == "C"
 
 
 def test_build_historical_query_is_parameterized() -> None:

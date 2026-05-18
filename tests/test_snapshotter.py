@@ -11,13 +11,17 @@ from src.config.settings import Settings
 from src.feeds.models import AssetClass
 from src.feeds.snapshotter import (
     EquitySnapshot,
+    FXOptionSnapshot,
     SnapshotQuery,
     SnapshotResult,
     SnapshotWatchlist,
+    fx_option_contract_key,
+    ticker_to_fx_option_snapshot,
     ticker_to_snapshot,
     _safe_float,
 )
-from src.transport.questdb_client import snapshot_to_row
+from src.feeds.options import OptionContractSpec, OptionRight
+from src.transport.questdb_client import fx_option_snapshot_to_row, snapshot_to_row
 from src.webapp.cache import AsyncTTLCache
 import src.webapp.app as app_module
 from src.webapp.app import create_app
@@ -144,6 +148,55 @@ class TestTickerToSnapshot:
         snap = ticker_to_snapshot(ticker, symbol="SPY", exchange="SMART", currency="USD")
         assert snap.last is None
         assert snap.bid is None
+
+
+class TestFXOptionSnapshot:
+    def test_fx_option_snapshot_derives_spread_and_round_trips(self):
+        snap = FXOptionSnapshot(
+            symbol="eurusd",
+            underlying_symbol="eur",
+            expiry="20260619",
+            strike=1.1,
+            right="call",
+            exchange="smart",
+            currency="usd",
+            timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            bid=0.01,
+            ask=0.012,
+        )
+
+        restored = FXOptionSnapshot.from_redis_json(snap.to_redis_json())
+
+        assert snap.symbol == "EURUSD"
+        assert snap.right == "C"
+        assert snap.mid_price == pytest.approx(0.011)
+        assert restored.contract_key == snap.contract_key
+
+    def test_fx_option_contract_key_is_stable(self):
+        assert fx_option_contract_key(symbol="eurusd", expiry="20260619", strike=1.10, right="call") == "EURUSD:20260619:1.1:C:SMART"
+
+    def test_ticker_to_fx_option_snapshot_reads_price_and_greeks(self):
+        ticker = FakeTicker(
+            bid=0.01,
+            ask=0.012,
+            last=0.011,
+            modelGreeks=type("Greeks", (), {"impliedVol": 0.1, "delta": 0.45, "gamma": 0.2, "theta": -0.01, "vega": 0.03})(),
+            callOpenInterest=100,
+        )
+        contract = OptionContractSpec(
+            underlying_symbol="EUR",
+            expiry="20260619",
+            strike=1.1,
+            right=OptionRight.CALL,
+            currency="USD",
+        )
+
+        snap = ticker_to_fx_option_snapshot(ticker, contract, symbol="EURUSD")
+
+        assert snap.symbol == "EURUSD"
+        assert snap.model_greeks is not None
+        assert snap.model_greeks.delta == pytest.approx(0.45)
+        assert snap.open_interest == pytest.approx(100)
         assert snap.volume is None
 
     def test_handles_nan_values(self):
@@ -249,6 +302,29 @@ class TestSnapshotToRow:
         assert row[4] == 12345  # con_id
         assert row[6] == 150.0  # last
 
+    def test_fx_option_snapshot_row_shape(self):
+        snap = FXOptionSnapshot(
+            symbol="EURUSD",
+            underlying_symbol="EUR",
+            expiry="20260619",
+            strike=1.1,
+            right="C",
+            exchange="SMART",
+            currency="USD",
+            timestamp=datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc),
+            bid=0.01,
+            ask=0.012,
+        )
+
+        row = fx_option_snapshot_to_row(snap)
+
+        assert row[0] == "EURUSD"
+        assert row[1] == "EUR"
+        assert row[2] == "20260619"
+        assert row[3] == 1.1
+        assert row[4] == "C"
+        assert row[11] == datetime(2026, 1, 1, 12, 0)
+
 
 # ---------------------------------------------------------------------------
 # SnapshotResult tests
@@ -284,6 +360,9 @@ class TestSnapshotEndpoints:
         paths = {route.path for route in app.routes}
 
         assert "/api/v1/snapshot/capture" in paths
+        assert "/api/v1/snapshot/fx-options/capture" in paths
+        assert "/api/v1/snapshot/fx-options/latest" in paths
+        assert "/api/v1/snapshot/fx-options/query" in paths
         assert "/api/v1/snapshot/latest" in paths
         assert "/api/v1/snapshot/latest-all" in paths
         assert "/api/v1/snapshot/query" in paths

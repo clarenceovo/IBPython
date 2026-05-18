@@ -139,6 +139,38 @@ curve.
 }
 ```
 
+## Commodities
+
+<!-- openapi-example: business.commodities.getFutures cl_front_forward -->
+### CL front and forward futures
+Derive the current listed contract month and the next forward month from
+`as_of_date`, then load the latest IBKR OHLCV bar for each contract.
+
+```json
+{
+  "symbol": "CL",
+  "as_of_date": "2026-05-18",
+  "forward_count": 1,
+  "duration": "1 D",
+  "bar_size": "1 min"
+}
+```
+
+<!-- openapi-example: business.commodities.getFutures gc_front_forward -->
+### GC front and forward futures
+Gold uses the common COMEX listed-month cycle. For May 2026 the endpoint selects
+June 2026 as front and August 2026 as the first forward.
+
+```json
+{
+  "symbol": "GC",
+  "as_of_date": "2026-05-18",
+  "forward_count": 1,
+  "duration": "1 D",
+  "bar_size": "5 mins"
+}
+```
+
 <!-- openapi-example: business.getMarketPanel fx_panel -->
 ### FX midpoint panel
 Use FX-friendly defaults for intraday currency-pair research.

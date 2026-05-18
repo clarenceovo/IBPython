@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Annotated
+from datetime import date, datetime, timezone
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.feeds.bonds import BondYieldBar, BondYieldHistoryRequest
+from src.feeds.contracts import ContractSpec
 from src.feeds.exchange_resolver import resolve_equity
-from src.feeds.models import AssetClass, FXOHLCVBar, FutureOHLCVBar, OHLCVBar, OHLCVRequest
-from src.feeds.options import OptionAnalyticsRequest, OptionAnalyticsSnapshot, OptionSkewSurfaceRequest, OptionSkewSurfaceResponse
+from src.feeds.models import AssetClass, FXOHLCVBar, FutureOHLCVBar, OHLCVBar, OHLCVRequest, OptionOHLCVBar
+from src.feeds.news import HistoricalNewsHeadline, HistoricalNewsRequest, NewsArticle, NewsArticleRequest
+from src.feeds.options import OptionAnalyticsRequest, OptionAnalyticsSnapshot, OptionContractSpec, OptionRight, OptionSkewSurfaceRequest, OptionSkewSurfaceResponse
+from src.feeds.snapshotter import fx_pair_parts
+from src.feeds.tick_data import HeadTimestampRequest, HistoricalTickRequest, HistoricalTickResponse, MarketRule
 from src.webapp.cache import stable_cache_key
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 
@@ -79,6 +83,7 @@ class MinimalOHLCVLoadControls(BaseModel):
         return self
 
     def to_ohlcv_request(self, asset_class: AssetClass, **overrides: object) -> OHLCVRequest:
+        metadata = overrides.pop("metadata", self.metadata)
         return OHLCVRequest(
             asset_class=asset_class,
             duration=self.duration,
@@ -87,7 +92,7 @@ class MinimalOHLCVLoadControls(BaseModel):
             end_datetime=self.end_datetime,
             what_to_show=self.what_to_show,
             use_rth=self.use_rth,
-            metadata=self.metadata,
+            metadata=metadata,
             **overrides,
         )
 
@@ -160,6 +165,161 @@ class FutureOHLCVLoadRequest(MinimalOHLCVLoadControls):
             multiplier=self.multiplier,
             local_symbol=self.local_symbol,
             con_id=self.con_id,
+        )
+
+
+_COMMODITY_FUTURES_PRESETS: dict[str, tuple[str, str]] = {
+    "CL": ("NYMEX", "USD"),
+    "NG": ("NYMEX", "USD"),
+    "GC": ("COMEX", "USD"),
+    "SI": ("COMEX", "USD"),
+    "HG": ("COMEX", "USD"),
+    "ZC": ("CBOT", "USD"),
+    "ZS": ("CBOT", "USD"),
+    "ZW": ("CBOT", "USD"),
+    "ZL": ("CBOT", "USD"),
+    "ZM": ("CBOT", "USD"),
+}
+
+
+def _resolve_commodity_future(symbol: str) -> dict[str, str]:
+    upper = symbol.strip().upper()
+    exchange, currency = _COMMODITY_FUTURES_PRESETS.get(upper, ("NYMEX", "USD"))
+    return {"symbol": upper, "exchange": exchange, "currency": currency}
+
+
+class CommodityOHLCVLoadRequest(MinimalOHLCVLoadControls):
+    symbol: str = Field(min_length=1, examples=["CL", "GC", "NG"])
+    exchange: str | None = Field(default=None, min_length=1, description="Override the commodity preset exchange.")
+    currency: str | None = Field(default=None, min_length=1, description="Override the commodity preset currency.")
+    last_trade_date_or_contract_month: str | None = Field(default=None, examples=["202606"])
+    multiplier: str | None = Field(default=None, examples=["1000"])
+    local_symbol: str | None = Field(default=None, examples=["CLM6"])
+    con_id: int | None = Field(default=None, gt=0)
+    use_rth: bool = False
+
+    @model_validator(mode="after")
+    def validate_future_identifier(self) -> "CommodityOHLCVLoadRequest":
+        if not (self.last_trade_date_or_contract_month or self.local_symbol or self.con_id):
+            raise ValueError("commodity OHLCV requires last_trade_date_or_contract_month, local_symbol, or con_id")
+        return self
+
+    def to_request(self) -> OHLCVRequest:
+        resolved = _resolve_commodity_future(self.symbol)
+        return self.to_ohlcv_request(
+            AssetClass.FUTURE,
+            symbol=resolved["symbol"],
+            exchange=self.exchange or resolved["exchange"],
+            currency=self.currency or resolved["currency"],
+            last_trade_date_or_contract_month=self.last_trade_date_or_contract_month,
+            multiplier=self.multiplier,
+            local_symbol=self.local_symbol,
+            con_id=self.con_id,
+            metadata={**self.metadata, "market": "commodity"},
+        )
+
+
+class CommodityOptionOHLCVLoadRequest(MinimalOHLCVLoadControls):
+    underlying_symbol: str = Field(min_length=1, examples=["CL"])
+    expiry: str = Field(min_length=6, examples=["20260617"])
+    strike: float = Field(gt=0, examples=[80.0])
+    right: str = Field(min_length=1, examples=["C"])
+    exchange: str | None = Field(default=None, min_length=1)
+    currency: str | None = Field(default=None, min_length=1)
+    multiplier: str | None = Field(default=None, examples=["1000"])
+    trading_class: str | None = Field(default=None, examples=["LO"])
+    local_symbol: str | None = Field(default=None)
+    con_id: int | None = Field(default=None, gt=0)
+    use_rth: bool = False
+
+    @field_validator("right", mode="before")
+    @classmethod
+    def normalize_right(cls, value: object) -> str:
+        normalized = str(value).strip().upper()
+        if normalized in {"C", "CALL"}:
+            return "C"
+        if normalized in {"P", "PUT"}:
+            return "P"
+        raise ValueError("right must be C/CALL or P/PUT")
+
+    def to_request(self) -> OHLCVRequest:
+        resolved = _resolve_commodity_future(self.underlying_symbol)
+        symbol = self.local_symbol or f"{resolved['symbol']} {self.expiry}{self.right}{self.strike:g}"
+        return self.to_ohlcv_request(
+            AssetClass.OPTION,
+            symbol=symbol,
+            exchange=self.exchange or resolved["exchange"],
+            currency=self.currency or resolved["currency"],
+            option_sec_type="FOP",
+            underlying_symbol=resolved["symbol"],
+            expiry=self.expiry,
+            strike=self.strike,
+            right=self.right,
+            multiplier=self.multiplier,
+            trading_class=self.trading_class,
+            local_symbol=self.local_symbol,
+            con_id=self.con_id,
+            metadata={**self.metadata, "market": "commodity", "option_sec_type": "FOP"},
+        )
+
+    def to_option_contract_spec(self) -> OptionContractSpec:
+        resolved = _resolve_commodity_future(self.underlying_symbol)
+        return OptionContractSpec(
+            sec_type="FOP",
+            underlying_symbol=resolved["symbol"],
+            expiry=self.expiry,
+            strike=self.strike,
+            right=OptionRight(self.right),
+            exchange=self.exchange or resolved["exchange"],
+            currency=self.currency or resolved["currency"],
+            multiplier=self.multiplier or "100",
+            trading_class=self.trading_class,
+            local_symbol=self.local_symbol,
+            con_id=self.con_id,
+        )
+
+
+class FXOptionOHLCVLoadRequest(MinimalOHLCVLoadControls):
+    symbol: str = Field(min_length=6, examples=["EURUSD"])
+    expiry: str = Field(min_length=6, examples=["20260619"])
+    strike: float = Field(gt=0, examples=[1.10])
+    right: str = Field(min_length=1, examples=["C"])
+    exchange: str = Field(default="SMART", min_length=1)
+    currency: str | None = Field(default=None, min_length=1)
+    multiplier: str | None = Field(default=None, examples=["100000"])
+    trading_class: str | None = None
+    local_symbol: str | None = None
+    con_id: int | None = Field(default=None, gt=0)
+    use_rth: bool = False
+
+    @field_validator("right", mode="before")
+    @classmethod
+    def normalize_right(cls, value: object) -> str:
+        normalized = str(value).strip().upper()
+        if normalized in {"C", "CALL"}:
+            return "C"
+        if normalized in {"P", "PUT"}:
+            return "P"
+        raise ValueError("right must be C/CALL or P/PUT")
+
+    def to_request(self) -> OHLCVRequest:
+        pair, base, quote = fx_pair_parts(self.symbol, self.currency)
+        symbol = self.local_symbol or f"{pair} {self.expiry}{self.right}{self.strike:g}"
+        return self.to_ohlcv_request(
+            AssetClass.OPTION,
+            symbol=symbol,
+            exchange=self.exchange,
+            currency=quote,
+            option_sec_type="OPT",
+            underlying_symbol=base,
+            expiry=self.expiry,
+            strike=self.strike,
+            right=self.right,
+            multiplier=self.multiplier,
+            trading_class=self.trading_class,
+            local_symbol=self.local_symbol,
+            con_id=self.con_id,
+            metadata={**self.metadata, "market": "fx_option", "pair": pair, "option_sec_type": "OPT"},
         )
 
 
@@ -261,6 +421,148 @@ class CachedBondYieldHistoryRequest(BaseModel):
     request: BondYieldHistoryRequest
     use_ttl_cache: bool = True
     cache_ttl_seconds: float | None = Field(default=None, ge=0)
+
+
+class CommodityOptionAnalyticsLoadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contract: CommodityOptionOHLCVLoadRequest
+    generic_ticks: tuple[str, ...] | list[str] = ("100", "101", "104", "105", "106")
+    snapshot_wait_seconds: float = Field(default=2.0, gt=0)
+    regulatory_snapshot: bool = False
+    use_ttl_cache: bool = True
+    cache_ttl_seconds: float | None = Field(default=None, ge=0)
+
+    def to_request(self) -> OptionAnalyticsRequest:
+        return OptionAnalyticsRequest(
+            contract=self.contract.to_option_contract_spec(),
+            generic_ticks=tuple(self.generic_ticks),
+            snapshot_wait_seconds=self.snapshot_wait_seconds,
+            regulatory_snapshot=self.regulatory_snapshot,
+        )
+
+
+class CommodityMetadataRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    symbol: str = Field(min_length=1, examples=["CL"])
+    exchange: str | None = None
+    currency: str | None = None
+    last_trade_date_or_contract_month: str | None = Field(default=None, examples=["202606"])
+    multiplier: str | None = None
+    local_symbol: str | None = None
+    con_id: int | None = Field(default=None, gt=0)
+    what_to_show: str = Field(default="TRADES", min_length=1)
+    use_rth: bool = False
+    include_head_timestamp: bool = True
+    include_trading_schedule: bool = False
+    include_market_rules: bool = True
+    schedule_date: date | None = None
+    use_ttl_cache: bool = True
+    cache_ttl_seconds: float | None = Field(default=300, ge=0)
+
+    @model_validator(mode="after")
+    def validate_future_identifier(self) -> "CommodityMetadataRequest":
+        if not (self.last_trade_date_or_contract_month or self.local_symbol or self.con_id):
+            raise ValueError("commodity metadata requires last_trade_date_or_contract_month, local_symbol, or con_id")
+        return self
+
+    def to_ohlcv_request(self) -> OHLCVRequest:
+        resolved = _resolve_commodity_future(self.symbol)
+        return OHLCVRequest(
+            symbol=resolved["symbol"],
+            asset_class=AssetClass.FUTURE,
+            exchange=self.exchange or resolved["exchange"],
+            currency=self.currency or resolved["currency"],
+            last_trade_date_or_contract_month=self.last_trade_date_or_contract_month,
+            multiplier=self.multiplier,
+            local_symbol=self.local_symbol,
+            con_id=self.con_id,
+            what_to_show=self.what_to_show,
+            use_rth=self.use_rth,
+            metadata={"market": "commodity"},
+        )
+
+    def to_contract_spec(self) -> ContractSpec:
+        return ContractSpec.from_ohlcv_request(self.to_ohlcv_request())
+
+
+class CommodityMetadataResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    exchange: str
+    currency: str
+    con_id: int | None = None
+    local_symbol: str | None = None
+    trading_class: str | None = None
+    min_tick: float | None = None
+    market_rule_ids: tuple[int, ...] = ()
+    head_timestamp: datetime | None = None
+    trading_sessions: tuple[dict[str, Any], ...] = ()
+    market_rules: tuple[MarketRule, ...] = ()
+    source: str = "ibkr"
+
+
+class CommodityHistoricalTicksRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    symbol: str = Field(min_length=1, examples=["CL"])
+    exchange: str | None = None
+    currency: str | None = None
+    last_trade_date_or_contract_month: str | None = Field(default=None, examples=["202606"])
+    local_symbol: str | None = None
+    con_id: int | None = Field(default=None, gt=0)
+    start_date: datetime
+    end_date: datetime
+    what_to_show: str = Field(default="TRADES", min_length=1)
+    use_rth: bool = False
+    max_ticks: int = Field(default=10_000, ge=1, le=100_000)
+
+    @model_validator(mode="after")
+    def validate_future_identifier(self) -> "CommodityHistoricalTicksRequest":
+        if not (self.last_trade_date_or_contract_month or self.local_symbol or self.con_id):
+            raise ValueError("commodity historical ticks require last_trade_date_or_contract_month, local_symbol, or con_id")
+        return self
+
+    def to_request(self) -> HistoricalTickRequest:
+        resolved = _resolve_commodity_future(self.symbol)
+        return HistoricalTickRequest(
+            symbol=resolved["symbol"],
+            sec_type="FUT",
+            exchange=self.exchange or resolved["exchange"],
+            currency=self.currency or resolved["currency"],
+            start_date=self.start_date,
+            end_date=self.end_date,
+            what_to_show=self.what_to_show,
+            use_rth=self.use_rth,
+            max_ticks=self.max_ticks,
+        )
+
+
+class CommodityNewsRequest(CommodityMetadataRequest):
+    provider_codes: tuple[str, ...] | None = None
+    start_datetime: datetime | None = None
+    end_datetime: datetime | None = None
+    max_results: int = Field(default=50, ge=1, le=300)
+    include_articles: bool = False
+
+
+class CommodityNewsHeadline(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    headline: HistoricalNewsHeadline
+    article: NewsArticle | None = None
+
+
+class CommodityNewsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    con_id: int
+    provider_codes: tuple[str, ...]
+    headlines: tuple[CommodityNewsHeadline, ...]
+    source: str = "ibkr_news"
 
 
 GENERIC_OHLCV_REQUEST_EXAMPLES = {
@@ -384,6 +686,145 @@ FUTURES_OHLCV_REQUEST_EXAMPLES = {
             "duration": "1 D",
             "bar_size": "1 min",
             "what_to_show": "TRADES",
+        },
+    },
+}
+
+
+COMMODITY_OHLCV_REQUEST_EXAMPLES = {
+    "cl_crude_nymex": {
+        "summary": "CL crude oil future",
+        "description": "CL auto-resolves to NYMEX/USD and uses futures OHLCV under the hood.",
+        "value": {
+            "symbol": "CL",
+            "last_trade_date_or_contract_month": "202606",
+            "duration": "1 D",
+            "bar_size": "1 min",
+        },
+    },
+    "gc_gold_comex": {
+        "summary": "GC gold future",
+        "description": "GC auto-resolves to COMEX/USD.",
+        "value": {
+            "symbol": "GC",
+            "last_trade_date_or_contract_month": "202606",
+            "duration": "1 D",
+            "bar_size": "5 mins",
+        },
+    },
+    "ng_by_local_symbol": {
+        "summary": "NG natural gas by local symbol",
+        "description": "Use local_symbol when that is how the contract is represented in TWS.",
+        "value": {"symbol": "NG", "local_symbol": "NGM6"},
+    },
+}
+
+
+COMMODITY_OPTION_OHLCV_REQUEST_EXAMPLES = {
+    "cl_fop_call": {
+        "summary": "CL futures option OHLCV",
+        "description": "Commodity options use IBKR secType=FOP and return OptionOHLCVBar.",
+        "value": {
+            "underlying_symbol": "CL",
+            "expiry": "20260617",
+            "strike": 80.0,
+            "right": "C",
+            "exchange": "NYMEX",
+            "multiplier": "1000",
+            "duration": "1 D",
+            "bar_size": "1 day",
+        },
+    }
+}
+
+
+COMMODITY_OPTION_ANALYTICS_EXAMPLES = {
+    "cl_fop_greeks": {
+        "summary": "CL futures option Greeks/OI",
+        "description": "Uses a short-lived IBKR market-data subscription because generic ticks are requested.",
+        "value": {
+            "contract": {
+                "underlying_symbol": "CL",
+                "expiry": "20260617",
+                "strike": 80.0,
+                "right": "C",
+                "exchange": "NYMEX",
+                "multiplier": "1000",
+            },
+            "snapshot_wait_seconds": 2.0,
+            "use_ttl_cache": True,
+        },
+    }
+}
+
+
+COMMODITY_METADATA_EXAMPLES = {
+    "cl_metadata": {
+        "summary": "CL contract metadata",
+        "value": {
+            "symbol": "CL",
+            "last_trade_date_or_contract_month": "202606",
+            "include_head_timestamp": True,
+            "include_trading_schedule": True,
+            "schedule_date": "2026-05-18",
+        },
+    }
+}
+
+
+COMMODITY_HISTORICAL_TICKS_EXAMPLES = {
+    "cl_historical_ticks": {
+        "summary": "CL historical trade ticks",
+        "value": {
+            "symbol": "CL",
+            "last_trade_date_or_contract_month": "202606",
+            "start_date": "2026-05-18T13:30:00Z",
+            "end_date": "2026-05-18T14:30:00Z",
+            "what_to_show": "TRADES",
+            "max_ticks": 1000,
+        },
+    }
+}
+
+
+COMMODITY_NEWS_EXAMPLES = {
+    "cl_news": {
+        "summary": "CL historical news",
+        "value": {
+            "symbol": "CL",
+            "last_trade_date_or_contract_month": "202606",
+            "start_datetime": "2026-05-01T00:00:00Z",
+            "end_datetime": "2026-05-18T00:00:00Z",
+            "max_results": 25,
+        },
+    }
+}
+
+
+FX_OPTION_OHLCV_REQUEST_EXAMPLES = {
+    "eurusd_call": {
+        "summary": "EURUSD FX option call",
+        "description": "Pair-style FX option OHLCV. EURUSD maps to underlying_symbol=EUR and currency=USD.",
+        "value": {
+            "symbol": "EURUSD",
+            "expiry": "20260619",
+            "strike": 1.10,
+            "right": "C",
+            "duration": "1 D",
+            "bar_size": "1 day",
+        },
+    },
+    "eurusd_put_with_local_symbol": {
+        "summary": "EURUSD FX option by local symbol",
+        "description": "Use local_symbol or con_id when IBKR needs exact contract disambiguation.",
+        "value": {
+            "symbol": "EURUSD",
+            "expiry": "20260619",
+            "strike": 1.05,
+            "right": "P",
+            "local_symbol": "EURUSD  260619P00001050",
+            "duration": "1 D",
+            "bar_size": "1 day",
         },
     },
 }
@@ -629,6 +1070,85 @@ async def _load_ohlcv_with_controls(
     return await load()
 
 
+def _contract_int(value: Any, *names: str) -> int | None:
+    for name in names:
+        raw = getattr(value, name, None)
+        if raw not in (None, ""):
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _contract_text(value: Any, *names: str) -> str | None:
+    for name in names:
+        raw = getattr(value, name, None)
+        if raw not in (None, ""):
+            return str(raw).strip() or None
+    return None
+
+
+def _market_rule_ids(value: Any) -> tuple[int, ...]:
+    raw = _contract_text(value, "marketRuleIds", "market_rule_ids") or ""
+    ids: list[int] = []
+    for item in raw.replace(";", ",").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            ids.append(int(item))
+        except ValueError:
+            continue
+    return tuple(ids)
+
+
+def _session_to_dict(session: Any) -> dict[str, Any]:
+    return {
+        key: getattr(session, key, None)
+        for key in ("startDateTime", "endDateTime", "refDate", "start", "end")
+        if getattr(session, key, None) is not None
+    }
+
+
+async def _load_commodity_news(payload: CommodityNewsRequest, state: IBKRRestAppState) -> CommodityNewsResponse:
+    contract = await state.feed.qualify_contract(payload.to_contract_spec())
+    con_id = _contract_int(contract, "conId", "con_id")
+    if con_id is None:
+        raise HTTPException(status_code=404, detail=f"IBKR could not qualify commodity contract for {payload.symbol}")
+
+    provider_codes = payload.provider_codes
+    if provider_codes is None:
+        providers = await state.feed.load_news_providers()
+        provider_codes = tuple(provider.provider_code for provider in providers)
+    if not provider_codes:
+        raise HTTPException(status_code=503, detail="IBKR news providers are not available for this account")
+
+    request = HistoricalNewsRequest(
+        con_id=con_id,
+        provider_codes=provider_codes,
+        start_datetime=payload.start_datetime,
+        end_datetime=payload.end_datetime,
+        total_results=payload.max_results,
+    )
+    headlines = await state.feed.load_historical_news(request)
+    items: list[CommodityNewsHeadline] = []
+    for headline in headlines:
+        article = None
+        if payload.include_articles:
+            article = await state.feed.load_news_article(
+                NewsArticleRequest(provider_code=headline.provider_code, article_id=headline.article_id)
+            )
+        items.append(CommodityNewsHeadline(headline=headline, article=article))
+
+    return CommodityNewsResponse(
+        symbol=payload.symbol.strip().upper(),
+        con_id=con_id,
+        provider_codes=provider_codes,
+        headlines=tuple(items),
+    )
+
+
 @router.post("/ohlcv", response_model=list[OHLCVBar])
 async def load_ohlcv(
     payload: Annotated[HistoricalOHLCVLoadRequest, Body(openapi_examples=GENERIC_OHLCV_REQUEST_EXAMPLES)],
@@ -684,6 +1204,69 @@ async def load_futures_ohlcv(
         use_ttl_cache=payload.use_ttl_cache,
         cache_ttl_seconds=payload.cache_ttl_seconds,
         cache_namespace="ohlcv_futures",
+        state=state,
+    )
+
+
+@router.post(
+    "/ohlcv/commodities",
+    response_model=list[FutureOHLCVBar],
+    summary="Load commodity futures OHLCV with commodity presets",
+)
+async def load_commodity_ohlcv(
+    payload: Annotated[CommodityOHLCVLoadRequest, Body(openapi_examples=COMMODITY_OHLCV_REQUEST_EXAMPLES)],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> list[FutureOHLCVBar]:
+    return await _load_ohlcv_with_controls(
+        request=payload.to_request(),
+        start_datetime=payload.start_datetime,
+        persist=payload.persist,
+        cache_latest=payload.cache_latest,
+        use_ttl_cache=payload.use_ttl_cache,
+        cache_ttl_seconds=payload.cache_ttl_seconds,
+        cache_namespace="ohlcv_commodities",
+        state=state,
+    )
+
+
+@router.post(
+    "/ohlcv/commodity-options",
+    response_model=list[OptionOHLCVBar],
+    summary="Load commodity futures option OHLCV",
+)
+async def load_commodity_option_ohlcv(
+    payload: Annotated[CommodityOptionOHLCVLoadRequest, Body(openapi_examples=COMMODITY_OPTION_OHLCV_REQUEST_EXAMPLES)],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> list[OptionOHLCVBar]:
+    return await _load_ohlcv_with_controls(
+        request=payload.to_request(),
+        start_datetime=payload.start_datetime,
+        persist=payload.persist,
+        cache_latest=payload.cache_latest,
+        use_ttl_cache=payload.use_ttl_cache,
+        cache_ttl_seconds=payload.cache_ttl_seconds,
+        cache_namespace="ohlcv_commodity_options",
+        state=state,
+    )
+
+
+@router.post(
+    "/ohlcv/fx-options",
+    response_model=list[OptionOHLCVBar],
+    summary="Load FX option OHLCV",
+)
+async def load_fx_option_ohlcv(
+    payload: Annotated[FXOptionOHLCVLoadRequest, Body(openapi_examples=FX_OPTION_OHLCV_REQUEST_EXAMPLES)],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> list[OptionOHLCVBar]:
+    return await _load_ohlcv_with_controls(
+        request=payload.to_request(),
+        start_datetime=payload.start_datetime,
+        persist=payload.persist,
+        cache_latest=payload.cache_latest,
+        use_ttl_cache=payload.use_ttl_cache,
+        cache_ttl_seconds=payload.cache_ttl_seconds,
+        cache_namespace="ohlcv_fx_options",
         state=state,
     )
 
@@ -804,6 +1387,26 @@ async def load_option_analytics(
     return await load()
 
 
+@router.post(
+    "/commodities/options/analytics",
+    response_model=OptionAnalyticsSnapshot,
+    summary="Load commodity futures option analytics",
+)
+async def load_commodity_option_analytics(
+    payload: Annotated[CommodityOptionAnalyticsLoadRequest, Body(openapi_examples=COMMODITY_OPTION_ANALYTICS_EXAMPLES)],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> OptionAnalyticsSnapshot:
+    request = payload.to_request()
+
+    async def load() -> OptionAnalyticsSnapshot:
+        return await state.feed.load_option_analytics(request)
+
+    if payload.use_ttl_cache:
+        key = stable_cache_key("commodity_option_analytics", request)
+        return await state.market_data_cache.get_or_set(key, load, ttl_seconds=payload.cache_ttl_seconds)
+    return await load()
+
+
 @router.post("/options/skew", response_model=OptionSkewSurfaceResponse)
 async def load_option_skew_surface(
     payload: Annotated[CachedOptionSkewRequest, Body(openapi_examples=OPTION_SKEW_REQUEST_EXAMPLES)],
@@ -816,6 +1419,93 @@ async def load_option_skew_surface(
         key = stable_cache_key("option_skew", payload.request)
         return await state.market_data_cache.get_or_set(key, load, ttl_seconds=payload.cache_ttl_seconds)
     return await load()
+
+
+@router.post(
+    "/commodities/metadata",
+    response_model=CommodityMetadataResponse,
+    summary="Load IBKR-native commodity contract metadata",
+)
+async def load_commodity_metadata(
+    payload: Annotated[CommodityMetadataRequest, Body(openapi_examples=COMMODITY_METADATA_EXAMPLES)],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> CommodityMetadataResponse:
+    async def load() -> CommodityMetadataResponse:
+        request = payload.to_ohlcv_request()
+        contract = await state.feed.qualify_contract(ContractSpec.from_ohlcv_request(request))
+        market_rule_ids = _market_rule_ids(contract)
+        market_rules: list[MarketRule] = []
+        if payload.include_market_rules:
+            for rule_id in market_rule_ids:
+                market_rules.append(await state.feed.load_market_rule(rule_id))
+
+        head_timestamp = None
+        if payload.include_head_timestamp:
+            head_timestamp = await state.feed.load_head_timestamp(
+                HeadTimestampRequest(
+                    symbol=request.symbol,
+                    sec_type="FUT",
+                    exchange=request.exchange,
+                    currency=request.currency,
+                    what_to_show=payload.what_to_show,
+                    use_rth=payload.use_rth,
+                )
+            )
+
+        trading_sessions: tuple[dict[str, Any], ...] = ()
+        if payload.include_trading_schedule:
+            sessions = await state.feed.load_trading_schedule(
+                request,
+                ref_date=payload.schedule_date or date.today(),
+                use_rth=payload.use_rth,
+            )
+            trading_sessions = tuple(_session_to_dict(session) for session in sessions)
+
+        return CommodityMetadataResponse(
+            symbol=request.symbol,
+            exchange=request.exchange,
+            currency=request.currency,
+            con_id=_contract_int(contract, "conId", "con_id"),
+            local_symbol=_contract_text(contract, "localSymbol", "local_symbol"),
+            trading_class=_contract_text(contract, "tradingClass", "trading_class"),
+            min_tick=getattr(contract, "minTick", None),
+            market_rule_ids=market_rule_ids,
+            head_timestamp=head_timestamp,
+            trading_sessions=trading_sessions,
+            market_rules=tuple(market_rules),
+        )
+
+    if payload.use_ttl_cache:
+        key = stable_cache_key("commodity_metadata", payload)
+        return await state.market_data_cache.get_or_set(key, load, ttl_seconds=payload.cache_ttl_seconds)
+    return await load()
+
+
+@router.post(
+    "/commodities/historical-ticks",
+    response_model=HistoricalTickResponse,
+    summary="Load commodity futures historical ticks",
+)
+async def load_commodity_historical_ticks(
+    payload: Annotated[CommodityHistoricalTicksRequest, Body(openapi_examples=COMMODITY_HISTORICAL_TICKS_EXAMPLES)],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> HistoricalTickResponse:
+    return await state.feed.load_historical_ticks(payload.to_request())
+
+
+@router.post(
+    "/commodities/news",
+    response_model=CommodityNewsResponse,
+    summary="Load IBKR historical news for a commodity future",
+)
+async def load_commodity_news(
+    payload: Annotated[CommodityNewsRequest, Body(openapi_examples=COMMODITY_NEWS_EXAMPLES)],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> CommodityNewsResponse:
+    if payload.use_ttl_cache:
+        key = stable_cache_key("commodity_news", payload)
+        return await state.market_data_cache.get_or_set(key, lambda: _load_commodity_news(payload, state), ttl_seconds=payload.cache_ttl_seconds)
+    return await _load_commodity_news(payload, state)
 
 
 @router.post("/bonds/yields/history", response_model=list[BondYieldBar])

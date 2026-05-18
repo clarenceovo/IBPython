@@ -11,9 +11,11 @@ from src.feeds.account import LivePositionDTO
 from src.feeds.bonds import BondInstrument
 from src.feeds.fixed_income import DeliverableBasketRequest, DeliverableBondInput
 from src.feeds.index_composition import IndexCompositionPayload
-from src.feeds.models import AssetClass, OHLCVBar
+from src.feeds.models import AssetClass, OHLCVBar, OptionOHLCVBar
 from src.feeds.news import HistoricalNewsHeadline, NewsArticle, NewsProvider
-from src.feeds.options import OptionSkewSurfaceResponse
+from src.feeds.options import OptionAnalyticsSnapshot, OptionSkewSurfaceResponse
+from src.feeds.snapshotter import FXOptionSnapshot
+from src.feeds.tick_data import HistoricalTickResponse, MarketRule, PriceIncrement
 import src.webapp.app as app_module
 from src.webapp.app import create_app
 from src.webapp.cache import AsyncTTLCache
@@ -28,6 +30,30 @@ class FakeLoader:
         self.calls += 1
         self.loaded_requests.append(request)
         symbol = getattr(request, "symbol")
+        if getattr(request, "asset_class") is AssetClass.OPTION:
+            return [
+                OptionOHLCVBar(
+                    symbol=symbol,
+                    asset_class=AssetClass.OPTION,
+                    exchange=getattr(request, "exchange"),
+                    currency=getattr(request, "currency"),
+                    timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    open=10,
+                    high=11,
+                    low=9,
+                    close=10.5,
+                    volume=100,
+                    bar_size=getattr(request, "bar_size"),
+                    source="test",
+                    underlying_symbol=getattr(request, "underlying_symbol"),
+                    expiry=getattr(request, "expiry"),
+                    strike=getattr(request, "strike"),
+                    right=getattr(request, "right"),
+                    multiplier=getattr(request, "multiplier"),
+                    trading_class=getattr(request, "trading_class"),
+                    con_id=getattr(request, "con_id"),
+                )
+            ]
         return [
             OHLCVBar(
                 symbol=symbol,
@@ -50,6 +76,7 @@ class FakeRedis:
     def __init__(self) -> None:
         self.latest_call: tuple[AssetClass, str, str | None] | None = None
         self.compositions: dict[str, IndexCompositionPayload] = {}
+        self.fx_option_snapshots: dict[tuple[str, str, float, str], FXOptionSnapshot] = {}
 
     async def health_check(self) -> bool:
         return True
@@ -74,6 +101,24 @@ class FakeRedis:
     async def get_index_composition(self, index_symbol: str) -> IndexCompositionPayload | None:
         return self.compositions.get(index_symbol.upper())
 
+    async def set_latest_fx_option_snapshot(self, snapshot: FXOptionSnapshot) -> str:
+        self.fx_option_snapshots[(snapshot.symbol, snapshot.expiry, snapshot.strike, snapshot.right)] = snapshot
+        return "fx-option-key"
+
+    async def get_latest_fx_option_snapshot(
+        self,
+        *,
+        symbol: str,
+        expiry: str,
+        strike: float,
+        right: str,
+        exchange: str = "SMART",
+        local_symbol: str | None = None,
+        con_id: int | None = None,
+    ) -> FXOptionSnapshot | None:
+        normalized_right = "C" if right.upper() in {"C", "CALL"} else "P"
+        return self.fx_option_snapshots.get((symbol.upper(), expiry.upper(), strike, normalized_right))
+
 
 class FakeFeed:
     def __init__(self) -> None:
@@ -81,6 +126,10 @@ class FakeFeed:
         self.qualified_contracts: list[object] = []
         self.historical_news_requests: list[object] = []
         self.article_requests: list[object] = []
+        self.option_analytics_requests: list[object] = []
+        self.historical_tick_requests: list[object] = []
+        self.market_rule_requests: list[int] = []
+        self.fx_option_snapshot_requests: list[tuple[object, ...]] = []
         self.provider_calls = 0
         self.news_providers = [NewsProvider(provider_code="BZ", provider_name="Benzinga")]
 
@@ -111,7 +160,7 @@ class FakeFeed:
 
     async def qualify_contract(self, spec: object) -> object:
         self.qualified_contracts.append(spec)
-        return SimpleNamespace(conId=8314)
+        return SimpleNamespace(conId=8314, localSymbol="CLM6", tradingClass="CL", marketRuleIds="26", minTick=0.01)
 
     async def load_news_providers(self) -> list[NewsProvider]:
         self.provider_calls += 1
@@ -149,6 +198,56 @@ class FakeFeed:
             spot_price=getattr(request, "spot_price") or 100.0,
             maturities=(),
         )
+
+    async def load_option_analytics(self, request: object) -> OptionAnalyticsSnapshot:
+        self.option_analytics_requests.append(request)
+        return OptionAnalyticsSnapshot(contract=request.contract, implied_volatility=0.25, call_open_interest=100)
+
+    async def load_market_rule(self, price_magnitude: int) -> MarketRule:
+        self.market_rule_requests.append(price_magnitude)
+        return MarketRule(price_magnitude=price_magnitude, increments=[PriceIncrement(low_edge=0, increment=0.01)])
+
+    async def load_head_timestamp(self, request: object) -> datetime:
+        return datetime(2020, 1, 1, tzinfo=timezone.utc)
+
+    async def load_trading_schedule(self, request: object, *, ref_date: object, use_rth: bool = True) -> tuple[object, ...]:
+        return (SimpleNamespace(refDate=str(ref_date), startDateTime="20260518 00:00:00", endDateTime="20260518 23:00:00"),)
+
+    async def load_historical_ticks(self, request: object) -> HistoricalTickResponse:
+        self.historical_tick_requests.append(request)
+        return HistoricalTickResponse(symbol=request.symbol, ticks=[], total_count=0, truncated=False)
+
+    async def capture_fx_option_snapshots(
+        self,
+        contracts: object,
+        *,
+        symbols: object,
+        generic_ticks: object,
+        snapshot_wait_seconds: float,
+    ) -> list[FXOptionSnapshot]:
+        self.fx_option_snapshot_requests.append(tuple(contracts))
+        snapshots: list[FXOptionSnapshot] = []
+        for symbol, contract in zip(symbols, contracts, strict=True):
+            snapshots.append(
+                FXOptionSnapshot(
+                    symbol=symbol,
+                    underlying_symbol=contract.underlying_symbol,
+                    expiry=contract.expiry,
+                    strike=contract.strike,
+                    right=contract.right.value,
+                    exchange=contract.exchange,
+                    currency=contract.currency,
+                    multiplier=contract.multiplier,
+                    trading_class=contract.trading_class,
+                    local_symbol=contract.local_symbol,
+                    con_id=contract.con_id,
+                    timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    bid=0.01,
+                    ask=0.012,
+                    implied_volatility=0.10,
+                )
+            )
+        return snapshots
 
     async def load_live_positions(self) -> list[LivePositionDTO]:
         return [
@@ -207,6 +306,24 @@ class FakeFeed:
         return []
 
 
+class FakeQuestDB:
+    def __init__(self) -> None:
+        self.fx_option_snapshots: list[FXOptionSnapshot] = []
+        self.fx_option_queries: list[object] = []
+        self.created_fx_option_table = False
+
+    async def create_fx_option_snapshot_table(self) -> None:
+        self.created_fx_option_table = True
+
+    async def insert_fx_option_snapshots(self, snapshots: list[FXOptionSnapshot]) -> int:
+        self.fx_option_snapshots.extend(snapshots)
+        return len(snapshots)
+
+    async def query_fx_option_snapshots(self, **kwargs: object) -> list[dict[str, object]]:
+        self.fx_option_queries.append(kwargs)
+        return [{"symbol": kwargs["symbol"], "expiry": kwargs.get("expiry")}]
+
+
 class FakeFixedIncomeProvider:
     name = "test_fixed_income_provider"
 
@@ -241,6 +358,7 @@ class FakeState:
         self.loader = FakeLoader()
         self.feed = FakeFeed()
         self.redis = FakeRedis()
+        self.questdb = FakeQuestDB()
         self.market_data_cache = AsyncTTLCache(ttl_seconds=60, max_size=16)
         self.fixed_income_reference_provider = FakeFixedIncomeProvider()
         self.closed = False
@@ -262,12 +380,20 @@ def test_webapp_registers_domain_routers() -> None:
     assert "/api/v1/market-data/ohlcv" in paths
     assert "/api/v1/market-data/ohlcv/equity" in paths
     assert "/api/v1/market-data/ohlcv/futures" in paths
+    assert "/api/v1/market-data/ohlcv/commodities" in paths
+    assert "/api/v1/market-data/ohlcv/commodity-options" in paths
     assert "/api/v1/market-data/ohlcv/fx" in paths
+    assert "/api/v1/market-data/ohlcv/fx-options" in paths
     assert "/api/v1/market-data/ohlcv/bond" in paths
+    assert "/api/v1/market-data/commodities/options/analytics" in paths
+    assert "/api/v1/market-data/commodities/metadata" in paths
+    assert "/api/v1/market-data/commodities/historical-ticks" in paths
+    assert "/api/v1/market-data/commodities/news" in paths
     assert "/api/v1/business/getBondCurve" in paths
     assert "/api/v1/business/getSymbolNews" in paths
     assert "/api/v1/business/getNewsArticle" in paths
     assert "/api/v1/business/getMarketPanel" in paths
+    assert "/api/v1/business/commodities/getFutures" in paths
     assert "/api/v1/business/fixed-income/getBondFutureQuotes" in paths
     assert "/api/v1/business/fixed-income/getCTD" in paths
     assert "/api/v1/business/fixed-income/getFuturesImpliedCurve" in paths
@@ -275,6 +401,9 @@ def test_webapp_registers_domain_routers() -> None:
     assert "/api/v1/business/fixed-income/getCurveComparison" in paths
     assert "/api/v1/reference-data/options/chains" in paths
     assert "/api/v1/market-data/options/skew" in paths
+    assert "/api/v1/snapshot/fx-options/capture" in paths
+    assert "/api/v1/snapshot/fx-options/latest" in paths
+    assert "/api/v1/snapshot/fx-options/query" in paths
     assert "/api/v1/account/positions" in paths
 
 
@@ -310,7 +439,10 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
     equity_examples = paths["/api/v1/market-data/ohlcv/equity"]["post"]["requestBody"]["content"]["application/json"]["examples"]
     futures_examples = paths["/api/v1/market-data/ohlcv/futures"]["post"]["requestBody"]["content"]["application/json"]["examples"]
     fx_examples = paths["/api/v1/market-data/ohlcv/fx"]["post"]["requestBody"]["content"]["application/json"]["examples"]
+    fx_option_examples = paths["/api/v1/market-data/ohlcv/fx-options"]["post"]["requestBody"]["content"]["application/json"]["examples"]
     bond_examples = paths["/api/v1/market-data/ohlcv/bond"]["post"]["requestBody"]["content"]["application/json"]["examples"]
+    commodity_examples = paths["/api/v1/market-data/ohlcv/commodities"]["post"]["requestBody"]["content"]["application/json"]["examples"]
+    commodity_option_examples = paths["/api/v1/market-data/ohlcv/commodity-options"]["post"]["requestBody"]["content"]["application/json"]["examples"]
 
     assert generic_examples["spy_equity_full_request"]["value"]["request"]["asset_class"] == "equity"
     assert equity_examples["minimal_spy"]["value"] == {"symbol": "SPY"}
@@ -326,8 +458,15 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
     assert futures_examples["hstech_hkfe_by_contract_month"]["value"]["currency"] == "HKD"
     assert fx_examples["eurusd_minimal"]["value"] == {"symbol": "EURUSD"}
     assert fx_examples["usdjpy_hourly"]["value"]["currency"] == "JPY"
+    assert fx_option_examples["eurusd_call"]["value"]["symbol"] == "EURUSD"
+    assert fx_option_examples["eurusd_call"]["value"]["right"] == "C"
     assert bond_examples["treasury_by_cusip"]["value"]["sec_id_type"] == "CUSIP"
     assert bond_examples["bond_by_con_id"]["value"]["con_id"] == 123456789
+    assert commodity_examples["cl_crude_nymex"]["value"]["symbol"] == "CL"
+    assert commodity_examples["gc_gold_comex"]["value"]["symbol"] == "GC"
+    assert commodity_examples["ng_by_local_symbol"]["value"]["local_symbol"] == "NGM6"
+    assert commodity_option_examples["cl_fop_call"]["value"]["underlying_symbol"] == "CL"
+    assert commodity_option_examples["cl_fop_call"]["value"]["right"] == "C"
 
     schemas = app.openapi()["components"]["schemas"]
     assert "start_datetime" in schemas["OHLCVRequest"]["properties"]
@@ -338,6 +477,8 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
     assert "is_continuous" in schemas["FutureOHLCVBar"]["properties"]
     assert "base_currency" in schemas["FXOHLCVBar"]["properties"]
     assert "quote_currency" in schemas["FXOHLCVBar"]["properties"]
+    assert "option_sec_type" in schemas["OHLCVRequest"]["properties"]
+    assert "underlying_symbol" in schemas["OptionOHLCVBar"]["properties"]
     futures_response = paths["/api/v1/market-data/ohlcv/futures"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
     assert futures_response["items"]["$ref"] == "#/components/schemas/FutureOHLCVBar"
     fx_response = paths["/api/v1/market-data/ohlcv/fx"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
@@ -797,6 +938,167 @@ def test_asset_specific_ohlcv_wrappers_preset_asset_class_and_contract_fields() 
     assert requests[3].symbol == "91282CJN2"
     assert requests[3].sec_id_type == "CUSIP"
     assert requests[3].sec_id == "91282CJN2"
+
+
+def test_commodity_ohlcv_and_option_wrappers_forward_fop_contract_fields() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        future = client.post(
+            "/api/v1/market-data/ohlcv/commodities",
+            json={"symbol": "CL", "last_trade_date_or_contract_month": "202606", "use_ttl_cache": False},
+        )
+        option = client.post(
+            "/api/v1/market-data/ohlcv/commodity-options",
+            json={
+                "underlying_symbol": "CL",
+                "expiry": "20260617",
+                "strike": 80,
+                "right": "call",
+                "multiplier": "1000",
+                "use_ttl_cache": False,
+            },
+        )
+        analytics = client.post(
+            "/api/v1/market-data/commodities/options/analytics",
+            json={
+                "contract": {
+                    "underlying_symbol": "CL",
+                    "expiry": "20260617",
+                    "strike": 80,
+                    "right": "C",
+                    "multiplier": "1000",
+                },
+                "use_ttl_cache": False,
+            },
+        )
+
+    assert future.status_code == 200
+    assert option.status_code == 200
+    assert analytics.status_code == 200
+    future_request = state.loader.loaded_requests[0]
+    option_request = state.loader.loaded_requests[1]
+    assert future_request.asset_class is AssetClass.FUTURE
+    assert future_request.symbol == "CL"
+    assert future_request.exchange == "NYMEX"
+    assert future_request.currency == "USD"
+    assert future_request.use_rth is False
+    assert option_request.asset_class is AssetClass.OPTION
+    assert option_request.option_sec_type == "FOP"
+    assert option_request.underlying_symbol == "CL"
+    assert option_request.right == "C"
+    assert option.json()[0]["underlying_symbol"] == "CL"
+    analytics_request = state.feed.option_analytics_requests[0]
+    assert analytics_request.contract.sec_type == "FOP"
+    assert analytics_request.contract.underlying_symbol == "CL"
+
+
+def test_fx_option_ohlcv_wrapper_and_snapshot_collection() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        ohlcv = client.post(
+            "/api/v1/market-data/ohlcv/fx-options",
+            json={
+                "symbol": "EURUSD",
+                "expiry": "20260619",
+                "strike": 1.10,
+                "right": "call",
+                "use_ttl_cache": False,
+            },
+        )
+        capture = client.post(
+            "/api/v1/snapshot/fx-options/capture",
+            json={
+                "contracts": [
+                    {
+                        "symbol": "EURUSD",
+                        "expiry": "20260619",
+                        "strike": 1.10,
+                        "right": "C",
+                    }
+                ],
+                "snapshot_wait_seconds": 0.01,
+                "persist": True,
+                "cache_latest": True,
+            },
+        )
+        latest = client.get(
+            "/api/v1/snapshot/fx-options/latest",
+            params={"symbol": "EURUSD", "expiry": "20260619", "strike": 1.10, "right": "C"},
+        )
+        query = client.post("/api/v1/snapshot/fx-options/query", json={"symbol": "EURUSD", "expiry": "20260619"})
+
+    assert ohlcv.status_code == 200
+    fx_option_request = state.loader.loaded_requests[-1]
+    assert fx_option_request.asset_class is AssetClass.OPTION
+    assert fx_option_request.option_sec_type == "OPT"
+    assert fx_option_request.underlying_symbol == "EUR"
+    assert fx_option_request.currency == "USD"
+    assert fx_option_request.right == "C"
+    assert capture.status_code == 200
+    assert capture.json()["captured"] == 1
+    assert state.feed.fx_option_snapshot_requests[0][0].underlying_symbol == "EUR"
+    assert state.questdb.created_fx_option_table is True
+    assert len(state.questdb.fx_option_snapshots) == 1
+    assert latest.status_code == 200
+    assert latest.json()["symbol"] == "EURUSD"
+    assert query.status_code == 200
+    assert state.questdb.fx_option_queries[0]["symbol"] == "EURUSD"
+
+
+def test_commodity_metadata_ticks_news_and_business_front_forward_contracts() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        metadata = client.post(
+            "/api/v1/market-data/commodities/metadata",
+            json={
+                "symbol": "CL",
+                "last_trade_date_or_contract_month": "202606",
+                "include_trading_schedule": True,
+                "use_ttl_cache": False,
+            },
+        )
+        ticks = client.post(
+            "/api/v1/market-data/commodities/historical-ticks",
+            json={
+                "symbol": "GC",
+                "last_trade_date_or_contract_month": "202606",
+                "start_date": "2026-05-18T00:00:00Z",
+                "end_date": "2026-05-18T01:00:00Z",
+            },
+        )
+        news = client.post(
+            "/api/v1/market-data/commodities/news",
+            json={
+                "symbol": "CL",
+                "last_trade_date_or_contract_month": "202606",
+                "provider_codes": ["BZ"],
+                "use_ttl_cache": False,
+            },
+        )
+        business = client.post(
+            "/api/v1/business/commodities/getFutures",
+            json={"symbol": "GC", "as_of_date": "2026-05-18", "forward_count": 1, "use_ttl_cache": False},
+        )
+
+    assert metadata.status_code == 200
+    assert metadata.json()["con_id"] == 8314
+    assert metadata.json()["market_rule_ids"] == [26]
+    assert metadata.json()["market_rules"][0]["increments"][0]["increment"] == 0.01
+    assert ticks.status_code == 200
+    assert state.feed.historical_tick_requests[0].symbol == "GC"
+    assert state.feed.historical_tick_requests[0].exchange == "COMEX"
+    assert news.status_code == 200
+    assert news.json()["provider_codes"] == ["BZ"]
+    assert business.status_code == 200
+    contracts = business.json()["contracts"]
+    assert [item["role"] for item in contracts] == ["front", "forward_1"]
+    assert [item["contract_month"] for item in contracts] == ["202606", "202608"]
 
 
 def test_asset_specific_ohlcv_wrapper_supports_start_and_end_datetime_range() -> None:

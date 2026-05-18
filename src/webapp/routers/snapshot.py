@@ -7,17 +7,21 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Annotated
 
 from src.config import config_constant as constants
 from src.feeds.contracts import ContractSpec
 from src.feeds.exchange_resolver import resolve_equity
+from src.feeds.options import DEFAULT_OPTION_ANALYTICS_GENERIC_TICKS, OptionContractSpec, OptionRight
 from src.feeds.snapshotter import (
     EquitySnapshot,
+    FXOptionSnapshot,
+    FXOptionSnapshotQuery,
     SnapshotQuery,
     SnapshotResult,
     SnapshotWatchlist,
+    fx_pair_parts,
     ticker_to_snapshot,
 )
 from src.webapp.cache import stable_cache_key
@@ -68,6 +72,77 @@ class WatchlistCaptureRequest(BaseModel):
     cache_latest: bool = True
 
 
+class FXOptionContractRequest(BaseModel):
+    """Pair-style FX option contract for snapshot capture."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    symbol: str = Field(min_length=6, examples=["EURUSD"])
+    expiry: str = Field(min_length=6, examples=["20260619"])
+    strike: float = Field(gt=0, examples=[1.10])
+    right: str = Field(min_length=1, examples=["C"])
+    exchange: str = Field(default="SMART", min_length=1)
+    currency: str | None = Field(default=None, min_length=1)
+    multiplier: str = Field(default="100", min_length=1)
+    trading_class: str | None = None
+    local_symbol: str | None = None
+    con_id: int | None = Field(default=None, gt=0)
+
+    @classmethod
+    def _normalize_right_value(cls, value: object) -> str:
+        normalized = str(value).strip().upper()
+        if normalized in {"C", "CALL"}:
+            return "C"
+        if normalized in {"P", "PUT"}:
+            return "P"
+        raise ValueError("right must be C/CALL or P/PUT")
+
+    @field_validator("right", mode="before")
+    @classmethod
+    def normalize_right(cls, value: object) -> str:
+        return cls._normalize_right_value(value)
+
+    @property
+    def pair_parts(self) -> tuple[str, str, str]:
+        return fx_pair_parts(self.symbol, self.currency)
+
+    def to_option_contract_spec(self) -> OptionContractSpec:
+        _pair, base, quote = self.pair_parts
+        return OptionContractSpec(
+            sec_type="OPT",
+            underlying_symbol=base,
+            expiry=self.expiry,
+            strike=self.strike,
+            right=OptionRight(self._normalize_right_value(self.right)),
+            exchange=self.exchange,
+            currency=quote,
+            multiplier=self.multiplier,
+            trading_class=self.trading_class,
+            local_symbol=self.local_symbol,
+            con_id=self.con_id,
+        )
+
+
+class FXOptionCaptureRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contracts: list[FXOptionContractRequest] = Field(min_length=1)
+    snapshot_wait_seconds: float = Field(default=2.0, gt=0, le=30)
+    generic_ticks: tuple[str, ...] = DEFAULT_OPTION_ANALYTICS_GENERIC_TICKS
+    persist: bool = True
+    cache_latest: bool = True
+
+
+class FXOptionCaptureResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    requested: int
+    captured: int
+    persisted: int = 0
+    cached: int = 0
+    snapshots: list[FXOptionSnapshot]
+
+
 CAPTURE_SNAPSHOTS_EXAMPLES = {
     "tech_tickers": {
         "summary": "Snapshot major tech stocks",
@@ -100,6 +175,28 @@ WATCHLIST_CREATE_EXAMPLES = {
             "snapshot_interval_seconds": 60,
         },
     },
+}
+
+FX_OPTION_CAPTURE_EXAMPLES = {
+    "eurusd_call": {
+        "summary": "Capture EURUSD FX option snapshot",
+        "description": "Captures price, volatility, Greeks, volume, and OI fields with a short-lived IBKR market-data subscription.",
+        "value": {
+            "contracts": [
+                {
+                    "symbol": "EURUSD",
+                    "expiry": "20260619",
+                    "strike": 1.10,
+                    "right": "C",
+                    "exchange": "SMART",
+                    "multiplier": "100",
+                }
+            ],
+            "snapshot_wait_seconds": 2.0,
+            "persist": True,
+            "cache_latest": True,
+        },
+    }
 }
 
 
@@ -180,6 +277,103 @@ async def capture_snapshots(
         failed_symbols=tuple(failed),
         duration_seconds=round(duration, 3),
         snapshots=snapshots,
+    )
+
+
+@router.post(
+    "/fx-options/capture",
+    response_model=FXOptionCaptureResult,
+    summary="Capture FX option snapshots",
+    description=(
+        "Captures point-in-time FX option market data and analytics using short-lived IBKR "
+        "market-data subscriptions. Live Greeks require IBKR market-data subscriptions for "
+        "both the option and the underlying."
+    ),
+)
+async def capture_fx_option_snapshots(
+    payload: Annotated[FXOptionCaptureRequest, Body(openapi_examples=FX_OPTION_CAPTURE_EXAMPLES)],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> FXOptionCaptureResult:
+    symbols: list[str] = []
+    contracts: list[OptionContractSpec] = []
+    for item in payload.contracts:
+        pair, _base, _quote = item.pair_parts
+        symbols.append(pair)
+        contracts.append(item.to_option_contract_spec())
+
+    snapshots = await state.feed.capture_fx_option_snapshots(
+        contracts,
+        symbols=symbols,
+        generic_ticks=tuple(payload.generic_ticks),
+        snapshot_wait_seconds=payload.snapshot_wait_seconds,
+    )
+
+    persisted = 0
+    if payload.persist and snapshots and state.questdb is not None:
+        if hasattr(state.questdb, "create_fx_option_snapshot_table"):
+            await state.questdb.create_fx_option_snapshot_table()
+        persisted = await state.questdb.insert_fx_option_snapshots(snapshots)
+
+    cached = 0
+    if payload.cache_latest and snapshots and state.redis is not None:
+        for snapshot in snapshots:
+            await state.redis.set_latest_fx_option_snapshot(snapshot)
+            cached += 1
+
+    return FXOptionCaptureResult(
+        requested=len(payload.contracts),
+        captured=len(snapshots),
+        persisted=persisted,
+        cached=cached,
+        snapshots=snapshots,
+    )
+
+
+@router.get(
+    "/fx-options/latest",
+    response_model=FXOptionSnapshot | None,
+    summary="Get latest cached FX option snapshot",
+)
+async def get_latest_fx_option_snapshot(
+    symbol: str = Query(min_length=6, examples=["EURUSD"]),
+    expiry: str = Query(min_length=6, examples=["20260619"]),
+    strike: float = Query(gt=0, examples=[1.10]),
+    right: str = Query(min_length=1, examples=["C"]),
+    exchange: str = Query(default="SMART", min_length=1),
+    local_symbol: str | None = Query(default=None),
+    con_id: int | None = Query(default=None, gt=0),
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> FXOptionSnapshot | None:
+    return await state.redis.get_latest_fx_option_snapshot(
+        symbol=symbol,
+        expiry=expiry,
+        strike=strike,
+        right=right,
+        exchange=exchange,
+        local_symbol=local_symbol,
+        con_id=con_id,
+    )
+
+
+@router.post(
+    "/fx-options/query",
+    response_model=list[dict[str, Any]],
+    summary="Query historical FX option snapshots",
+)
+async def query_fx_option_snapshots(
+    query: FXOptionSnapshotQuery,
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> list[dict[str, Any]]:
+    if state.questdb is None:
+        raise HTTPException(status_code=503, detail="QuestDB not configured")
+    return await state.questdb.query_fx_option_snapshots(
+        symbol=query.symbol,
+        expiry=query.expiry,
+        strike=query.strike,
+        right=query.right,
+        start=query.start,
+        end=query.end,
+        limit=query.limit,
     )
 
 

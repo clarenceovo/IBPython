@@ -55,6 +55,7 @@ def _asset_class_for_sec_type(sec_type: str) -> AssetClass:
     mapping = {
         "STK": AssetClass.EQUITY,
         "OPT": AssetClass.OPTION,
+        "FOP": AssetClass.OPTION,
         "FUT": AssetClass.FUTURE,
         "CASH": AssetClass.FX,
         "BOND": AssetClass.BOND,

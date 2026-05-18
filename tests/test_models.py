@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from src.feeds.ibkr_feed import normalize_ibkr_bars
 from src.feeds.models import AssetClass, BaseOHLCVBar, FXOHLCVBar, FutureOHLCVBar, OHLCVBar, OHLCVRequest, OptionOHLCVBar
+from src.feeds.snapshotter import fx_pair_parts
 
 
 class RawBar:
@@ -217,6 +218,59 @@ def test_ibkr_future_bar_normalization_returns_future_ohlcv_dto() -> None:
     assert bars[0].is_continuous is False
 
 
+def test_ibkr_option_bar_normalization_returns_option_ohlcv_dto_for_fop() -> None:
+    request = OHLCVRequest(
+        symbol="CL 20260617C80",
+        asset_class="option",
+        exchange="NYMEX",
+        currency="USD",
+        option_sec_type="FOP",
+        underlying_symbol="CL",
+        expiry="20260617",
+        strike=80,
+        right="call",
+        multiplier="1000",
+        bar_size="1 day",
+    )
+
+    bars = normalize_ibkr_bars([RawBar()], request)
+
+    assert isinstance(bars[0], OptionOHLCVBar)
+    assert bars[0].underlying_symbol == "CL"
+    assert bars[0].expiry == "20260617"
+    assert bars[0].right == "C"
+    assert bars[0].contract_month == "202606"
+
+
+def test_ibkr_option_bar_normalization_returns_option_ohlcv_dto_for_fx_option() -> None:
+    request = OHLCVRequest(
+        symbol="EURUSD 20260619C1.1",
+        asset_class="option",
+        exchange="SMART",
+        currency="USD",
+        option_sec_type="OPT",
+        underlying_symbol="EUR",
+        expiry="20260619",
+        strike=1.10,
+        right="call",
+        multiplier="100",
+        bar_size="1 day",
+        metadata={"pair": "EURUSD"},
+    )
+
+    bars = normalize_ibkr_bars([RawBar()], request)
+
+    assert isinstance(bars[0], OptionOHLCVBar)
+    assert bars[0].underlying_symbol == "EUR"
+    assert bars[0].currency == "USD"
+    assert bars[0].right == "C"
+
+
+def test_fx_pair_parts_splits_pair_and_allows_quote_override() -> None:
+    assert fx_pair_parts("eurusd") == ("EURUSD", "EUR", "USD")
+    assert fx_pair_parts("EUR/USD", "usd") == ("EURUSD", "EUR", "USD")
+
+
 def test_ibkr_fx_bar_normalization_returns_fx_ohlcv_dto() -> None:
     request = OHLCVRequest(
         symbol="EURUSD",
@@ -276,3 +330,8 @@ def test_ohlcv_request_accepts_contract_disambiguators() -> None:
 def test_future_ohlcv_request_requires_contract_identifier() -> None:
     with pytest.raises(ValidationError):
         OHLCVRequest(symbol="ES", asset_class="future", exchange="CME", currency="USD")
+
+
+def test_option_ohlcv_request_requires_option_identity() -> None:
+    with pytest.raises(ValidationError, match="option OHLCV requests require"):
+        OHLCVRequest(symbol="CL", asset_class="option", exchange="NYMEX", currency="USD", option_sec_type="FOP")

@@ -91,6 +91,80 @@ class MarketPanelRequest(BusinessDateRangeControls):
     max_concurrent_requests: int = Field(default=4, ge=1, le=20)
 
 
+_COMMODITY_FUTURES_PRESETS: dict[str, tuple[str, str]] = {
+    "CL": ("NYMEX", "USD"),
+    "NG": ("NYMEX", "USD"),
+    "GC": ("COMEX", "USD"),
+    "SI": ("COMEX", "USD"),
+    "HG": ("COMEX", "USD"),
+    "ZC": ("CBOT", "USD"),
+    "ZS": ("CBOT", "USD"),
+    "ZW": ("CBOT", "USD"),
+    "ZL": ("CBOT", "USD"),
+    "ZM": ("CBOT", "USD"),
+}
+
+_COMMODITY_FUTURES_MONTHS: dict[str, tuple[int, ...]] = {
+    "CL": tuple(range(1, 13)),
+    "NG": tuple(range(1, 13)),
+    "GC": (2, 4, 6, 8, 10, 12),
+    "SI": (3, 5, 7, 9, 12),
+    "HG": (3, 5, 7, 9, 12),
+    "ZC": (3, 5, 7, 9, 12),
+    "ZS": (3, 5, 7, 8, 9, 11),
+    "ZW": (3, 5, 7, 9, 12),
+    "ZL": (1, 3, 5, 7, 8, 9, 10, 12),
+    "ZM": (1, 3, 5, 7, 8, 9, 10, 12),
+}
+
+
+class CommodityFuturesRequest(BusinessDateRangeControls):
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    symbol: str = Field(min_length=1, examples=["CL", "GC", "NG"])
+    as_of_date: date = Field(default_factory=date.today)
+    forward_count: int = Field(default=1, ge=0, le=12)
+    exchange: str | None = Field(default=None, min_length=1)
+    currency: str | None = Field(default=None, min_length=1)
+    multiplier: str | None = Field(default=None, min_length=1)
+    duration: str = Field(default="1 D", min_length=1)
+    bar_size: str = Field(default="1 min", min_length=1)
+    what_to_show: str = Field(default="TRADES", min_length=1)
+    use_rth: bool = False
+    cache_latest: bool = False
+    max_concurrent_requests: int = Field(default=4, ge=1, le=20)
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value: object) -> str:
+        if value is None:
+            raise ValueError("symbol is required")
+        normalized = str(value).strip().upper()
+        if not normalized:
+            raise ValueError("symbol cannot be empty")
+        return normalized
+
+
+class CommodityFuturePoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: str
+    symbol: str
+    contract_month: str
+    exchange: str
+    currency: str
+    bar: OHLCVBar | None = None
+
+
+class CommodityFuturesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    as_of_date: date
+    contracts: tuple[CommodityFuturePoint, ...]
+    source: str = "ibkr"
+
+
 class UniverseBarsRequest(BusinessDateRangeControls):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
@@ -385,6 +459,73 @@ async def get_universe_bars(
 
 
 @router.post(
+    "/commodities/getFutures",
+    response_model=CommodityFuturesResponse,
+    summary="Load front and forward commodity futures",
+)
+async def get_commodity_futures(
+    payload: Annotated[
+        CommodityFuturesRequest,
+        Body(openapi_examples=markdown_openapi_examples("business.commodities.getFutures")),
+    ],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> CommodityFuturesResponse:
+    async def load() -> CommodityFuturesResponse:
+        root = payload.symbol
+        exchange, currency = _resolve_commodity_market(root, payload.exchange, payload.currency)
+        contract_months = _commodity_contract_months(root, payload.as_of_date, payload.forward_count + 1)
+        semaphore = asyncio.Semaphore(payload.max_concurrent_requests)
+
+        async def load_contract(index: int, contract_month: str) -> CommodityFuturePoint:
+            role = "front" if index == 0 else f"forward_{index}"
+            request = OHLCVRequest(
+                symbol=root,
+                asset_class=AssetClass.FUTURE,
+                exchange=exchange,
+                currency=currency,
+                last_trade_date_or_contract_month=contract_month,
+                multiplier=payload.multiplier,
+                duration=payload.duration,
+                bar_size=payload.bar_size,
+                start_datetime=payload.start_datetime,
+                end_datetime=payload.end_datetime,
+                what_to_show=payload.what_to_show,
+                use_rth=payload.use_rth,
+                metadata={"market": "commodity", "role": role},
+            )
+            async with semaphore:
+                if payload.start_datetime is not None:
+                    bars = await state.feed.load_historical_ohlcv_range(
+                        request,
+                        start_datetime=payload.start_datetime,
+                        end_datetime=payload.end_datetime,
+                    )
+                    if payload.cache_latest and bars:
+                        await state.loader.cache_latest_bar(bars[-1])
+                else:
+                    bars = await state.loader.load(request, persist=False, cache_latest=payload.cache_latest)
+            return CommodityFuturePoint(
+                role=role,
+                symbol=root,
+                contract_month=contract_month,
+                exchange=exchange,
+                currency=currency,
+                bar=bars[-1] if bars else None,
+            )
+
+        points = await asyncio.gather(*(load_contract(index, month) for index, month in enumerate(contract_months)))
+        return CommodityFuturesResponse(symbol=root, as_of_date=payload.as_of_date, contracts=tuple(points))
+
+    if payload.use_ttl_cache:
+        return await state.market_data_cache.get_or_set(
+            stable_cache_key("business_commodity_futures", payload),
+            load,
+            ttl_seconds=payload.cache_ttl_seconds,
+        )
+    return await load()
+
+
+@router.post(
     "/getReturns",
     response_model=ReturnsResponse,
     summary="Load bars and compute close-to-close returns",
@@ -557,6 +698,29 @@ async def _load_many_ohlcv(
 
     batches = await asyncio.gather(*(load_one(request) for request in requests))
     return sorted([bar for batch in batches for bar in batch], key=lambda bar: (bar.symbol, bar.timestamp))
+
+
+def _resolve_commodity_market(symbol: str, exchange: str | None, currency: str | None) -> tuple[str, str]:
+    preset_exchange, preset_currency = _COMMODITY_FUTURES_PRESETS.get(symbol.strip().upper(), ("NYMEX", "USD"))
+    return exchange or preset_exchange, currency or preset_currency
+
+
+def _commodity_contract_months(symbol: str, as_of_date: date, count: int) -> tuple[str, ...]:
+    root = symbol.strip().upper()
+    listed_months = _COMMODITY_FUTURES_MONTHS.get(root, tuple(range(1, 13)))
+    months: list[str] = []
+    year = as_of_date.year
+    month = as_of_date.month
+    while len(months) < count:
+        for listed_month in listed_months:
+            if year == as_of_date.year and listed_month < month:
+                continue
+            months.append(f"{year}{listed_month:02d}")
+            if len(months) == count:
+                break
+        year += 1
+        month = 1
+    return tuple(months)
 
 
 async def _resolve_universe_symbols(payload: UniverseBarsRequest, state: IBKRRestAppState) -> list[str]:

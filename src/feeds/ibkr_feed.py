@@ -68,8 +68,10 @@ from src.feeds.news import (
     normalize_news_providers,
 )
 from src.feeds.options import (
+    DEFAULT_OPTION_ANALYTICS_GENERIC_TICKS,
     OptionAnalyticsRequest,
     OptionAnalyticsSnapshot,
+    OptionContractSpec,
     OptionSkewSurfaceRequest,
     OptionSkewSurfaceResponse,
     build_ibkr_option_contract,
@@ -80,6 +82,7 @@ from src.feeds.options import (
     select_skew_expirations,
     select_skew_strikes,
 )
+from src.feeds.snapshotter import FXOptionSnapshot
 
 # Sub-client imports
 from src.feeds.ibkr_connection import (
@@ -427,6 +430,21 @@ class IBKRFeedClient:
                 self._ib.cancelMktData(contract)
             except Exception:
                 logger.debug("Failed to cancel market data subscription for %s", request.contract.underlying_symbol, exc_info=True)
+
+    async def capture_fx_option_snapshots(
+        self,
+        contracts: Sequence[OptionContractSpec],
+        *,
+        symbols: Sequence[str],
+        generic_ticks: tuple[str, ...] = DEFAULT_OPTION_ANALYTICS_GENERIC_TICKS,
+        snapshot_wait_seconds: float = 2.0,
+    ) -> list[FXOptionSnapshot]:
+        return await self._options.capture_fx_option_snapshots(
+            contracts,
+            symbols=symbols,
+            generic_ticks=generic_ticks,
+            snapshot_wait_seconds=snapshot_wait_seconds,
+        )
 
     async def load_option_skew_surface(self, request: OptionSkewSurfaceRequest) -> OptionSkewSurfaceResponse:
         return await self._options.load_option_skew_surface(request)

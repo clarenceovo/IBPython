@@ -20,10 +20,54 @@ class ContractSpec(BaseModel):
     last_trade_date_or_contract_month: str | None = None
     multiplier: str | None = None
     local_symbol: str | None = None
+    option_sec_type: str | None = Field(
+        default=None,
+        description="IBKR option secType. OPT for stock/index options; FOP for futures options.",
+    )
+    underlying_symbol: str | None = None
+    expiry: str | None = None
+    strike: float | None = Field(default=None, gt=0)
+    right: str | None = None
+    trading_class: str | None = None
     sec_id_type: str | None = None
     sec_id: str | None = None
     con_id: int | None = Field(default=None, gt=0)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator(
+        "option_sec_type",
+        "underlying_symbol",
+        "expiry",
+        "right",
+        "trading_class",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_text(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip().upper()
+        return normalized or None
+
+    @field_validator("right")
+    @classmethod
+    def normalize_option_right(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value in {"C", "CALL"}:
+            return "C"
+        if value in {"P", "PUT"}:
+            return "P"
+        raise ValueError("right must be C/CALL or P/PUT")
+
+    @field_validator("option_sec_type")
+    @classmethod
+    def validate_option_sec_type(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value not in {"OPT", "FOP"}:
+            raise ValueError("option_sec_type must be OPT or FOP")
+        return value
 
     @model_validator(mode="after")
     def validate_asset_specific_fields(self) -> "ContractSpec":
@@ -33,6 +77,17 @@ class ContractSpec(BaseModel):
             raise ValueError("futures require last_trade_date_or_contract_month, local_symbol, or con_id")
         if self.asset_class is AssetClass.FX and len(self.symbol) not in {3, 6}:
             raise ValueError("fx symbols must be a base currency or a six-character pair")
+        if self.asset_class is AssetClass.OPTION:
+            if self.option_sec_type is None:
+                object.__setattr__(self, "option_sec_type", "OPT")
+            required = (
+                self.underlying_symbol,
+                self.expiry or self.last_trade_date_or_contract_month,
+                self.strike,
+                self.right,
+            )
+            if any(value is None for value in required):
+                raise ValueError("options require underlying_symbol, expiry, strike, and right")
         return self
 
     @classmethod
@@ -46,6 +101,12 @@ class ContractSpec(BaseModel):
             last_trade_date_or_contract_month=request.last_trade_date_or_contract_month,
             multiplier=request.multiplier,
             local_symbol=request.local_symbol,
+            option_sec_type=request.option_sec_type,
+            underlying_symbol=request.underlying_symbol,
+            expiry=request.expiry,
+            strike=request.strike,
+            right=request.right,
+            trading_class=request.trading_class,
             sec_id_type=request.sec_id_type,
             sec_id=request.sec_id,
             con_id=request.con_id,
@@ -193,6 +254,26 @@ def ibkr_contract_kwargs(spec: ContractSpec) -> dict[str, Any]:
             "exchange": exchange if exchange != "SMART" else "PAXOS",
             "currency": currency,
         }
+    elif spec.asset_class is AssetClass.OPTION:
+        kwargs = {
+            "secType": spec.option_sec_type or "OPT",
+            "symbol": spec.underlying_symbol or symbol,
+            "exchange": exchange,
+            "currency": currency,
+        }
+        expiry = spec.expiry or spec.last_trade_date_or_contract_month
+        if expiry:
+            kwargs["lastTradeDateOrContractMonth"] = expiry
+        if spec.strike is not None:
+            kwargs["strike"] = spec.strike
+        if spec.right:
+            kwargs["right"] = spec.right
+        if spec.multiplier:
+            kwargs["multiplier"] = spec.multiplier
+        if spec.local_symbol:
+            kwargs["localSymbol"] = spec.local_symbol
+        if spec.trading_class:
+            kwargs["tradingClass"] = spec.trading_class
     else:
         raise ValueError(f"unsupported asset class: {spec.asset_class}")
 
