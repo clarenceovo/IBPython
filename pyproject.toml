@@ -13,6 +13,7 @@ dependencies = [
   "python-dotenv>=1.0",
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",
+  "mcp[cli]>=1.0",
 ]
 
 [tool.pytest.ini_options]
