@@ -84,7 +84,9 @@ Load the latest IBKR OHLCV close for the default US Treasury futures strip.
 <!-- openapi-example: business.fixedIncome.getCTD zn_ctd -->
 ### 10Y Treasury note CTD
 Calculate CTD analytics for one bond future. This requires a configured
-fixed-income reference provider.
+fixed-income reference provider. For local demos, set
+`FIXED_INCOME_REFERENCE_PROVIDER=src.feeds.fixed_income_reference:provider`;
+replace it with an exchange/vendor provider for production use.
 
 ```json
 {
@@ -102,7 +104,8 @@ fixed-income reference provider.
 <!-- openapi-example: business.fixedIncome.getFuturesImpliedCurve ust_implied_curve -->
 ### UST futures-implied curve
 Build a futures-implied curve from CTD selections across the default Treasury
-future strip.
+future strip. Requires `FIXED_INCOME_REFERENCE_PROVIDER`; the bundled
+`src.feeds.fixed_income_reference:provider` is indicative demo data only.
 
 ```json
 {
@@ -129,7 +132,8 @@ the existing indicative static standard-tenor data.
 <!-- openapi-example: business.fixedIncome.getCurveComparison ust_curve_comparison -->
 ### Cash versus futures-implied curve
 Compare the indicative cash curve against a provider-backed futures-implied CTD
-curve.
+curve. Requires `FIXED_INCOME_REFERENCE_PROVIDER`; for local demos use
+`src.feeds.fixed_income_reference:provider`.
 
 ```json
 {

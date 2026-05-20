@@ -6,6 +6,7 @@ from pydantic import ValidationError
 
 from src.feeds.news import (
     HistoricalNewsRequest,
+    NewsProvider,
     NewsArticleRequest,
     NewsTick,
     format_historical_news_datetime,
@@ -40,11 +41,18 @@ def test_format_historical_news_datetime_uses_utc_wire_format() -> None:
 
 def test_normalize_news_providers() -> None:
     providers = normalize_news_providers(
-        [SimpleNamespace(providerCode="bz", providerName="Benzinga Pro")]
+        [
+            SimpleNamespace(providerCode="bz", providerName="Benzinga Pro"),
+            SimpleNamespace(code="fly", name="Fly on the Wall"),
+            NewsProvider(provider_code="dj", provider_name="Dow Jones"),
+        ]
     )
 
     assert providers[0].provider_code == "BZ"
     assert providers[0].provider_name == "Benzinga Pro"
+    assert providers[1].provider_code == "FLY"
+    assert providers[1].provider_name == "Fly on the Wall"
+    assert providers[2].provider_code == "DJ"
 
 
 def test_normalize_historical_news() -> None:

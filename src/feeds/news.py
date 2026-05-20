@@ -208,13 +208,38 @@ def format_historical_news_datetime(value: datetime | None) -> str:
 
 
 def normalize_news_providers(providers: list[Any]) -> list[NewsProvider]:
-    return [
-        NewsProvider(
-            provider_code=getattr(provider, "providerCode"),
-            provider_name=getattr(provider, "providerName", ""),
+    normalized: list[NewsProvider] = []
+    for provider in providers:
+        if isinstance(provider, NewsProvider):
+            normalized.append(provider)
+            continue
+        provider_code = _news_provider_value(provider, "providerCode", "provider_code", "code")
+        if provider_code is None:
+            continue
+        normalized.append(
+            NewsProvider(
+                provider_code=provider_code,
+                provider_name=_news_provider_value(provider, "providerName", "provider_name", "name") or "",
+            )
         )
-        for provider in providers
-    ]
+    return normalized
+
+
+def _news_provider_value(provider: Any, *names: str) -> Any:
+    if isinstance(provider, dict):
+        for name in names:
+            if name in provider:
+                return provider[name]
+        return None
+    for name in names:
+        if hasattr(provider, name):
+            return getattr(provider, name)
+    if isinstance(provider, (tuple, list)) and provider:
+        if any(name in {"providerCode", "provider_code", "code"} for name in names):
+            return provider[0]
+        if len(provider) > 1:
+            return provider[1]
+    return None
 
 
 def normalize_historical_news(items: list[Any]) -> list[HistoricalNewsHeadline]:

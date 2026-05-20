@@ -7,6 +7,7 @@ import pytest
 from src.feeds.bonds import BondInstrument, CTDFutureDefinition, SovereignBondMarket
 from src.feeds.fixed_income import (
     BondFutureContractSpec,
+    DeliverableBasketRequest,
     DeliverableBondInput,
     build_futures_implied_curve,
     calculate_ctd_analytics,
@@ -15,6 +16,7 @@ from src.feeds.fixed_income import (
     futures_implied_clean_price,
     yield_to_maturity_from_clean_price,
 )
+from src.feeds.fixed_income_reference import IndicativeFixedIncomeReferenceProvider
 
 
 def test_default_bond_future_specs_map_ust_to_ibkr_futures_contract_fields() -> None:
@@ -129,3 +131,22 @@ def test_build_futures_implied_curve_uses_selected_ctd_yields() -> None:
 def test_bond_future_contract_requires_ibkr_identifier() -> None:
     with pytest.raises(ValueError, match="contract_month, local_symbol, or con_id"):
         BondFutureContractSpec(market="UST", futures_symbol="ZN", exchange="CBOT", currency="USD")
+
+
+@pytest.mark.asyncio
+async def test_indicative_fixed_income_reference_provider_returns_matching_standard_tenor() -> None:
+    provider = IndicativeFixedIncomeReferenceProvider()
+
+    basket = await provider.get_deliverable_basket(
+        DeliverableBasketRequest(
+            market="UST",
+            futures_symbol="ZN",
+            contract_month="202606",
+            valuation_date=date(2026, 5, 16),
+        )
+    )
+
+    assert len(basket) == 1
+    assert basket[0].bond.symbol == "US_TREASURY_10Y_CTD"
+    assert basket[0].conversion_factor == 1.0
+    assert basket[0].metadata["ctd_status"] == "indicative_placeholder"

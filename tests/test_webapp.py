@@ -17,6 +17,7 @@ from src.feeds.options import OptionAnalyticsSnapshot, OptionSkewSurfaceResponse
 from src.feeds.snapshotter import FXOptionSnapshot
 from src.feeds.tick_data import HistoricalTickResponse, MarketRule, PriceIncrement
 import src.webapp.app as app_module
+import src.webapp.routers.business as business_router
 from src.webapp.app import create_app
 from src.webapp.cache import AsyncTTLCache
 
@@ -578,6 +579,9 @@ def test_business_swagger_examples_are_loaded_from_markdown() -> None:
         "examples"
     ]
     ctd_examples = paths["/api/v1/business/fixed-income/getCTD"]["post"]["requestBody"]["content"]["application/json"]["examples"]
+    curve_comparison_examples = paths["/api/v1/business/fixed-income/getCurveComparison"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["examples"]
 
     assert symbol_news_examples["tsla_news"]["value"]["symbol"] == "TSLA"
     assert market_panel_examples["us_equity_panel"]["value"]["symbols"] == ["SPY", "QQQ", "TSLA"]
@@ -585,6 +589,8 @@ def test_business_swagger_examples_are_loaded_from_markdown() -> None:
     assert option_skew_examples["tsla_skew"]["value"]["primary_exchange"] == "NASDAQ"
     assert fixed_income_examples["ust_futures_quotes"]["value"]["market"] == "UST"
     assert ctd_examples["zn_ctd"]["value"]["future"]["futures_symbol"] == "ZN"
+    assert "src.feeds.fixed_income_reference:provider" in ctd_examples["zn_ctd"]["description"]
+    assert "FIXED_INCOME_REFERENCE_PROVIDER" in curve_comparison_examples["ust_curve_comparison"]["description"]
 
 
 def test_fixed_income_bond_future_quotes_load_default_ust_contracts() -> None:
@@ -1110,6 +1116,12 @@ def test_commodity_metadata_ticks_news_and_business_front_forward_contracts() ->
     contracts = business.json()["contracts"]
     assert [item["role"] for item in contracts] == ["front", "forward_1"]
     assert [item["contract_month"] for item in contracts] == ["202606", "202608"]
+
+
+def test_crude_oil_contract_months_skip_expired_front_after_last_trade_date() -> None:
+    assert business_router._nymex_crude_oil_last_trade_date("202606") == datetime(2026, 5, 19).date()
+    assert business_router._commodity_contract_months("CL", datetime(2026, 5, 19).date(), 2) == ("202606", "202607")
+    assert business_router._commodity_contract_months("CL", datetime(2026, 5, 20).date(), 2) == ("202607", "202608")
 
 
 def test_asset_specific_ohlcv_wrapper_supports_start_and_end_datetime_range() -> None:

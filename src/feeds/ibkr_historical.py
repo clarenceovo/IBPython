@@ -178,6 +178,18 @@ def _format_ibkr_end_datetime(value: datetime | None) -> str:
     return value.astimezone(timezone.utc).strftime("%Y%m%d %H:%M:%S UTC")
 
 
+def _expired_future_end_datetime(contract: Any, request: OHLCVRequest) -> datetime | None:
+    if request.asset_class is not AssetClass.FUTURE or request.end_datetime is not None:
+        return None
+    last_trade = _contract_text(contract, "lastTradeDateOrContractMonth")
+    if len(last_trade) != 8 or not last_trade.isdigit():
+        return None
+    last_trade_date = datetime.strptime(last_trade, "%Y%m%d").date()
+    if last_trade_date >= date.today():
+        return None
+    return datetime.combine(last_trade_date + timedelta(days=1), time.min, tzinfo=timezone.utc)
+
+
 def _parse_ibkr_timestamp(value: Any) -> datetime:
     if isinstance(value, datetime):
         parsed = value
@@ -480,7 +492,14 @@ class IBKRHistoricalClient:
         logger.info("load_historical_ohlcv: symbol=%s bar_size=%s duration=%s", request.symbol, request.bar_size, request.duration)
         t0 = monotonic_time.monotonic()
         contract = await self.qualify_contract(ContractSpec.from_ohlcv_request(request))
-        end_datetime = _format_ibkr_end_datetime(request.end_datetime)
+        effective_end_datetime = request.end_datetime or _expired_future_end_datetime(contract, request)
+        if effective_end_datetime is not request.end_datetime and effective_end_datetime is not None:
+            logger.info(
+                "load_historical_ohlcv: clipping expired future %s end_datetime to %s",
+                request.symbol,
+                effective_end_datetime.isoformat(),
+            )
+        end_datetime = _format_ibkr_end_datetime(effective_end_datetime)
 
         try:
             await self._connection.pacing_guard.acquire(request)

@@ -98,7 +98,7 @@ Core variables:
 | `MARKET_DATA_DB_BACKEND` | `questdb` | OHLCV persistence backend: `questdb` or `mysql` |
 | `INDEX_SYNC_INTERVAL_SECONDS` | `86400` | Default index reload interval |
 | `INDEX_COMPOSITION_PROVIDER` | empty | External index constituent provider name |
-| `FIXED_INCOME_REFERENCE_PROVIDER` | empty | Optional import path for CTD basket and conversion-factor provider |
+| `FIXED_INCOME_REFERENCE_PROVIDER` | empty | Optional import path for CTD basket and conversion-factor provider. For local demos only, use `src.feeds.fixed_income_reference:provider`. |
 | `IBKR_REST_APP_NAME` | `IBKRRestApp` | FastAPI title |
 | `IBKR_REST_CONNECT_ON_STARTUP` | `false` | Connect transports during API startup |
 | `IBKR_REST_MARKET_DATA_TTL_SECONDS` | `5` | REST market-data TTL cache default |
@@ -533,7 +533,7 @@ POST /api/v1/business/fixed-income/getCashBondCurve
 POST /api/v1/business/fixed-income/getCurveComparison
 ```
 
-`getBondFutureQuotes` uses IBKR historical OHLCV on futures contracts and accepts the business minimum: `market` plus `contract_month` for the default curve futures, or an explicit `futures` list. For IBKR futures qualification the generated contract request uses `symbol`, `exchange`, `currency`, and one of `contract_month`, `local_symbol`, or `con_id`. `getCTD`, `getFuturesImpliedCurve`, and `getCurveComparison` additionally require `FIXED_INCOME_REFERENCE_PROVIDER`, because IBKR does not provide a complete official CTD delivery basket or conversion-factor feed through the standard TWS historical bar API. IBKR currently documents historical/live bar limitations for OSE, so treat JGB futures as entitlement/feed dependent and validate with your gateway before relying on them in production.
+`getBondFutureQuotes` uses IBKR historical OHLCV on futures contracts and accepts the business minimum: `market` plus `contract_month` for the default curve futures, or an explicit `futures` list. For IBKR futures qualification the generated contract request uses `symbol`, `exchange`, `currency`, and one of `contract_month`, `local_symbol`, or `con_id`. `getCTD`, `getFuturesImpliedCurve`, and `getCurveComparison` additionally require `FIXED_INCOME_REFERENCE_PROVIDER`, because IBKR does not provide a complete official CTD delivery basket or conversion-factor feed through the standard TWS historical bar API. To make these routes work in local demos, set `FIXED_INCOME_REFERENCE_PROVIDER=src.feeds.fixed_income_reference:provider`; that built-in provider is indicative only and must not be used for trading, backtesting, or risk. IBKR currently documents historical/live bar limitations for OSE, so treat JGB futures as entitlement/feed dependent and validate with your gateway before relying on them in production.
 
 Commodity business endpoint:
 

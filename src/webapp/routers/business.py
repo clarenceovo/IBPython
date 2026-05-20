@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -115,6 +115,10 @@ _COMMODITY_FUTURES_MONTHS: dict[str, tuple[int, ...]] = {
     "ZW": (3, 5, 7, 9, 12),
     "ZL": (1, 3, 5, 7, 8, 9, 10, 12),
     "ZM": (1, 3, 5, 7, 8, 9, 10, 12),
+}
+
+_COMMODITY_EXPIRY_RULES: dict[str, str] = {
+    "CL": "nymex_crude_oil",
 }
 
 
@@ -710,17 +714,119 @@ def _commodity_contract_months(symbol: str, as_of_date: date, count: int) -> tup
     listed_months = _COMMODITY_FUTURES_MONTHS.get(root, tuple(range(1, 13)))
     months: list[str] = []
     year = as_of_date.year
-    month = as_of_date.month
     while len(months) < count:
         for listed_month in listed_months:
-            if year == as_of_date.year and listed_month < month:
+            contract_month = f"{year}{listed_month:02d}"
+            if not _commodity_contract_available_on(root, contract_month, as_of_date):
                 continue
-            months.append(f"{year}{listed_month:02d}")
+            months.append(contract_month)
             if len(months) == count:
                 break
         year += 1
-        month = 1
     return tuple(months)
+
+
+def _commodity_contract_available_on(symbol: str, contract_month: str, as_of_date: date) -> bool:
+    rule = _COMMODITY_EXPIRY_RULES.get(symbol.strip().upper())
+    if rule == "nymex_crude_oil":
+        expiry = _nymex_crude_oil_last_trade_date(contract_month)
+        return expiry is not None and as_of_date <= expiry
+    return contract_month >= f"{as_of_date.year}{as_of_date.month:02d}"
+
+
+def _nymex_crude_oil_last_trade_date(contract_month: str) -> date | None:
+    try:
+        year = int(contract_month[:4])
+        month = int(contract_month[4:6])
+    except (TypeError, ValueError):
+        return None
+    if month == 1:
+        preceding_month = 12
+        preceding_year = year - 1
+    else:
+        preceding_month = month - 1
+        preceding_year = year
+
+    twenty_fifth = date(preceding_year, preceding_month, 25)
+    reference_day = _previous_nymex_business_day(twenty_fifth) if not _is_nymex_business_day(twenty_fifth) else twenty_fifth
+    return _subtract_nymex_business_days(reference_day, 3)
+
+
+def _subtract_nymex_business_days(value: date, count: int) -> date:
+    current = value
+    remaining = count
+    while remaining > 0:
+        current -= timedelta(days=1)
+        if _is_nymex_business_day(current):
+            remaining -= 1
+    return current
+
+
+def _previous_nymex_business_day(value: date) -> date:
+    current = value
+    while not _is_nymex_business_day(current):
+        current -= timedelta(days=1)
+    return current
+
+
+def _is_nymex_business_day(value: date) -> bool:
+    return value.weekday() < 5 and value not in _us_market_holidays(value.year)
+
+
+def _us_market_holidays(year: int) -> set[date]:
+    return {
+        _observed_fixed_holiday(year, 1, 1),
+        _nth_weekday(year, 1, 0, 3),
+        _nth_weekday(year, 2, 0, 3),
+        _good_friday(year),
+        _last_weekday(year, 5, 0),
+        _observed_fixed_holiday(year, 6, 19),
+        _observed_fixed_holiday(year, 7, 4),
+        _nth_weekday(year, 9, 0, 1),
+        _nth_weekday(year, 11, 3, 4),
+        _observed_fixed_holiday(year, 12, 25),
+    }
+
+
+def _observed_fixed_holiday(year: int, month: int, day: int) -> date:
+    holiday = date(year, month, day)
+    if holiday.weekday() == 5:
+        return holiday - timedelta(days=1)
+    if holiday.weekday() == 6:
+        return holiday + timedelta(days=1)
+    return holiday
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
+    current = date(year, month, 1)
+    offset = (weekday - current.weekday()) % 7
+    return current + timedelta(days=offset + 7 * (n - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    current = date(year + int(month == 12), 1 if month == 12 else month + 1, 1) - timedelta(days=1)
+    while current.weekday() != weekday:
+        current -= timedelta(days=1)
+    return current
+
+
+def _good_friday(year: int) -> date:
+    # Anonymous Gregorian algorithm for Easter Sunday, then step back two days.
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    easter_month = (h + l - 7 * m + 114) // 31
+    easter_day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, easter_month, easter_day) - timedelta(days=2)
 
 
 async def _resolve_universe_symbols(payload: UniverseBarsRequest, state: IBKRRestAppState) -> list[str]:
