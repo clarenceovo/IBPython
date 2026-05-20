@@ -1,0 +1,32 @@
+{
+  "name": "ohlcv_sgx_a50_1m",
+  "job_type": "ohlcv_snapshot",
+  "interval_seconds": 60,
+  "enabled": true,
+  "run_immediately": false,
+  "params": {
+    "start_time": "09:00",
+    "end_time": "16:30",
+    "timezone": "Asia/Singapore",
+    "snap_interval_seconds": 60,
+    "snap_days": ["mon", "tue", "wed", "thu", "fri"],
+    "detect_holiday": true,
+    "capture_rth": true,
+    "defaults": {
+      "asset_class": "future",
+      "exchange": "SGX",
+      "currency": "USD",
+      "bar_size": "1 min",
+      "duration": "1 D",
+      "what_to_show": "TRADES",
+      "persist": true,
+      "cache_latest": true
+    },
+    "symbols": [
+      {
+        "symbol": "XINA",
+        "last_trade_date_or_contract_month": "202606"
+      }
+    ]
+  }
+}

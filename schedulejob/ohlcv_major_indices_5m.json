@@ -64,6 +64,26 @@
         "symbol": "SMI",
         "exchange": "EBS",
         "currency": "CHF"
+      },
+      {
+        "symbol": "TAIEX",
+        "exchange": "TWSE",
+        "currency": "TWD"
+      },
+      {
+        "symbol": "KOSPI200",
+        "exchange": "KSE",
+        "currency": "KRW"
+      },
+      {
+        "symbol": "RUT",
+        "exchange": "ICE",
+        "currency": "USD"
+      },
+      {
+        "symbol": "CAC40",
+        "exchange": "EURONEXT",
+        "currency": "EUR"
       }
     ]
   }

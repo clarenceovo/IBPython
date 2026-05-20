@@ -1,0 +1,36 @@
+{
+  "name": "ohlcv_taifex_taiex_1m",
+  "job_type": "ohlcv_snapshot",
+  "interval_seconds": 60,
+  "enabled": true,
+  "run_immediately": false,
+  "params": {
+    "start_time": "08:45",
+    "end_time": "13:45",
+    "timezone": "Asia/Taipei",
+    "snap_interval_seconds": 60,
+    "snap_days": ["mon", "tue", "wed", "thu", "fri"],
+    "detect_holiday": true,
+    "capture_rth": true,
+    "defaults": {
+      "asset_class": "future",
+      "exchange": "TAIFEX",
+      "currency": "TWD",
+      "bar_size": "1 min",
+      "duration": "1 D",
+      "what_to_show": "TRADES",
+      "persist": true,
+      "cache_latest": true
+    },
+    "symbols": [
+      {
+        "symbol": "TX",
+        "last_trade_date_or_contract_month": "202606"
+      },
+      {
+        "symbol": "MTX",
+        "last_trade_date_or_contract_month": "202606"
+      }
+    ]
+  }
+}

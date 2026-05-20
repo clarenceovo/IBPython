@@ -142,7 +142,16 @@ class EquityOHLCVLoadRequest(MinimalOHLCVLoadControls):
 
 class FutureOHLCVLoadRequest(MinimalOHLCVLoadControls):
     symbol: str = Field(min_length=1, examples=["ES"])
-    exchange: str = Field(default="CME", min_length=1)
+    exchange: str = Field(
+        default="CME",
+        min_length=1,
+        description=(
+            "IBKR futures exchange code. Common codes: "
+            "CME (ES, NQ, RTY), CBOT (YM), CFE (VX), HKFE (HSI, HTI), "
+            "OSE.JPN (N225, N225M), SGX (XINA), KSE (K200), TAIFEX (TX, MTX), "
+            "EUREX (DAX, ESTX50), ICEEU (FTSE 100), MONEP (FCE)."
+        ),
+    )
     currency: str = Field(default="USD", min_length=1)
     last_trade_date_or_contract_month: str | None = Field(default=None, examples=["202606"])
     multiplier: str | None = Field(default=None, examples=["50"])
@@ -688,6 +697,162 @@ FUTURES_OHLCV_REQUEST_EXAMPLES = {
             "what_to_show": "TRADES",
         },
     },
+    "n225m_ose_by_contract_month": {
+        "summary": "Nikkei 225 Mini future",
+        "description": "Nikkei 225 Mini futures on OSE.JPN. Use N225M/JPY.",
+        "value": {
+            "symbol": "N225M",
+            "exchange": "OSE.JPN",
+            "currency": "JPY",
+            "last_trade_date_or_contract_month": "202606",
+            "duration": "1 D",
+            "bar_size": "1 min",
+            "what_to_show": "TRADES",
+        },
+    },
+    "xina_sgx_by_contract_month": {
+        "summary": "SGX FTSE China A50 future",
+        "description": "SGX FTSE China A50 futures. Symbol XINA on SGX/USD.",
+        "value": {
+            "symbol": "XINA",
+            "exchange": "SGX",
+            "currency": "USD",
+            "last_trade_date_or_contract_month": "202606",
+            "duration": "1 D",
+            "bar_size": "1 min",
+            "what_to_show": "TRADES",
+        },
+    },
+    "k200_kse_by_contract_month": {
+        "summary": "KOSPI 200 future",
+        "description": "KOSPI 200 futures on KSE. Symbol K200/KRW.",
+        "value": {
+            "symbol": "K200",
+            "exchange": "KSE",
+            "currency": "KRW",
+            "last_trade_date_or_contract_month": "202606",
+            "duration": "1 D",
+            "bar_size": "1 min",
+            "what_to_show": "TRADES",
+        },
+    },
+    "tx_taifex_by_contract_month": {
+        "summary": "TAIEX future (Taiwan)",
+        "description": "TAIEX futures on TAIFEX. Symbol TX/TWD. Mini is MTX.",
+        "value": {
+            "symbol": "TX",
+            "exchange": "TAIFEX",
+            "currency": "TWD",
+            "last_trade_date_or_contract_month": "202606",
+            "duration": "1 D",
+            "bar_size": "1 min",
+            "what_to_show": "TRADES",
+        },
+    },
+    "nq_cme_by_contract_month": {
+        "summary": "Nasdaq 100 E-mini future",
+        "description": "Nasdaq 100 E-mini on CME. Symbol NQ/USD.",
+        "value": {
+            "symbol": "NQ",
+            "exchange": "CME",
+            "currency": "USD",
+            "last_trade_date_or_contract_month": "202606",
+            "duration": "1 D",
+            "bar_size": "1 min",
+            "what_to_show": "TRADES",
+        },
+    },
+    "ym_cbot_by_contract_month": {
+        "summary": "Dow Jones E-mini future",
+        "description": "Dow Jones E-mini on CBOT. Symbol YM/USD.",
+        "value": {
+            "symbol": "YM",
+            "exchange": "CBOT",
+            "currency": "USD",
+            "last_trade_date_or_contract_month": "202606",
+            "duration": "1 D",
+            "bar_size": "1 min",
+            "what_to_show": "TRADES",
+        },
+    },
+    "rty_cme_by_contract_month": {
+        "summary": "Russell 2000 E-mini future",
+        "description": "Russell 2000 E-mini on CME. Symbol RTY/USD, $50/pt multiplier.",
+        "value": {
+            "symbol": "RTY",
+            "exchange": "CME",
+            "currency": "USD",
+            "last_trade_date_or_contract_month": "202606",
+            "duration": "1 D",
+            "bar_size": "1 min",
+            "what_to_show": "TRADES",
+        },
+    },
+    "vx_cfe_by_contract_month": {
+        "summary": "VIX future",
+        "description": "CBOE VIX futures. Symbol VX/USD on CFE.",
+        "value": {
+            "symbol": "VX",
+            "exchange": "CFE",
+            "currency": "USD",
+            "last_trade_date_or_contract_month": "202606",
+            "duration": "1 D",
+            "bar_size": "1 min",
+            "what_to_show": "TRADES",
+        },
+    },
+    "z_iceeu_ftse100": {
+        "summary": "FTSE 100 Index future (UK)",
+        "description": "ICE Futures Europe FTSE 100. Symbol Z/GBP on ICEEU.",
+        "value": {
+            "symbol": "Z",
+            "exchange": "ICEEU",
+            "currency": "GBP",
+            "last_trade_date_or_contract_month": "202606",
+            "duration": "1 D",
+            "bar_size": "1 min",
+            "what_to_show": "TRADES",
+        },
+    },
+    "fce_monep_cac40": {
+        "summary": "CAC 40 Index future (France)",
+        "description": "Euronext Paris CAC 40 futures. Symbol FCE/EUR on MONEP.",
+        "value": {
+            "symbol": "FCE",
+            "exchange": "MONEP",
+            "currency": "EUR",
+            "last_trade_date_or_contract_month": "202606",
+            "duration": "1 D",
+            "bar_size": "1 min",
+            "what_to_show": "TRADES",
+        },
+    },
+    "dax_eurex_by_contract_month": {
+        "summary": "DAX 40 future (Germany)",
+        "description": "Eurex DAX 40 futures. Symbol DAX/EUR on EUREX.",
+        "value": {
+            "symbol": "DAX",
+            "exchange": "EUREX",
+            "currency": "EUR",
+            "last_trade_date_or_contract_month": "202606",
+            "duration": "1 D",
+            "bar_size": "1 min",
+            "what_to_show": "TRADES",
+        },
+    },
+    "estx50_eurex_by_contract_month": {
+        "summary": "Euro Stoxx 50 future",
+        "description": "Eurex Euro Stoxx 50 futures. Symbol ESTX50/EUR on EUREX.",
+        "value": {
+            "symbol": "ESTX50",
+            "exchange": "EUREX",
+            "currency": "EUR",
+            "last_trade_date_or_contract_month": "202606",
+            "duration": "1 D",
+            "bar_size": "1 min",
+            "what_to_show": "TRADES",
+        },
+    },
 }
 
 
@@ -887,6 +1052,21 @@ INDEX_OHLCV_REQUEST_EXAMPLES = {
         "description": "Auto-resolves to CBOE/USD.",
         "value": {"symbol": "NDX"},
     },
+    "vix_us": {
+        "summary": "CBOE Volatility Index (VIX)",
+        "description": "Auto-resolves to CBOE/USD.",
+        "value": {"symbol": "VIX"},
+    },
+    "rut_us": {
+        "summary": "Russell 2000 (RUT)",
+        "description": "Auto-resolves to ICE/USD.",
+        "value": {"symbol": "RUT"},
+    },
+    "dji_us": {
+        "summary": "Dow Jones Industrial Average (DJI)",
+        "description": "Auto-resolves to CBOE/USD.",
+        "value": {"symbol": "DJI"},
+    },
     "hsi_hk": {
         "summary": "Hang Seng Index (HSI)",
         "description": "Auto-resolves to SEHK/HKD.",
@@ -902,10 +1082,35 @@ INDEX_OHLCV_REQUEST_EXAMPLES = {
         "description": "Auto-resolves to TSEJ/JPY.",
         "value": {"symbol": "NIKKEI"},
     },
-    "vix_us": {
-        "summary": "CBOE Volatility Index (VIX)",
-        "description": "Auto-resolves to CBOE/USD.",
-        "value": {"symbol": "VIX"},
+    "ftse100_uk": {
+        "summary": "FTSE 100 (UK)",
+        "description": "Auto-resolves to LSE/GBP.",
+        "value": {"symbol": "FTSE100"},
+    },
+    "cac40_fr": {
+        "summary": "CAC 40 (France)",
+        "description": "Auto-resolves to SBF/EUR.",
+        "value": {"symbol": "CAC40"},
+    },
+    "taiex_tw": {
+        "summary": "TAIEX (Taiwan)",
+        "description": "Auto-resolves to TWSE/TWD.",
+        "value": {"symbol": "TAIEX"},
+    },
+    "kospi200_kr": {
+        "summary": "KOSPI 200 (Korea)",
+        "description": "Auto-resolves to KSE/KRW.",
+        "value": {"symbol": "KOSPI200"},
+    },
+    "smi_ch": {
+        "summary": "SMI (Switzerland)",
+        "description": "Auto-resolves to EBS/CHF.",
+        "value": {"symbol": "SMI"},
+    },
+    "estx50_eu": {
+        "summary": "Euro Stoxx 50",
+        "description": "Auto-resolves to EUREX/EUR.",
+        "value": {"symbol": "ESTX50"},
     },
 }
 
@@ -918,7 +1123,7 @@ _INDEX_EXCHANGE_MAP: dict[str, tuple[str, str]] = {
     "SPX": ("CBOE", "USD"),
     "NDX": ("CBOE", "USD"),
     "VIX": ("CBOE", "USD"),
-    "RUT": ("CBOE", "USD"),
+    "RUT": ("ICE", "USD"),
     "DJI": ("CBOE", "USD"),
     "OEX": ("CBOE", "USD"),
     "NDXP": ("CBOE", "USD"),
@@ -933,20 +1138,25 @@ _INDEX_EXCHANGE_MAP: dict[str, tuple[str, str]] = {
     # Europe
     "DAX": ("EUREX", "EUR"),
     "FDAX": ("EUREX", "EUR"),
+    "ESTX50": ("EUREX", "EUR"),
     "SMI": ("EBS", "CHF"),
     "CAC40": ("SBF", "EUR"),
     "FTSE100": ("LSE", "GBP"),
+    "FTSE250": ("LSE", "GBP"),
     # Australia
     "SPI": ("ASX", "AUD"),
     "XJO": ("ASX", "AUD"),
     # Korea
     "KOSPI": ("KSE", "KRW"),
     "KOSPI200": ("KSE", "KRW"),
+    "KOSDQ150": ("KSE", "KRW"),
     # India
     "NIFTY": ("NSE", "INR"),
     "BANKNIFTY": ("NSE", "INR"),
     # Singapore
     "STI": ("SGX", "SGD"),
+    # Taiwan
+    "TAIEX": ("TWSE", "TWD"),
     # Canada
     "SPTSX": ("TSE", "CAD"),
 }

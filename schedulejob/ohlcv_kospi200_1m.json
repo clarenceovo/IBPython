@@ -1,0 +1,40 @@
+{
+  "name": "ohlcv_kospi200_1m",
+  "job_type": "ohlcv_snapshot",
+  "interval_seconds": 60,
+  "enabled": true,
+  "run_immediately": false,
+  "params": {
+    "start_time": "09:00",
+    "end_time": "15:45",
+    "timezone": "Asia/Seoul",
+    "snap_interval_seconds": 60,
+    "snap_days": ["mon", "tue", "wed", "thu", "fri"],
+    "detect_holiday": true,
+    "capture_rth": true,
+    "defaults": {
+      "asset_class": "future",
+      "exchange": "KSE",
+      "currency": "KRW",
+      "bar_size": "1 min",
+      "duration": "1 D",
+      "what_to_show": "TRADES",
+      "persist": true,
+      "cache_latest": true
+    },
+    "symbols": [
+      {
+        "symbol": "K200",
+        "last_trade_date_or_contract_month": "202606"
+      },
+      {
+        "symbol": "K200M",
+        "last_trade_date_or_contract_month": "202606"
+      },
+      {
+        "symbol": "KOSDQ150",
+        "last_trade_date_or_contract_month": "202606"
+      }
+    ]
+  }
+}

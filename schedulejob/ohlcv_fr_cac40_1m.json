@@ -1,0 +1,32 @@
+{
+  "name": "ohlcv_fr_cac40_1m",
+  "job_type": "ohlcv_snapshot",
+  "interval_seconds": 60,
+  "enabled": true,
+  "run_immediately": false,
+  "params": {
+    "start_time": "08:00",
+    "end_time": "17:30",
+    "timezone": "Europe/Paris",
+    "snap_interval_seconds": 60,
+    "snap_days": ["mon", "tue", "wed", "thu", "fri"],
+    "detect_holiday": true,
+    "capture_rth": true,
+    "defaults": {
+      "asset_class": "future",
+      "exchange": "MONEP",
+      "currency": "EUR",
+      "bar_size": "1 min",
+      "duration": "1 D",
+      "what_to_show": "TRADES",
+      "persist": true,
+      "cache_latest": true
+    },
+    "symbols": [
+      {
+        "symbol": "FCE",
+        "last_trade_date_or_contract_month": "202606"
+      }
+    ]
+  }
+}
