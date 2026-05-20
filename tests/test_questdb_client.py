@@ -16,13 +16,13 @@ from src.transport.questdb_client import (
 
 
 def test_create_table_sql_uses_partitioned_market_table() -> None:
-    assert "CREATE TABLE IF NOT EXISTS market_ohlcv" in CREATE_MARKET_OHLCV_TABLE_SQL
+    assert "CREATE TABLE IF NOT EXISTS EquityOHLCV" in CREATE_MARKET_OHLCV_TABLE_SQL
     assert "TIMESTAMP(timestamp) PARTITION BY DAY" in CREATE_MARKET_OHLCV_TABLE_SQL
     assert "CREATE TABLE IF NOT EXISTS fx_option_snapshot" in CREATE_FX_OPTION_SNAPSHOT_TABLE_SQL
 
 
 def test_insert_sql_targets_market_table() -> None:
-    assert INSERT_MARKET_OHLCV_SQL.startswith("INSERT INTO market_ohlcv")
+    assert INSERT_MARKET_OHLCV_SQL.startswith("INSERT INTO EquityOHLCV")
     assert "VALUES (%s" in INSERT_MARKET_OHLCV_SQL
 
 

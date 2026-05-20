@@ -85,6 +85,7 @@ Core variables:
 | `IBKR_MARKET_DATA_LINES` | `100` | Market data entitlement baseline for pacing analysis |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis URL |
 | `REDIS_PASSWORD` | empty | Optional Redis AUTH password |
+| `IBKR_REST_BASE_URL` | `http://localhost:8000` | Base URL the scheduler uses when calling FastAPI OHLCV endpoints |
 | `QUESTDB_HOST` | `127.0.0.1` | QuestDB PostgreSQL wire host |
 | `QUESTDB_PORT` | `8812` | QuestDB PostgreSQL wire port |
 | `QUESTDB_USER` | `admin` | QuestDB user |
@@ -465,7 +466,7 @@ Every normalized bar now carries a deterministic `contract_key`. The strongest a
 
 `OHLCVLoader` runs a data-quality report after sorting and before persistence/cache. It checks UTC timestamps, monotonic ordering, duplicates by `(contract_key, timestamp)`, interval gaps, non-finite values, invalid OHLC ranges, and stale latest bars when configured. Fatal invariants block persistence; warnings are logged and included in scheduler metrics.
 
-QuestDB is preferred for high-volume time-series capture. MySQL uses the same `market_ohlcv` logical table with an idempotent primary key on contract identity for operational/reporting deployments that need bars in a relational database.
+QuestDB is preferred for high-volume time-series capture and stores OHLCV bars in `EquityOHLCV`. MySQL keeps the `market_ohlcv` logical table with an idempotent primary key on contract identity for operational/reporting deployments that need bars in a relational database.
 
 Example TSLA option-chain request:
 
@@ -654,7 +655,7 @@ The target may be a provider instance, a provider class, or a zero-argument fact
 
 If `INDEX_COMPOSITION_PROVIDER` is blank, `configured_provider`, `placeholder`, or `todo`, the scheduler will not register the index reload handler and Redis index reload jobs will be skipped with a clear warning.
 
-OHLCV snapshot jobs use `job_type="ohlcv_snapshot"` and support either `interval_seconds` or a five-field `cron` expression. The OHLCV job still evaluates its market window before loading data, so a cron trigger outside `start_time`/`end_time` is logged and skipped.
+OHLCV snapshot jobs use `job_type="ohlcv_snapshot"` and support either `interval_seconds` or a five-field `cron` expression. The scheduler calls `POST /api/v1/market-data/ohlcv` on `IBKR_REST_BASE_URL`, letting FastAPI own IBKR loading, cache writes, and persistence into QuestDB `EquityOHLCV`. The OHLCV job still evaluates its market window before loading data, so a cron trigger outside `start_time`/`end_time` is logged and skipped.
 
 If both `cron` and `interval_seconds` are present, `cron` controls trigger timing. `interval_seconds` remains operational metadata and must match `params.snap_interval_seconds` for OHLCV jobs.
 

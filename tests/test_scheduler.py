@@ -12,6 +12,7 @@ from src.transport.scheduler import (
     get_current_scheduler_run_context,
     next_cron_run,
 )
+import src.transport.scheduler as scheduler_module
 
 
 class FakeLoader:
@@ -247,6 +248,21 @@ def test_scheduler_skips_redis_jobs_without_registered_handler() -> None:
     asyncio.run(run())
 
 
+def test_scheduler_redis_job_scan_timeout_keeps_local_jobs_runnable() -> None:
+    async def run() -> None:
+        class SlowRedis:
+            async def scan_scheduler_jobs(self):
+                await asyncio.sleep(60)
+                return []
+
+        scheduler = GenericScheduler(redis_job_load_timeout_seconds=0.01)
+        jobs = await scheduler.load_jobs_from_redis(SlowRedis())
+
+        assert jobs == []
+
+    asyncio.run(run())
+
+
 def test_market_snapshot_handler_parses_string_boolean_flags() -> None:
     async def run() -> None:
         loader = FakeLoader()
@@ -302,6 +318,82 @@ def test_ohlcv_snapshot_handler_runs_inside_window_and_merges_symbols() -> None:
         assert request.use_rth is True
         assert persist is True
         assert cache_latest is True
+        assert redis.last_ts[("ohlcv_test", "SPY", "1 min")] == datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc)
+        assert redis.status[("ohlcv_test", "SPY", "1 min")]["status"] == "success"
+
+    asyncio.run(run())
+
+
+def test_ohlcv_snapshot_handler_can_capture_through_fastapi() -> None:
+    class FakeResponse:
+        status_code = 200
+        text = "ok"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict]:
+            return [
+                {
+                    "symbol": "SPY",
+                    "asset_class": "equity",
+                    "exchange": "SMART",
+                    "currency": "USD",
+                    "timestamp": "2026-01-05T15:00:00Z",
+                    "open": 100,
+                    "high": 101,
+                    "low": 99,
+                    "close": 100.5,
+                    "volume": 1000,
+                    "bar_size": "1 min",
+                    "source": "ibkr",
+                    "metadata": {},
+                }
+            ]
+
+    class FakeAsyncClient:
+        calls: list[tuple[str, dict]] = []
+
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, url: str, *, json: dict) -> FakeResponse:
+            self.calls.append((url, json))
+            return FakeResponse()
+
+    async def run() -> None:
+        loader = FakeOHLCVLoader()
+        redis = FakeRedis()
+        original_client = scheduler_module.httpx.AsyncClient
+        scheduler_module.httpx.AsyncClient = FakeAsyncClient
+        try:
+            feed = FakeFeed((object(),))
+            handler = OHLCVSnapshotJobHandler(
+                loader,
+                redis=redis,
+                feed=feed,
+                api_base_url="http://localhost:8000/",
+                clock=lambda: datetime(2026, 1, 5, 10, 0, tzinfo=timezone.utc),
+            )
+
+            await handler(_ohlcv_job())
+        finally:
+            scheduler_module.httpx.AsyncClient = original_client
+
+        assert loader.calls == []
+        assert feed.calls == []
+        url, payload = FakeAsyncClient.calls[0]
+        assert url == "http://localhost:8000/api/v1/market-data/ohlcv"
+        assert payload["persist"] is True
+        assert payload["cache_latest"] is True
+        assert payload["use_ttl_cache"] is False
+        assert payload["request"]["symbol"] == "SPY"
         assert redis.last_ts[("ohlcv_test", "SPY", "1 min")] == datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc)
         assert redis.status[("ohlcv_test", "SPY", "1 min")]["status"] == "success"
 

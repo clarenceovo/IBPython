@@ -126,9 +126,9 @@ def test_dependency_plan_for_ohlcv_snapshot_jobs() -> None:
         update={"params": {**persist_job.params, "defaults": {**persist_job.params["defaults"], "persist": "false"}}}
     )
 
-    assert main._jobs_require_ibkr([persist_job]) is True
-    assert main._jobs_require_market_store([persist_job]) is True
-    assert main._jobs_require_questdb([persist_job]) is True
+    assert main._jobs_require_ibkr([persist_job]) is False
+    assert main._jobs_require_market_store([persist_job]) is False
+    assert main._jobs_require_questdb([persist_job]) is False
     assert main._jobs_require_market_store([cache_only_job]) is False
     assert main._jobs_require_questdb([cache_only_job]) is False
 

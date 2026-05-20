@@ -551,7 +551,7 @@ def get_server_status() -> str:
 def get_table_schema() -> str:
     """Available QuestDB tables and their structure."""
     return json.dumps({
-        "market_ohlcv": {
+        "EquityOHLCV": {
             "columns": ["symbol", "asset_class", "exchange", "currency", "timestamp",
                         "open", "high", "low", "close", "volume", "bar_size", "source",
                         "contract_key", "con_id", "local_symbol", "contract_month", "expiry",

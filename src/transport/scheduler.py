@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.feeds.models import OHLCVRequest
@@ -308,6 +309,7 @@ class GenericScheduler:
         local_job_directory: str | Path | None = None,
         job_reload_interval_seconds: float | None = None,
         health_monitor: object | None = None,
+        redis_job_load_timeout_seconds: float = 5.0,
     ) -> None:
         self._handlers: dict[str, JobHandler] = {}
         self._jobs: dict[str, SchedulerJobDefinition] = {}
@@ -320,6 +322,7 @@ class GenericScheduler:
         self._job_reload_interval_seconds = job_reload_interval_seconds
         self._reload_task: asyncio.Task[None] | None = None
         self._health_monitor = health_monitor
+        self._redis_job_load_timeout_seconds = max(0.1, float(redis_job_load_timeout_seconds))
         self.validation_warnings: list[str] = []
 
     def configure_job_sources(
@@ -435,7 +438,19 @@ class GenericScheduler:
 
     async def _read_jobs_from_redis(self, redis_client: object) -> list[SchedulerJobDefinition]:
         jobs: list[SchedulerJobDefinition] = []
-        for key in await redis_client.scan_scheduler_jobs():
+        try:
+            keys = await asyncio.wait_for(
+                redis_client.scan_scheduler_jobs(),
+                timeout=self._redis_job_load_timeout_seconds,
+            )
+        except TimeoutError:
+            logger.warning(
+                "scheduler Redis job scan timed out after %.1fs; continuing with already loaded/local jobs",
+                self._redis_job_load_timeout_seconds,
+            )
+            return jobs
+
+        for key in keys:
             payload = await redis_client.get_raw(key)
             if payload is None:
                 logger.warning("scheduler job key disappeared before load: key=%s", key)
@@ -970,12 +985,16 @@ class OHLCVSnapshotJobHandler:
         feed: object | None = None,
         clock: Callable[[], datetime] | None = None,
         max_concurrency: int = 8,
+        api_base_url: str | None = None,
+        api_timeout_seconds: float = 60.0,
     ) -> None:
         self.loader = loader
         self.redis = redis
         self.feed = feed or getattr(loader, "feed", None)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.max_concurrency = max(1, max_concurrency)
+        self.api_base_url = api_base_url.rstrip("/") if api_base_url else None
+        self.api_timeout_seconds = api_timeout_seconds
 
     async def __call__(self, job: SchedulerJobDefinition) -> SchedulerRunResult:
         params = OHLCVSnapshotParams.model_validate(job.params)
@@ -1123,10 +1142,11 @@ class OHLCVSnapshotJobHandler:
                 persist,
                 cache_latest,
             )
-            bars = await self.loader.load(request, persist=persist, cache_latest=cache_latest)
+            capture = await self._capture_ohlcv(request, persist=persist, cache_latest=cache_latest)
             quality_summary = _loader_quality_summary(self.loader)
-            if bars:
-                latest_timestamp = max(bar.timestamp for bar in bars)
+            bars_captured = int(capture["bars_captured"])
+            latest_timestamp = capture.get("latest_timestamp")
+            if latest_timestamp is not None:
                 await self._write_bookmark(job, request, latest_timestamp)
                 execution_logger.info(
                     "job_state=bookmark_updated job=%s symbol=%s bar_size=%s last_ts=%s",
@@ -1140,9 +1160,9 @@ class OHLCVSnapshotJobHandler:
                 request,
                 {
                     "status": "success",
-                    "bars_captured": len(bars),
+                    "bars_captured": bars_captured,
                     "last_run_at": self.clock().astimezone(timezone.utc).isoformat(),
-                    "latest_bar_timestamp": max((bar.timestamp for bar in bars), default=None),
+                    "latest_bar_timestamp": latest_timestamp,
                     "duration_ms": (monotonic_time.monotonic() - started) * 1000.0,
                     "data_quality": quality_summary,
                 },
@@ -1153,13 +1173,13 @@ class OHLCVSnapshotJobHandler:
                 run_context.run_id if run_context else None,
                 request.symbol,
                 request.bar_size,
-                len(bars),
+                bars_captured,
             )
             bars_expected = estimate_expected_bars(request.duration, request.bar_size)
             return {
                 "status": "success",
                 "symbol": request.symbol,
-                "bars_captured": len(bars),
+                "bars_captured": bars_captured,
                 "bars_expected": bars_expected,
                 "data_quality": quality_summary,
             }
@@ -1183,6 +1203,32 @@ class OHLCVSnapshotJobHandler:
                 },
             )
             return {"status": "failed", "symbol": symbol.symbol, "bars_captured": 0, "error": str(exc)}
+
+    async def _capture_ohlcv(self, request: OHLCVRequest, *, persist: bool, cache_latest: bool) -> dict[str, Any]:
+        if self.api_base_url is None:
+            bars = await self.loader.load(request, persist=persist, cache_latest=cache_latest)
+            latest_timestamp = max((bar.timestamp for bar in bars), default=None)
+            return {"bars_captured": len(bars), "latest_timestamp": latest_timestamp}
+
+        url = f"{self.api_base_url}/api/v1/market-data/ohlcv"
+        payload = {
+            "request": request.model_dump(mode="json", exclude_none=True),
+            "persist": persist,
+            "cache_latest": cache_latest,
+            "use_ttl_cache": False,
+        }
+        async with httpx.AsyncClient(timeout=self.api_timeout_seconds) as client:
+            response = await client.post(url, json=payload)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(f"OHLCV API returned {response.status_code}: {response.text[:500]}") from exc
+
+        bars_payload = response.json()
+        if not isinstance(bars_payload, list):
+            raise RuntimeError(f"OHLCV API returned unexpected payload type: {type(bars_payload).__name__}")
+        latest_timestamp = max((_bar_timestamp(bar) for bar in bars_payload), default=None)
+        return {"bars_captured": len(bars_payload), "latest_timestamp": latest_timestamp}
 
     async def _read_bookmark(self, job: SchedulerJobDefinition, request: OHLCVRequest) -> datetime | None:
         if self.redis is None or not hasattr(self.redis, "get_ohlcv_snapshot_last_ts"):
@@ -1240,6 +1286,14 @@ class OHLCVSnapshotJobHandler:
             )
 
     async def _has_trading_session(self, request: OHLCVRequest, ref_date: date, use_rth: bool) -> bool:
+        if self.api_base_url is not None:
+            execution_logger.info(
+                "job_state=calendar_check_skipped_api_mode symbol=%s date=%s",
+                request.symbol,
+                ref_date.isoformat(),
+            )
+            return True
+
         cache_key = ohlcv_snapshot_calendar_key(
             asset_class=request.asset_class,
             exchange=request.exchange,
@@ -1321,6 +1375,24 @@ def _coerce_bool(value: Any, *, default: bool) -> bool:
         if normalized in {"0", "false", "f", "no", "n", "off"}:
             return False
     return bool(value)
+
+
+def _bar_timestamp(bar: Any) -> datetime:
+    if isinstance(bar, dict):
+        value = bar.get("timestamp") or bar.get("date")
+    else:
+        value = getattr(bar, "timestamp", None) or getattr(bar, "date", None)
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, date):
+        parsed = datetime.combine(value, time.min)
+    elif isinstance(value, str):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    else:
+        raise TypeError(f"unsupported OHLCV bar timestamp type: {type(value)!r}")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _is_runnable_window(params: OHLCVSnapshotParams, now_local: datetime) -> bool:

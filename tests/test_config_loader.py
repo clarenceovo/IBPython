@@ -33,6 +33,7 @@ def test_config_loader_uses_defaults_when_env_file_is_missing() -> None:
 
     assert values["ibkr_host"] == constants.DEFAULT_IBKR_HOST
     assert values["redis_url"] == constants.DEFAULT_REDIS_URL
+    assert values["ibkr_rest_base_url"] == constants.DEFAULT_IBKR_REST_BASE_URL
 
 
 def test_config_loader_ignores_blank_dotenv_values_and_parses_types(tmp_path: Path) -> None:

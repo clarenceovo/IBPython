@@ -169,7 +169,7 @@ def test_server_status_resource_content():
 def test_table_schema_resource_content():
     """Verify table schema resource describes the OHLCV table."""
     source = MCP_SERVER_PATH.read_text()
-    assert "market_ohlcv" in source
+    assert "EquityOHLCV" in source
     assert "equity_snapshots" in source
     assert "fx_option_snapshots" in source
 

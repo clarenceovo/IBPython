@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 CREATE_MARKET_OHLCV_TABLE_SQL = f"""
-CREATE TABLE IF NOT EXISTS {constants.MARKET_OHLCV_TABLE} (
+CREATE TABLE IF NOT EXISTS {constants.QUESTDB_MARKET_OHLCV_TABLE} (
     symbol SYMBOL,
     asset_class SYMBOL,
     exchange SYMBOL,
@@ -44,23 +44,23 @@ CREATE TABLE IF NOT EXISTS {constants.MARKET_OHLCV_TABLE} (
 
 
 INSERT_MARKET_OHLCV_SQL = f"""
-INSERT INTO {constants.MARKET_OHLCV_TABLE}
+INSERT INTO {constants.QUESTDB_MARKET_OHLCV_TABLE}
 (symbol, asset_class, exchange, currency, timestamp, open, high, low, close, volume, bar_size, source,
  contract_key, con_id, local_symbol, contract_month, expiry, strike, right, trading_class, what_to_show, use_rth, metadata)
 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """.strip()
 
 MARKET_OHLCV_IDENTITY_ALTER_SQL = (
-    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN contract_key SYMBOL",
-    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN con_id LONG",
-    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN local_symbol SYMBOL",
-    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN contract_month SYMBOL",
-    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN expiry SYMBOL",
-    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN strike DOUBLE",
-    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN right SYMBOL",
-    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN trading_class SYMBOL",
-    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN what_to_show SYMBOL",
-    f"ALTER TABLE {constants.MARKET_OHLCV_TABLE} ADD COLUMN use_rth BOOLEAN",
+    f"ALTER TABLE {constants.QUESTDB_MARKET_OHLCV_TABLE} ADD COLUMN contract_key SYMBOL",
+    f"ALTER TABLE {constants.QUESTDB_MARKET_OHLCV_TABLE} ADD COLUMN con_id LONG",
+    f"ALTER TABLE {constants.QUESTDB_MARKET_OHLCV_TABLE} ADD COLUMN local_symbol SYMBOL",
+    f"ALTER TABLE {constants.QUESTDB_MARKET_OHLCV_TABLE} ADD COLUMN contract_month SYMBOL",
+    f"ALTER TABLE {constants.QUESTDB_MARKET_OHLCV_TABLE} ADD COLUMN expiry SYMBOL",
+    f"ALTER TABLE {constants.QUESTDB_MARKET_OHLCV_TABLE} ADD COLUMN strike DOUBLE",
+    f"ALTER TABLE {constants.QUESTDB_MARKET_OHLCV_TABLE} ADD COLUMN right SYMBOL",
+    f"ALTER TABLE {constants.QUESTDB_MARKET_OHLCV_TABLE} ADD COLUMN trading_class SYMBOL",
+    f"ALTER TABLE {constants.QUESTDB_MARKET_OHLCV_TABLE} ADD COLUMN what_to_show SYMBOL",
+    f"ALTER TABLE {constants.QUESTDB_MARKET_OHLCV_TABLE} ADD COLUMN use_rth BOOLEAN",
 )
 
 
@@ -481,7 +481,7 @@ def build_historical_query(
         params.append(_questdb_timestamp(end))
     params.append(limit)
     sql = (
-        f"SELECT * FROM {constants.MARKET_OHLCV_TABLE} "
+        f"SELECT * FROM {constants.QUESTDB_MARKET_OHLCV_TABLE} "
         f"WHERE {' AND '.join(clauses)} "
         "ORDER BY timestamp ASC "
         "LIMIT %s"
@@ -510,7 +510,7 @@ def build_latest_query(
     where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
     params.append(limit)
     sql = (
-        f"SELECT * FROM {constants.MARKET_OHLCV_TABLE} "
+        f"SELECT * FROM {constants.QUESTDB_MARKET_OHLCV_TABLE} "
         f"{where}"
         "LATEST ON timestamp PARTITION BY symbol, contract_key "
         "LIMIT %s"

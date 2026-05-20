@@ -20,6 +20,7 @@ class Settings(BaseModel):
 
     redis_url: str = Field(default=constants.DEFAULT_REDIS_URL, alias=constants.REDIS_URL_ENV)
     redis_password: str = Field(default=constants.DEFAULT_REDIS_PASSWORD, alias=constants.REDIS_PASSWORD_ENV)
+    ibkr_rest_base_url: str = Field(default=constants.DEFAULT_IBKR_REST_BASE_URL, alias=constants.IBKR_REST_BASE_URL_ENV)
 
     questdb_host: str = Field(default=constants.DEFAULT_QUESTDB_HOST, alias=constants.QUESTDB_HOST_ENV)
     questdb_port: int = Field(default=constants.DEFAULT_QUESTDB_PORT, alias=constants.QUESTDB_PORT_ENV)

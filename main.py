@@ -115,7 +115,11 @@ async def main() -> None:
     loader = OHLCVLoader(ibkr, store=store, redis=redis)
     snapshot_handler = MarketSnapshotJobHandler(loader)
     scheduler.register_handler(snapshot_handler.job_type, snapshot_handler)
-    ohlcv_snapshot_handler = OHLCVSnapshotJobHandler(loader, redis=redis, feed=ibkr)
+    ohlcv_snapshot_handler = OHLCVSnapshotJobHandler(
+        loader,
+        redis=redis,
+        api_base_url=settings.ibkr_rest_base_url,
+    )
     scheduler.register_handler(ohlcv_snapshot_handler.job_type, ohlcv_snapshot_handler)
 
     index_provider = build_index_composition_provider(settings.index_composition_provider)
@@ -234,13 +238,12 @@ def _looks_like_index_provider(provider: Any) -> bool:
 
 
 def _jobs_require_ibkr(jobs: list[Any]) -> bool:
-    return any(job.job_type in {MarketSnapshotJobHandler.job_type, OHLCVSnapshotJobHandler.job_type} for job in jobs)
+    return any(job.job_type == MarketSnapshotJobHandler.job_type for job in jobs)
 
 
 def _jobs_require_market_store(jobs: list[Any]) -> bool:
     return any(
         job.job_type == MarketSnapshotJobHandler.job_type and _job_param_bool(job.params.get("persist"), default=True)
-        or job.job_type == OHLCVSnapshotJobHandler.job_type and _ohlcv_snapshot_job_persists(job)
         for job in jobs
     )
 
