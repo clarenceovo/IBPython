@@ -306,7 +306,7 @@ class MarketDataRedisClient:
                 try:
                     result[symbol.strip().upper()] = EquitySnapshot.from_redis_json(payload)
                 except Exception:
-                    pass
+                    logger.debug("failed to parse Redis snapshot for symbol=%s", symbol, exc_info=True)
         return result
 
     # ------------------------------------------------------------------

@@ -348,7 +348,7 @@ class IBKRConnectionManager:
                         try:
                             self._ib.disconnect()
                         except Exception:
-                            pass
+                            logger.debug("failed to disconnect stale IBKR instance", exc_info=True)
                     await self._with_retry(
                         lambda: self._ib.connectAsync(self.host, self.port, clientId=self.client_id),
                         operation="reconnect",

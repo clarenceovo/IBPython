@@ -203,8 +203,7 @@ class MySQLClient(MarketOHLCVStore):
                 self._pool.close()
                 await self._pool.wait_closed()
             except Exception:
-                pass
-            self._pool = None
+                logger.debug("failed to close stale MySQL pool", exc_info=True)
             self._connected = False
             await self.connect()
 

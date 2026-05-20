@@ -243,8 +243,7 @@ class QuestDBClient(MarketOHLCVStore):
             try:
                 await self._connection.close()
             except Exception:
-                pass
-            self._connection = None
+                logger.debug("failed to close stale QuestDB connection", exc_info=True)
             self._connected = False
             await self.connect()
 
@@ -280,6 +279,7 @@ class QuestDBClient(MarketOHLCVStore):
         await self._ensure_connection()
         async with self._lock:
             async with self._connection.cursor() as cur:
+                await cur.execute(CREATE_EQUITY_SNAPSHOT_TABLE_SQL)
                 await cur.executemany(INSERT_EQUITY_SNAPSHOT_SQL, [snapshot_to_row(s) for s in snapshots])
             await self._connection.commit()
         return len(snapshots)
@@ -290,6 +290,7 @@ class QuestDBClient(MarketOHLCVStore):
         await self._ensure_connection()
         async with self._lock:
             async with self._connection.cursor() as cur:
+                await cur.execute(CREATE_FX_OPTION_SNAPSHOT_TABLE_SQL)
                 await cur.executemany(INSERT_FX_OPTION_SNAPSHOT_SQL, [fx_option_snapshot_to_row(s) for s in snapshots])
             await self._connection.commit()
         return len(snapshots)
@@ -376,6 +377,7 @@ class QuestDBClient(MarketOHLCVStore):
         await self._ensure_connection()
         async with self._lock:
             async with self._connection.cursor() as cur:
+                await cur.execute(CREATE_MARKET_OHLCV_TABLE_SQL)
                 await cur.executemany(INSERT_MARKET_OHLCV_SQL, [bar_to_row(bar) for bar in bars])
             await self._connection.commit()
         return len(bars)

@@ -84,7 +84,7 @@ class IBKRRestAppState:
         try:
             await coro_fn()
         except Exception:
-            pass
+            logger.debug("safe_close failed", exc_info=True)
 
 
 def build_rest_app_state(settings: Settings) -> IBKRRestAppState:
