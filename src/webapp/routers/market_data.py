@@ -1012,6 +1012,66 @@ FX_OHLCV_REQUEST_EXAMPLES = {
             "bar_size": "1 hour",
         },
     },
+    "gbpusd": {
+        "summary": "GBPUSD (Cable)",
+        "description": "British Pound / US Dollar.",
+        "value": {"symbol": "GBPUSD"},
+    },
+    "usdchf": {
+        "summary": "USDCHF (Swissy)",
+        "description": "US Dollar / Swiss Franc.",
+        "value": {"symbol": "USDCHF"},
+    },
+    "audusd": {
+        "summary": "AUDUSD (Aussie)",
+        "description": "Australian Dollar / US Dollar.",
+        "value": {"symbol": "AUDUSD"},
+    },
+    "nzdusd": {
+        "summary": "NZDUSD (Kiwi)",
+        "description": "New Zealand Dollar / US Dollar.",
+        "value": {"symbol": "NZDUSD"},
+    },
+    "usdcad": {
+        "summary": "USDCAD (Loonie)",
+        "description": "US Dollar / Canadian Dollar.",
+        "value": {"symbol": "USDCAD"},
+    },
+    "usdnok": {
+        "summary": "USDNOK (Norwegian Krone)",
+        "description": "US Dollar / Norwegian Krone.",
+        "value": {"symbol": "USDNOK"},
+    },
+    "usdsek": {
+        "summary": "USDSEK (Swedish Krona)",
+        "description": "US Dollar / Swedish Krona.",
+        "value": {"symbol": "USDSEK"},
+    },
+    "eurgbp_cross": {
+        "summary": "EURGBP (Euro/Sterling cross)",
+        "description": "Euro / British Pound cross rate.",
+        "value": {"symbol": "EURGBP", "currency": "GBP"},
+    },
+    "eurjpy_cross": {
+        "summary": "EURJPY (Euro/Yen cross)",
+        "description": "Euro / Japanese Yen cross rate.",
+        "value": {"symbol": "EURJPY", "currency": "JPY"},
+    },
+    "eurcad_cross": {
+        "summary": "EURCAD (Euro/Loonie cross)",
+        "description": "Euro / Canadian Dollar cross rate.",
+        "value": {"symbol": "EURCAD", "currency": "CAD"},
+    },
+    "gbpjpy_cross": {
+        "summary": "GBPJPY (Gopher)",
+        "description": "British Pound / Japanese Yen cross rate.",
+        "value": {"symbol": "GBPJPY", "currency": "JPY"},
+    },
+    "audjpy_cross": {
+        "summary": "AUDJPY (Aussie/Yen cross)",
+        "description": "Australian Dollar / Japanese Yen cross rate.",
+        "value": {"symbol": "AUDJPY", "currency": "JPY"},
+    },
 }
 
 

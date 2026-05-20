@@ -1,0 +1,49 @@
+{
+  "name": "ohlcv_g10_fx_1m",
+  "job_type": "ohlcv_snapshot",
+  "interval_seconds": 60,
+  "enabled": true,
+  "run_immediately": false,
+  "params": {
+    "start_time": "00:00",
+    "end_time": "23:59",
+    "timezone": "UTC",
+    "snap_interval_seconds": 60,
+    "snap_days": ["mon", "tue", "wed", "thu", "fri"],
+    "detect_holiday": false,
+    "capture_rth": false,
+    "defaults": {
+      "asset_class": "fx",
+      "exchange": "IDEALPRO",
+      "currency": "USD",
+      "bar_size": "1 min",
+      "duration": "1 D",
+      "what_to_show": "MIDPOINT",
+      "use_rth": false,
+      "persist": true,
+      "cache_latest": true
+    },
+    "symbols": [
+      {"symbol": "EURUSD"},
+      {"symbol": "GBPUSD"},
+      {"symbol": "USDJPY"},
+      {"symbol": "USDCHF"},
+      {"symbol": "AUDUSD"},
+      {"symbol": "NZDUSD"},
+      {"symbol": "USDCAD"},
+      {"symbol": "USDNOK"},
+      {"symbol": "USDSEK"},
+      {"symbol": "EURGBP"},
+      {"symbol": "EURJPY"},
+      {"symbol": "EURCHF"},
+      {"symbol": "EURAUD"},
+      {"symbol": "GBPJPY"},
+      {"symbol": "AUDJPY"},
+      {"symbol": "NZDJPY"},
+      {"symbol": "GBPAUD"},
+      {"symbol": "GBPCAD"},
+      {"symbol": "EURNOK"},
+      {"symbol": "EURSEK"}
+    ]
+  }
+}
