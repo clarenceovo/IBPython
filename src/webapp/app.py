@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from src.config.settings import Settings, load_settings
+from src.transport.metrics import MetricsMiddleware, metrics
 from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
 from src.webapp.middleware.correlation import CorrelationIdFilter, CorrelationIdMiddleware
 from src.webapp.routers import account, business, fixed_income, market_data_bonds, market_data_equity, market_data_fx, market_data_futures, market_data_options, orders, reference_data, scanner, snapshot, streaming, system, tick_data
@@ -153,6 +154,8 @@ def create_app(
         docs_url="/docs",
         redoc_url="/redoc",
     )
+    # Metrics middleware must wrap early (added last = wraps outermost)
+    fastapi_app.add_middleware(MetricsMiddleware)
     fastapi_app.add_middleware(CorrelationIdMiddleware)
 
     # API-wide bearer auth — wraps all endpoints when IBKR_API_BEARER_TOKEN is set
@@ -174,6 +177,11 @@ def create_app(
     fastapi_app.include_router(streaming.router, prefix="/api/v1")
     fastapi_app.include_router(snapshot.router, prefix="/api/v1")
     fastapi_app.include_router(tick_data.router, prefix="/api/v1")
+
+    @fastapi_app.get("/metrics", include_in_schema=False)
+    async def metrics_endpoint() -> bytes:
+        """Expose Prometheus-compatible metrics in text format."""
+        return metrics.expose().encode("utf-8")
 
     @fastapi_app.exception_handler(RuntimeError)
     async def runtime_error_handler(_request: Request, exc: RuntimeError) -> JSONResponse:
