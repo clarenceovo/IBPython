@@ -30,7 +30,11 @@ logger = logging.getLogger(__name__)
 
 
 class QuestDBClient(MarketOHLCVStore):
-    """Async QuestDB client over the PostgreSQL wire protocol."""
+    """Async QuestDB client over the PostgreSQL wire protocol.
+
+    Uses a connection pool (``psycopg_pool.AsyncConnectionPool``) for queries
+    and retains a serialising lock for DDL / table-creation operations.
+    """
 
     def __init__(
         self,
@@ -41,14 +45,20 @@ class QuestDBClient(MarketOHLCVStore):
         password: str = constants.DEFAULT_QUESTDB_PASSWORD,
         database: str = constants.DEFAULT_QUESTDB_DATABASE,
         connection: Any | None = None,
+        pool_size: int = 4,
     ) -> None:
         self.host = host
         self.port = port
         self.user = user
         self.password = password
         self.database = database
+        self.pool_size = pool_size
+        self._pool: Any | None = None
+        # DDL operations (table creation) must still serialize.
+        self._ddl_lock = asyncio.Lock()
+        # Legacy single-connection attribute: when a pre-built connection is
+        # injected (tests), we skip pool creation and use it directly.
         self._connection = connection
-        self._lock = asyncio.Lock()
         self._connected = connection is not None
 
     @property
@@ -65,17 +75,34 @@ class QuestDBClient(MarketOHLCVStore):
         if self._connected:
             return
         try:
-            from psycopg import AsyncConnection
+            from psycopg_pool import AsyncConnectionPool
         except ImportError as exc:
-            raise RuntimeError("psycopg is required for QuestDBClient") from exc
-        logger.info("QuestDB connecting to %s:%d db=%s", self.host, self.port, self.database)
-        self._connection = await AsyncConnection.connect(self.dsn)
+            raise RuntimeError(
+                "psycopg-pool is required for QuestDBClient. "
+                "Install with: pip install psycopg-pool"
+            ) from exc
+        logger.info(
+            "QuestDB creating connection pool to %s:%d db=%s pool_size=%d",
+            self.host, self.port, self.database, self.pool_size,
+        )
+        self._pool = AsyncConnectionPool(
+            conninfo=self.dsn,
+            min_size=1,
+            max_size=self.pool_size,
+            open=False,
+        )
+        await self._pool.open()
         self._connected = True
-        logger.info("QuestDB connected")
+        logger.info("QuestDB connection pool ready")
 
     async def close(self) -> None:
-        if self._connection is not None:
-            logger.info("QuestDB closing connection")
+        if self._pool is not None:
+            logger.info("QuestDB closing connection pool")
+            await self._pool.close()
+            self._pool = None
+            self._connected = False
+        elif self._connection is not None:
+            logger.info("QuestDB closing legacy connection")
             await self._connection.close()
             self._connection = None
             self._connected = False
@@ -83,11 +110,20 @@ class QuestDBClient(MarketOHLCVStore):
     async def health_check(self) -> bool:
         """Return True if QuestDB is reachable, False otherwise."""
         try:
-            if not self._connected or self._connection is None:
+            if not self._connected:
                 return False
-            async with self._connection.cursor() as cur:
-                await cur.execute("SELECT 1")
+            # Legacy path (pre-injected connection in tests)
+            if self._connection is not None and self._pool is None:
+                async with self._connection.cursor() as cur:
+                    await cur.execute("SELECT 1")
                 return True
+            # Pool path
+            if self._pool is not None:
+                async with self._pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute("SELECT 1")
+                return True
+            return False
         except Exception:
             return False
 
@@ -99,68 +135,95 @@ class QuestDBClient(MarketOHLCVStore):
         await self.close()
 
     async def _ensure_connection(self) -> None:
-        """Verify the connection is alive and reconnect if stale."""
-        if self._connection is None or not self._connected:
-            await self.connect()
-            return
-        try:
-            async with self._connection.cursor() as cur:
-                await cur.execute("SELECT 1")
-        except Exception:
-            logger.warning("QuestDB connection stale; reconnecting")
-            try:
-                await self._connection.close()
-            except Exception:
-                logger.debug("failed to close stale QuestDB connection", exc_info=True)
-            self._connected = False
+        """Ensure the pool is open.  No-op for legacy pre-injected connections."""
+        if self._connection is not None and self._pool is None:
+            return  # Legacy path: connection is managed externally
+        if not self._connected or self._pool is None:
             await self.connect()
 
     async def create_market_ohlcv_table(self) -> None:
         await self._ensure_connection()
-        async with self._lock:
-            async with self._connection.cursor() as cur:
-                await cur.execute(CREATE_MARKET_OHLCV_TABLE_SQL)
-                for sql in MARKET_OHLCV_IDENTITY_ALTER_SQL:
-                    try:
-                        await cur.execute(sql)
-                    except Exception:
-                        logger.debug("QuestDB identity column migration skipped/already applied: %s", sql, exc_info=True)
-            await self._connection.commit()
+        async with self._ddl_lock:
+            if self._pool is not None:
+                async with self._pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(CREATE_MARKET_OHLCV_TABLE_SQL)
+                        for sql in MARKET_OHLCV_IDENTITY_ALTER_SQL:
+                            try:
+                                await cur.execute(sql)
+                            except Exception:
+                                logger.debug("QuestDB identity column migration skipped/already applied: %s", sql, exc_info=True)
+                    await conn.commit()
+            else:
+                async with self._connection.cursor() as cur:
+                    await cur.execute(CREATE_MARKET_OHLCV_TABLE_SQL)
+                    for sql in MARKET_OHLCV_IDENTITY_ALTER_SQL:
+                        try:
+                            await cur.execute(sql)
+                        except Exception:
+                            logger.debug("QuestDB identity column migration skipped/already applied: %s", sql, exc_info=True)
+                await self._connection.commit()
 
     async def create_equity_snapshot_table(self) -> None:
         await self._ensure_connection()
-        async with self._lock:
-            async with self._connection.cursor() as cur:
-                await cur.execute(CREATE_EQUITY_SNAPSHOT_TABLE_SQL)
-            await self._connection.commit()
+        async with self._ddl_lock:
+            if self._pool is not None:
+                async with self._pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(CREATE_EQUITY_SNAPSHOT_TABLE_SQL)
+                    await conn.commit()
+            else:
+                async with self._connection.cursor() as cur:
+                    await cur.execute(CREATE_EQUITY_SNAPSHOT_TABLE_SQL)
+                await self._connection.commit()
 
     async def create_fx_option_snapshot_table(self) -> None:
         await self._ensure_connection()
-        async with self._lock:
-            async with self._connection.cursor() as cur:
-                await cur.execute(CREATE_FX_OPTION_SNAPSHOT_TABLE_SQL)
-            await self._connection.commit()
+        async with self._ddl_lock:
+            if self._pool is not None:
+                async with self._pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(CREATE_FX_OPTION_SNAPSHOT_TABLE_SQL)
+                    await conn.commit()
+            else:
+                async with self._connection.cursor() as cur:
+                    await cur.execute(CREATE_FX_OPTION_SNAPSHOT_TABLE_SQL)
+                await self._connection.commit()
 
     async def insert_snapshots(self, snapshots: Sequence[EquitySnapshot]) -> int:
         if not snapshots:
             return 0
         await self._ensure_connection()
-        async with self._lock:
-            async with self._connection.cursor() as cur:
-                await cur.execute(CREATE_EQUITY_SNAPSHOT_TABLE_SQL)
-                await cur.executemany(INSERT_EQUITY_SNAPSHOT_SQL, [snapshot_to_row(s) for s in snapshots])
-            await self._connection.commit()
+        async with self._ddl_lock:
+            if self._pool is not None:
+                async with self._pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(CREATE_EQUITY_SNAPSHOT_TABLE_SQL)
+                        await cur.executemany(INSERT_EQUITY_SNAPSHOT_SQL, [snapshot_to_row(s) for s in snapshots])
+                    await conn.commit()
+            else:
+                async with self._connection.cursor() as cur:
+                    await cur.execute(CREATE_EQUITY_SNAPSHOT_TABLE_SQL)
+                    await cur.executemany(INSERT_EQUITY_SNAPSHOT_SQL, [snapshot_to_row(s) for s in snapshots])
+                await self._connection.commit()
         return len(snapshots)
 
     async def insert_fx_option_snapshots(self, snapshots: Sequence[FXOptionSnapshot]) -> int:
         if not snapshots:
             return 0
         await self._ensure_connection()
-        async with self._lock:
-            async with self._connection.cursor() as cur:
-                await cur.execute(CREATE_FX_OPTION_SNAPSHOT_TABLE_SQL)
-                await cur.executemany(INSERT_FX_OPTION_SNAPSHOT_SQL, [fx_option_snapshot_to_row(s) for s in snapshots])
-            await self._connection.commit()
+        async with self._ddl_lock:
+            if self._pool is not None:
+                async with self._pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(CREATE_FX_OPTION_SNAPSHOT_TABLE_SQL)
+                        await cur.executemany(INSERT_FX_OPTION_SNAPSHOT_SQL, [fx_option_snapshot_to_row(s) for s in snapshots])
+                    await conn.commit()
+            else:
+                async with self._connection.cursor() as cur:
+                    await cur.execute(CREATE_FX_OPTION_SNAPSHOT_TABLE_SQL)
+                    await cur.executemany(INSERT_FX_OPTION_SNAPSHOT_SQL, [fx_option_snapshot_to_row(s) for s in snapshots])
+                await self._connection.commit()
         return len(snapshots)
 
     async def query_fx_option_snapshots(
@@ -243,11 +306,18 @@ class QuestDBClient(MarketOHLCVStore):
         if not bars:
             return 0
         await self._ensure_connection()
-        async with self._lock:
-            async with self._connection.cursor() as cur:
-                await cur.execute(CREATE_MARKET_OHLCV_TABLE_SQL)
-                await cur.executemany(INSERT_MARKET_OHLCV_SQL, [bar_to_row(bar) for bar in bars])
-            await self._connection.commit()
+        async with self._ddl_lock:
+            if self._pool is not None:
+                async with self._pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(CREATE_MARKET_OHLCV_TABLE_SQL)
+                        await cur.executemany(INSERT_MARKET_OHLCV_SQL, [bar_to_row(bar) for bar in bars])
+                    await conn.commit()
+            else:
+                async with self._connection.cursor() as cur:
+                    await cur.execute(CREATE_MARKET_OHLCV_TABLE_SQL)
+                    await cur.executemany(INSERT_MARKET_OHLCV_SQL, [bar_to_row(bar) for bar in bars])
+                await self._connection.commit()
         return len(bars)
 
     async def query_historical_bars(
@@ -285,7 +355,15 @@ class QuestDBClient(MarketOHLCVStore):
 
     async def _fetch_dicts(self, sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:
         await self._ensure_connection()
-        async with self._lock:
+        if self._pool is not None:
+            async with self._pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(sql, params)
+                    columns = [col.name for col in cur.description]
+                    rows = await cur.fetchall()
+                return [dict(zip(columns, row, strict=True)) for row in rows]
+        # Legacy path (pre-injected connection in tests)
+        async with self._ddl_lock:
             async with self._connection.cursor() as cur:
                 await cur.execute(sql, params)
                 columns = [col.name for col in cur.description]
