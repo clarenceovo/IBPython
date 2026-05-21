@@ -274,19 +274,48 @@ class IBKROrderClient:
     ) -> OrderStatus:
         """Wait for an order to reach a terminal or submitted status.
 
-        Polls the trade's orderStatus for up to ``timeout_seconds``.
-        Returns the final mapped OrderStatus.
+        Uses ib_insync's ``trade.statusEvent`` for event-driven notification
+        instead of polling. Falls back to checking the current status on timeout.
+        Terminal states: filled, cancelled, api cancelled, inactive.
+        Target states: submitted, presubmitted.
         """
-        deadline = asyncio.get_event_loop().time() + timeout_seconds
-        while asyncio.get_event_loop().time() < deadline:
+        # First check if already in a target state
+        status_str = str(getattr(trade.orderStatus, "status", ""))
+        lower = status_str.lower()
+        if lower in ("filled", "cancelled", "api cancelled", "inactive", "submitted", "presubmitted"):
+            return _ibkr_order_status_to_enum(status_str)
+
+        # Create a future that fires when statusEvent emits
+        loop = asyncio.get_running_loop()
+        status_future: asyncio.Future[None] = loop.create_future()
+
+        def _on_status_event(_trade: Any) -> None:
+            """Callback for trade.statusEvent."""
+            if not status_future.done():
+                current = str(getattr(_trade.orderStatus, "status", "")).lower()
+                if current in ("filled", "cancelled", "api cancelled", "inactive", "submitted", "presubmitted"):
+                    status_future.set_result(None)
+
+        # Register the event handler
+        trade.statusEvent += _on_status_event
+        try:
+            # Check once more in case status changed between initial check and handler registration
             status_str = str(getattr(trade.orderStatus, "status", ""))
             lower = status_str.lower()
-            if lower in ("filled", "cancelled", "api cancelled", "inactive"):
+            if lower in ("filled", "cancelled", "api cancelled", "inactive", "submitted", "presubmitted"):
                 return _ibkr_order_status_to_enum(status_str)
-            if lower in ("submitted", "presubmitted"):
-                return OrderStatus.SUBMITTED
-            await asyncio.sleep(0.1)
-        # Timeout — return whatever the current status is.
+
+            # Wait for the event with a timeout
+            await asyncio.wait_for(status_future, timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            # Timeout — return whatever the current status is
+            pass
+        finally:
+            try:
+                trade.statusEvent -= _on_status_event
+            except Exception:
+                pass
+
         return _ibkr_order_status_to_enum(getattr(trade.orderStatus, "status", None))
 
 
