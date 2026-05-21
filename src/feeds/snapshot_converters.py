@@ -28,6 +28,7 @@ def ticker_to_snapshot(
     currency: str,
     primary_exchange: str = "",
     con_id: int = 0,
+    timestamp: datetime | None = None,
 ) -> EquitySnapshot:
     """Convert an ib_insync Ticker to an EquitySnapshot."""
     return EquitySnapshot(
@@ -36,7 +37,7 @@ def ticker_to_snapshot(
         currency=currency,
         primary_exchange=primary_exchange,
         con_id=con_id,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=timestamp or datetime.now(timezone.utc),
         last=_safe_float(getattr(ticker, "last", None)),
         bid=_safe_float(getattr(ticker, "bid", None)),
         ask=_safe_float(getattr(ticker, "ask", None)),

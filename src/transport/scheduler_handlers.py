@@ -596,7 +596,11 @@ class EquitySnapshotJobHandler:
             if i < len(symbol_params):
                 s, ex, cur, pe, _ = symbol_params[i]
                 try:
-                    snap = ticker_to_snapshot(ticker, symbol=s, exchange=ex, currency=cur, primary_exchange=pe)
+                    ticker_time = getattr(ticker, "time", None)
+                    snap = ticker_to_snapshot(
+                        ticker, symbol=s, exchange=ex, currency=cur, primary_exchange=pe,
+                        timestamp=ticker_time if isinstance(ticker_time, datetime) else None,
+                    )
                     snapshots.append(snap)
                 except Exception:
                     failed.append(s)
