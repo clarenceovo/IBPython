@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -8,6 +9,8 @@ from src.config import config_constant as constants
 from src.feeds.index_composition import IndexCompositionPayload
 from src.feeds.models import AssetClass, OHLCVBar
 from src.feeds.snapshotter import EquitySnapshot, FXOptionSnapshot, fx_option_contract_key
+
+logger = logging.getLogger(__name__)
 
 
 def latest_bar_key(asset_class: AssetClass | str, bar_size: str, symbol: str | None = None) -> str:

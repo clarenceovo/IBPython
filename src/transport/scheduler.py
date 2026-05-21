@@ -25,11 +25,6 @@ from src.feeds.snapshotter import SnapshotWatchlist
 from src.transport.redis_client import ohlcv_snapshot_calendar_key
 from src.transport.scheduler_calendar import _parse_cron_expression, next_cron_run
 
-logger = logging.getLogger(__name__)
-execution_logger = logging.getLogger(f"{__name__}.execution")
-
-JobHandler = Callable[["SchedulerJobDefinition"], Awaitable[Any]]
-
 from src.transport.scheduler_models import (  # noqa: F401
     SCHEDULER_RUN_STATUSES,
     SchedulerJobDefinition,
@@ -49,7 +44,13 @@ from src.transport.scheduler_handlers import (  # noqa: F401
     EquitySnapshotJobHandler,
     _contract_fingerprint,
     _loader_quality_summary,
+    _scheduler_now,
 )
+
+logger = logging.getLogger(__name__)
+execution_logger = logging.getLogger(f"{__name__}.execution")
+
+JobHandler = Callable[["SchedulerJobDefinition"], Awaitable[Any]]
 
 
 class GenericScheduler:

@@ -45,7 +45,6 @@ from src.feeds.orders import (
     normalize_what_if_response,
 )
 
-logger = logging.getLogger(__name__)
 from src.feeds.ibkr_order_client_ops import (
     place_order as _place_order,
     cancel_order as _cancel_order,
@@ -55,6 +54,8 @@ from src.feeds.ibkr_order_client_ops import (
     load_executions as _load_executions,
     load_completed_orders as _load_completed_orders,
 )
+
+logger = logging.getLogger(__name__)
 
 
 
