@@ -149,14 +149,42 @@ def _load_config() -> tuple[dict[str, tuple[str, str]], dict[str, tuple[str, str
 _DEFAULT_INDEX_EXCHANGE_MAP = _INDEX_EXCHANGE_MAP
 _DEFAULT_COMMODITY_FUTURES_PRESETS = _COMMODITY_FUTURES_PRESETS
 
-INDEX_EXCHANGE_MAP, COMMODITY_FUTURES_PRESETS = _load_config()
+# Lazy initialization: defer config file I/O until first access.
+# This avoids file reads at import time (which can fail in test environments
+# and slows down module loading).
+_lazy_index_map: dict[str, tuple[str, str]] | None = None
+_lazy_commodity_presets: dict[str, tuple[str, str]] | None = None
+
+
+def _get_index_exchange_map() -> dict[str, tuple[str, str]]:
+    global _lazy_index_map
+    if _lazy_index_map is None:
+        _lazy_index_map, _lazy_commodity_presets = _load_config()
+    return _lazy_index_map
+
+
+def _get_commodity_futures_presets() -> dict[str, tuple[str, str]]:
+    global _lazy_commodity_presets
+    if _lazy_commodity_presets is None:
+        _lazy_index_map, _lazy_commodity_presets = _load_config()
+    return _lazy_commodity_presets
+
+
+def __getattr__(name: str) -> Any:
+    """Module-level __getattr__ for lazy initialization of public constants."""
+    if name == "INDEX_EXCHANGE_MAP":
+        return _get_index_exchange_map()
+    if name == "COMMODITY_FUTURES_PRESETS":
+        return _get_commodity_futures_presets()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def resolve_index(symbol: str) -> dict[str, str]:
     """Look up IBKR exchange and currency for a known index symbol."""
     upper = symbol.strip().upper()
-    if upper in INDEX_EXCHANGE_MAP:
-        exchange, currency = INDEX_EXCHANGE_MAP[upper]
+    index_map = _get_index_exchange_map()
+    if upper in index_map:
+        exchange, currency = index_map[upper]
         return {"symbol": upper, "exchange": exchange, "currency": currency}
     return {"symbol": upper, "exchange": "CBOE", "currency": "USD"}
 
@@ -164,5 +192,6 @@ def resolve_index(symbol: str) -> dict[str, str]:
 def resolve_commodity_future(symbol: str) -> dict[str, str]:
     """Look up exchange and currency for a commodity futures symbol."""
     upper = symbol.strip().upper()
-    exchange, currency = COMMODITY_FUTURES_PRESETS.get(upper, ("NYMEX", "USD"))
+    presets = _get_commodity_futures_presets()
+    exchange, currency = presets.get(upper, ("NYMEX", "USD"))
     return {"symbol": upper, "exchange": exchange, "currency": currency}
