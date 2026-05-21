@@ -26,6 +26,13 @@ router = APIRouter(prefix="/streaming", tags=["market-data"])
 # use sticky sessions (ip_hash or cookie-based) so that subscription management requests
 # always route to the worker that owns the subscription.
 _active_subscriptions: dict[str, StreamSubscription] = {}
+_sub_lock = asyncio.Lock()
+"""Lock for mutations to _active_subscriptions.
+
+In asyncio, a Lock prevents interleaving between the SSE generator's finally block,
+the cleanup task, and the API handlers.  Without it, dict mutation during iteration
+or a race between stop_subscription and the generator's cleanup could cause issues.
+"""
 
 # TTL-based auto-cleanup: subscriptions older than this are considered stale.
 # Configurable via environment or direct patch; defaults to 1 hour.
@@ -49,21 +56,22 @@ async def _cleanup_orphaned_subscriptions() -> None:
     while True:
         await asyncio.sleep(_CLEANUP_INTERVAL_SECONDS)
         try:
-            expired_ids = [
-                sid
-                for sid, sub in _active_subscriptions.items()
-                if _is_subscription_expired(sub)
-            ]
-            for sid in expired_ids:
-                sub = _active_subscriptions.get(sid)
-                if sub is not None:
-                    logger.warning(
-                        "Cleaning up expired subscription: subscription_id=%s age=%.0fs",
-                        sid,
-                        (datetime.now(timezone.utc) - sub.connected_at).total_seconds(),
-                    )
-                    sub.stop()
-                    _active_subscriptions.pop(sid, None)
+            async with _sub_lock:
+                expired_ids = [
+                    sid
+                    for sid, sub in _active_subscriptions.items()
+                    if _is_subscription_expired(sub)
+                ]
+                for sid in expired_ids:
+                    sub = _active_subscriptions.get(sid)
+                    if sub is not None:
+                        logger.warning(
+                            "Cleaning up expired subscription: subscription_id=%s age=%.0fs",
+                            sid,
+                            (datetime.now(timezone.utc) - sub.connected_at).total_seconds(),
+                        )
+                        sub.stop()
+                        _active_subscriptions.pop(sid, None)
         except Exception:
             logger.exception("Error during subscription cleanup")
 
@@ -197,7 +205,8 @@ async def stream_ticker(
         connected_at=datetime.now(timezone.utc),
     )
     subscription._set_stop_event(stop_event)
-    _active_subscriptions[subscription_id] = subscription
+    async with _sub_lock:
+        _active_subscriptions[subscription_id] = subscription
 
     async def event_generator():
         ticker = None
@@ -230,7 +239,8 @@ async def stream_ticker(
         finally:
             if ticker is not None:
                 await state.feed.unsubscribe_ticker(ticker)
-            _active_subscriptions.pop(subscription_id, None)
+            async with _sub_lock:
+                _active_subscriptions.pop(subscription_id, None)
             logger.info("SSE stream closed: subscription_id=%s updates_sent=%d", subscription_id, updates_sent)
 
     # Start the background cleanup task on first subscription
@@ -254,16 +264,17 @@ async def stream_ticker(
     summary="List active streaming subscriptions",
 )
 async def list_active_subscriptions() -> list[StreamSubscription]:
-    # Clean up expired subscriptions on read
-    expired_ids = [
-        sid for sid, sub in _active_subscriptions.items()
-        if _is_subscription_expired(sub)
-    ]
-    for sid in expired_ids:
-        sub = _active_subscriptions.pop(sid, None)
-        if sub is not None:
-            sub.stop()
-    return list(_active_subscriptions.values())
+    async with _sub_lock:
+        # Clean up expired subscriptions on read
+        expired_ids = [
+            sid for sid, sub in _active_subscriptions.items()
+            if _is_subscription_expired(sub)
+        ]
+        for sid in expired_ids:
+            sub = _active_subscriptions.pop(sid, None)
+            if sub is not None:
+                sub.stop()
+        return list(_active_subscriptions.values())
 
 
 @router.delete(
@@ -271,10 +282,11 @@ async def list_active_subscriptions() -> list[StreamSubscription]:
     summary="Stop a streaming subscription",
 )
 async def stop_subscription(subscription_id: str) -> dict[str, str]:
-    sub = _active_subscriptions.get(subscription_id)
-    if sub is None:
-        raise HTTPException(status_code=404, detail=f"Subscription {subscription_id} not found")
-    # Signal the SSE generator to stop, then clean up
-    sub.stop()
-    _active_subscriptions.pop(subscription_id, None)
+    async with _sub_lock:
+        sub = _active_subscriptions.get(subscription_id)
+        if sub is None:
+            raise HTTPException(status_code=404, detail=f"Subscription {subscription_id} not found")
+        # Signal the SSE generator to stop, then clean up
+        sub.stop()
+        _active_subscriptions.pop(subscription_id, None)
     return {"status": "stopped", "subscription_id": subscription_id}
