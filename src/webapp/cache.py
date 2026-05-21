@@ -57,11 +57,11 @@ class AsyncTTLCache:
         if ttl <= 0:
             return
         async with self._lock:
-            self._prune_expired(time.monotonic())
+            # Only evict when at max capacity; remove oldest regardless of expiry.
+            if len(self._entries) >= self.max_size and key not in self._entries:
+                self._entries.popitem(last=False)
             self._entries[key] = _CacheEntry(value=value, expires_at=time.monotonic() + ttl)
             self._entries.move_to_end(key)
-            while len(self._entries) > self.max_size:
-                self._entries.popitem(last=False)
 
     async def get_or_set(
         self,
@@ -88,17 +88,25 @@ class AsyncTTLCache:
 
     async def stats(self) -> CacheStats:
         async with self._lock:
-            self._prune_expired(time.monotonic())
             return CacheStats(
                 size=len(self._entries),
                 max_size=self.max_size,
                 default_ttl_seconds=self.ttl_seconds,
             )
 
-    def _prune_expired(self, now: float) -> None:
+    async def prune(self) -> int:
+        """Explicitly remove all expired entries. Returns the number pruned."""
+        async with self._lock:
+            now = time.monotonic()
+            return self._prune_expired(now)
+
+    def _prune_expired(self, now: float) -> int:
+        pruned = 0
         for key in list(self._entries.keys()):
             if self._entries[key].expires_at <= now:
                 self._entries.pop(key, None)
+                pruned += 1
+        return pruned
 
     async def _lock_for_key(self, key: str) -> asyncio.Lock:
         async with self._lock:
