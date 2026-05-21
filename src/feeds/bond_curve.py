@@ -138,10 +138,10 @@ _MARKET_TEMPLATES: dict[SovereignBondMarket, _MarketTemplate] = {
         issuer="US TREASURY",
         futures_exchange="CBOT",
         tenors=(
-            _StandardTenorTemplate(tenor="2Y", tenor_years=2, futures_symbol="ZT", futures_exchange="CBOT", par_yield=0.0430),
-            _StandardTenorTemplate(tenor="5Y", tenor_years=5, futures_symbol="ZF", futures_exchange="CBOT", par_yield=0.0410),
-            _StandardTenorTemplate(tenor="10Y", tenor_years=10, futures_symbol="ZN", futures_exchange="CBOT", par_yield=0.0420),
-            _StandardTenorTemplate(tenor="30Y", tenor_years=30, futures_symbol="ZB", futures_exchange="CBOT", par_yield=0.0440),
+            _StandardTenorTemplate(tenor="2Y", tenor_years=2, futures_symbol="ZT", futures_exchange="CBOT", par_yield=0.0409),
+            _StandardTenorTemplate(tenor="5Y", tenor_years=5, futures_symbol="ZF", futures_exchange="CBOT", par_yield=0.0432),
+            _StandardTenorTemplate(tenor="10Y", tenor_years=10, futures_symbol="ZN", futures_exchange="CBOT", par_yield=0.0467),
+            _StandardTenorTemplate(tenor="30Y", tenor_years=30, futures_symbol="ZB", futures_exchange="CBOT", par_yield=0.0514),
         ),
     ),
     SovereignBondMarket.JGB: _MarketTemplate(
