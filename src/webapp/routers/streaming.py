@@ -129,12 +129,19 @@ def _safe_float(value: Any) -> float | None:
 
 def _ticker_to_snapshot(ticker: Any, spec: ContractSpec) -> StreamingTickerSnapshot:
     """Convert an ib_insync Ticker to a StreamingTickerSnapshot."""
+    # Prefer the ticker's own timestamp; fall back to wall clock with a warning.
+    ticker_time = getattr(ticker, "time", None)
+    if ticker_time is not None:
+        ts = ticker_time if isinstance(ticker_time, datetime) else datetime.fromtimestamp(ticker_time, tz=timezone.utc)
+    else:
+        logger.warning("ticker.time is None for %s streaming — falling back to datetime.now(UTC)", spec.symbol)
+        ts = datetime.now(timezone.utc)
     return StreamingTickerSnapshot(
         symbol=spec.symbol,
         asset_class=spec.asset_class,
         exchange=spec.exchange,
         currency=spec.currency,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=ts,
         last=_safe_float(getattr(ticker, "last", None)),
         bid=_safe_float(getattr(ticker, "bid", None)),
         ask=_safe_float(getattr(ticker, "ask", None)),
