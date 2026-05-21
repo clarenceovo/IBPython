@@ -84,6 +84,7 @@ class PlaceOrderRequest(BaseModel):
     trail_stop_price: float | None = Field(default=None, gt=0)
     limit_price_offset: float | None = Field(default=None, gt=0)
     outside_rth: bool = False
+    idempotency_key: str | None = Field(default=None, min_length=1)
 
     @field_validator("symbol", mode="before")
     @classmethod

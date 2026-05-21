@@ -40,7 +40,25 @@ async def place_order(client: Any, request: PlaceOrderRequest) -> OrderResponse:
     Creates the ib_insync Contract and Order from the request, places
     the order, waits briefly for acknowledgment, and returns the result.
     The order is UUID-tagged and cached to Redis for auditability.
+
+    If ``request.idempotency_key`` is provided, checks Redis for a previous
+    order with the same key. If found, returns the cached response instead
+    of submitting a new order.
     """
+    # Idempotency check
+    if request.idempotency_key and client._redis is not None:
+        cached_uuid = await _check_idempotency_key(client._redis, request.idempotency_key)
+        if cached_uuid is not None:
+            logger.info(
+                "place_order: idempotency key=%s found existing order_uuid=%s, returning cached",
+                request.idempotency_key,
+                cached_uuid,
+            )
+            lookup = await client.get_cached_order(cached_uuid)
+            if lookup.found and lookup.envelope is not None and lookup.envelope.response:
+                return OrderResponse.model_validate(lookup.envelope.response)
+            # Envelope missing — fall through to place a new order
+
     await client._connection.ensure_connected()
 
     order_uuid = str(_uuid.uuid4())
@@ -114,6 +132,10 @@ async def place_order(client: Any, request: PlaceOrderRequest) -> OrderResponse:
     envelope.touch()
 
     await client._cache_envelope(envelope, ttl_seconds=0)
+
+    # Store idempotency key mapping
+    if request.idempotency_key and client._redis is not None:
+        await _store_idempotency_key(client._redis, request.idempotency_key, order_uuid)
 
     logger.info(
         "place_order: uuid=%s order_id=%s status=%s symbol=%s",
@@ -392,3 +414,36 @@ async def load_completed_orders(client: Any) -> list[CompletedOrder]:
     result = [normalize_completed_order(trade) for trade in (trades or [])]
     logger.info("load_completed_orders: %d completed orders loaded", len(result))
     return result
+
+
+# ---------------------------------------------------------------------------
+# Idempotency key helpers
+# ---------------------------------------------------------------------------
+
+_IDEMPOTENCY_KEY_PREFIX = "order_idempotency:"
+_IDEMPOTENCY_TTL_SECONDS = 86400  # 24 hours
+
+
+async def _check_idempotency_key(redis: Any, idempotency_key: str) -> str | None:
+    """Check Redis for an existing order UUID mapped to the idempotency key."""
+    try:
+        key = f"{_IDEMPOTENCY_KEY_PREFIX}{idempotency_key}"
+        raw_client = await redis.raw_client()
+        cached = await raw_client.get(key)
+        if cached is not None:
+            return (cached.decode("utf-8") if isinstance(cached, bytes) else str(cached))
+        return None
+    except Exception:
+        logger.warning("_check_idempotency_key: failed for key=%s", idempotency_key, exc_info=True)
+        return None
+
+
+async def _store_idempotency_key(redis: Any, idempotency_key: str, order_uuid: str) -> None:
+    """Store a mapping from idempotency key to order UUID in Redis with TTL."""
+    try:
+        key = f"{_IDEMPOTENCY_KEY_PREFIX}{idempotency_key}"
+        raw_client = await redis.raw_client()
+        await raw_client.set(key, order_uuid, ex=_IDEMPOTENCY_TTL_SECONDS)
+        logger.debug("_store_idempotency_key: stored key=%s -> uuid=%s (TTL=%ds)", idempotency_key, order_uuid, _IDEMPOTENCY_TTL_SECONDS)
+    except Exception:
+        logger.warning("_store_idempotency_key: failed for key=%s uuid=%s", idempotency_key, order_uuid, exc_info=True)
