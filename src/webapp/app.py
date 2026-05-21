@@ -9,9 +9,13 @@ from fastapi.responses import JSONResponse
 
 from src.config.settings import Settings, load_settings
 from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
+from src.webapp.middleware.correlation import CorrelationIdFilter, CorrelationIdMiddleware
 from src.webapp.routers import account, business, fixed_income, market_data, orders, reference_data, scanner, snapshot, streaming, system, tick_data
 
 logger = logging.getLogger(__name__)
+
+# Inject correlation_id into all log records from this application.
+logging.getLogger().addFilter(CorrelationIdFilter())
 
 
 def create_app(
@@ -88,6 +92,8 @@ def create_app(
         docs_url="/docs",
         redoc_url="/redoc",
     )
+    fastapi_app.add_middleware(CorrelationIdMiddleware)
+
     fastapi_app.include_router(business.router, prefix="/api/v1")
     fastapi_app.include_router(fixed_income.router, prefix="/api/v1")
     fastapi_app.include_router(system.router, prefix="/api/v1")
