@@ -12,6 +12,8 @@ from src.feeds.exchange_resolver import resolve_equity
 from src.feeds.models import AssetClass, FXOHLCVBar, FutureOHLCVBar, OHLCVBar, OHLCVRequest, OptionOHLCVBar
 from src.feeds.news import HistoricalNewsHeadline, HistoricalNewsRequest, NewsArticle, NewsArticleRequest
 from src.feeds.options import OptionAnalyticsRequest, OptionAnalyticsSnapshot, OptionContractSpec, OptionRight, OptionSkewSurfaceRequest, OptionSkewSurfaceResponse
+from src.config.reference_data import resolve_commodity_future as _resolve_commodity_future
+from src.config.reference_data import resolve_index as _resolve_index
 from src.feeds.snapshotter import fx_pair_parts
 from src.feeds.tick_data import HeadTimestampRequest, HistoricalTickRequest, HistoricalTickResponse, MarketRule
 from src.webapp.cache import stable_cache_key
@@ -177,24 +179,7 @@ class FutureOHLCVLoadRequest(MinimalOHLCVLoadControls):
         )
 
 
-_COMMODITY_FUTURES_PRESETS: dict[str, tuple[str, str]] = {
-    "CL": ("NYMEX", "USD"),
-    "NG": ("NYMEX", "USD"),
-    "GC": ("COMEX", "USD"),
-    "SI": ("COMEX", "USD"),
-    "HG": ("COMEX", "USD"),
-    "ZC": ("CBOT", "USD"),
-    "ZS": ("CBOT", "USD"),
-    "ZW": ("CBOT", "USD"),
-    "ZL": ("CBOT", "USD"),
-    "ZM": ("CBOT", "USD"),
-}
 
-
-def _resolve_commodity_future(symbol: str) -> dict[str, str]:
-    upper = symbol.strip().upper()
-    exchange, currency = _COMMODITY_FUTURES_PRESETS.get(upper, ("NYMEX", "USD"))
-    return {"symbol": upper, "exchange": exchange, "currency": currency}
 
 
 class CommodityOHLCVLoadRequest(MinimalOHLCVLoadControls):
@@ -1175,60 +1160,7 @@ INDEX_OHLCV_REQUEST_EXAMPLES = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Index auto-resolver
-# ---------------------------------------------------------------------------
-_INDEX_EXCHANGE_MAP: dict[str, tuple[str, str]] = {
-    # US indices
-    "SPX": ("CBOE", "USD"),
-    "NDX": ("CBOE", "USD"),
-    "VIX": ("CBOE", "USD"),
-    "RUT": ("ICE", "USD"),
-    "DJI": ("CBOE", "USD"),
-    "OEX": ("CBOE", "USD"),
-    "NDXP": ("CBOE", "USD"),
-    # Hong Kong
-    "HSI": ("SEHK", "HKD"),
-    "HSCEI": ("SEHK", "HKD"),
-    "HSTECH": ("SEHK", "HKD"),
-    # Japan
-    "NIKKEI": ("TSEJ", "JPY"),
-    "NKY": ("TSEJ", "JPY"),
-    "TOPIX": ("TSEJ", "JPY"),
-    # Europe
-    "DAX": ("EUREX", "EUR"),
-    "FDAX": ("EUREX", "EUR"),
-    "ESTX50": ("EUREX", "EUR"),
-    "SMI": ("EBS", "CHF"),
-    "CAC40": ("SBF", "EUR"),
-    "FTSE100": ("LSE", "GBP"),
-    "FTSE250": ("LSE", "GBP"),
-    # Australia
-    "SPI": ("ASX", "AUD"),
-    "XJO": ("ASX", "AUD"),
-    # Korea
-    "KOSPI": ("KSE", "KRW"),
-    "KOSPI200": ("KSE", "KRW"),
-    "KOSDQ150": ("KSE", "KRW"),
-    # India
-    "NIFTY": ("NSE", "INR"),
-    "BANKNIFTY": ("NSE", "INR"),
-    # Singapore
-    "STI": ("SGX", "SGD"),
-    # Taiwan
-    "TAIEX": ("TWSE", "TWD"),
-    # Canada
-    "SPTSX": ("TSE", "CAD"),
-}
 
-
-def _resolve_index(symbol: str) -> dict[str, str]:
-    """Look up IBKR exchange and currency for a known index symbol."""
-    upper = symbol.strip().upper()
-    if upper in _INDEX_EXCHANGE_MAP:
-        exchange, currency = _INDEX_EXCHANGE_MAP[upper]
-        return {"symbol": upper, "exchange": exchange, "currency": currency}
-    return {"symbol": upper, "exchange": "CBOE", "currency": "USD"}
 
 
 OPTION_SKEW_REQUEST_EXAMPLES = {
