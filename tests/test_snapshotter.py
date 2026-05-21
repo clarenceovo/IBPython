@@ -18,8 +18,8 @@ from src.feeds.snapshotter import (
     fx_option_contract_key,
     ticker_to_fx_option_snapshot,
     ticker_to_snapshot,
-    _safe_float,
 )
+from src.feeds.snapshot_converters import _safe_float
 from src.feeds.options import OptionContractSpec, OptionRight
 from src.transport.questdb_client import fx_option_snapshot_to_row, snapshot_to_row
 from src.webapp.cache import AsyncTTLCache

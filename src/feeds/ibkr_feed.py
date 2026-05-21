@@ -178,7 +178,7 @@ class CircuitBreaker:
 
     @property
     def state(self) -> CircuitState:
-        """Current circuit breaker state (thread-safe read)."""
+        """Current circuit breaker state (lock-protected read)."""
         if self._state == CircuitState.OPEN:
             elapsed = monotonic_time.monotonic() - self._last_failure_time
             if elapsed >= self.recovery_timeout_seconds:
@@ -190,17 +190,20 @@ class CircuitBreaker:
         """True when the circuit is tripped (fast-failing)."""
         return self.state == CircuitState.OPEN
 
-    def record_success(self) -> None:
+    async def record_success(self) -> None:
         """Record a successful operation; resets the breaker."""
-        self._consecutive_failures = 0
-        self._state = CircuitState.CLOSED
+        async with self._lock:
+            self._consecutive_failures = 0
+            self._state = CircuitState.CLOSED
 
-    def record_failure(self) -> None:
+    async def record_failure(self) -> None:
         """Record a failed operation; trips the breaker if threshold is reached."""
-        self._consecutive_failures += 1
-        self._last_failure_time = monotonic_time.monotonic()
-        if self._consecutive_failures >= self.failure_threshold:
-            self._state = CircuitState.OPEN
+        async with self._lock:
+            self._consecutive_failures += 1
+            self._last_failure_time = monotonic_time.monotonic()
+            if self._consecutive_failures >= self.failure_threshold:
+                self._state = CircuitState.OPEN
+        if self._state == CircuitState.OPEN:
             logger.warning(
                 "Circuit breaker TRIPPED: %d consecutive failures (threshold=%d). "
                 "Fast-failing for %.0fs.",
@@ -391,7 +394,7 @@ class IBKRFeedClient:
                 try:
                     await self.connect()
                 except Exception as exc:
-                    self._circuit_breaker.record_failure()
+                    await self._circuit_breaker.record_failure()
                     root_cause = _root_cause_message(exc)
                     logger.exception(
                         "IBKR connection unavailable: host=%s port=%d clientId=%d root_cause=%s last_ibkr_error=%s",
@@ -410,10 +413,10 @@ class IBKRFeedClient:
         except RuntimeError:
             raise
         except Exception as exc:
-            self._circuit_breaker.record_failure()
+            await self._circuit_breaker.record_failure()
             raise
         else:
-            self._circuit_breaker.record_success()
+            await self._circuit_breaker.record_success()
 
     # ------------------------------------------------------------------
     # Retry — delegated to connection manager
@@ -425,10 +428,10 @@ class IBKRFeedClient:
     async def _with_retry(self, call: Any, *, operation: str) -> Any:
         try:
             result = await self._connection.with_retry(call, operation=operation)
-            self._circuit_breaker.record_success()
+            await self._circuit_breaker.record_success()
             return result
         except Exception:
-            self._circuit_breaker.record_failure()
+            await self._circuit_breaker.record_failure()
             raise
 
     def circuit_breaker_state(self) -> dict[str, Any]:

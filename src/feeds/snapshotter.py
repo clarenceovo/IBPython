@@ -25,7 +25,6 @@ from src.feeds.snapshot_models import (
 
 # Re-export all converters and helpers
 from src.feeds.snapshot_converters import (
-    _safe_float,
     fx_option_contract_key,
     fx_pair_parts,
     ticker_to_fx_option_snapshot,
@@ -41,7 +40,6 @@ __all__ = [
     "SnapshotResult",
     "SnapshotWatchlist",
     # Converters
-    "_safe_float",
     "fx_option_contract_key",
     "fx_pair_parts",
     "ticker_to_fx_option_snapshot",

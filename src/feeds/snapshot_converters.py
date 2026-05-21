@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from datetime import datetime, timezone
 from typing import Any
 
-from src.feeds.options import OptionContractSpec, OptionGreekSet, OptionGreekSource
+from src.feeds.options import OptionContractSpec, OptionGreekSet, OptionGreekSource, _normalize_greeks
 from src.feeds.snapshot_models import EquitySnapshot, FXOptionSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -31,13 +34,22 @@ def ticker_to_snapshot(
     timestamp: datetime | None = None,
 ) -> EquitySnapshot:
     """Convert an ib_insync Ticker to an EquitySnapshot."""
+    if timestamp is None:
+        ticker_time = getattr(ticker, "time", None)
+        if ticker_time is not None:
+            ts = ticker_time if isinstance(ticker_time, datetime) else datetime.fromtimestamp(ticker_time, tz=timezone.utc)
+        else:
+            logger.warning("ticker.time is None for %s — falling back to datetime.now(UTC)", symbol)
+            ts = datetime.now(timezone.utc)
+    else:
+        ts = timestamp
     return EquitySnapshot(
         symbol=symbol,
         exchange=exchange,
         currency=currency,
         primary_exchange=primary_exchange,
         con_id=con_id,
-        timestamp=timestamp or datetime.now(timezone.utc),
+        timestamp=ts,
         last=_safe_float(getattr(ticker, "last", None)),
         bid=_safe_float(getattr(ticker, "bid", None)),
         ask=_safe_float(getattr(ticker, "ask", None)),
@@ -97,19 +109,8 @@ def _sum_optional(*values: float | None) -> float | None:
 
 
 def _normalize_snapshot_greeks(value: Any, source: OptionGreekSource) -> OptionGreekSet | None:
-    if value is None:
-        return None
-    return OptionGreekSet(
-        source=source,
-        implied_vol=getattr(value, "impliedVol", None),
-        delta=getattr(value, "delta", None),
-        gamma=getattr(value, "gamma", None),
-        theta=getattr(value, "theta", None),
-        vega=getattr(value, "vega", None),
-        option_price=getattr(value, "optPrice", None),
-        pv_dividend=getattr(value, "pvDividend", None),
-        underlying_price=getattr(value, "undPrice", None),
-    )
+    """Delegate to options._normalize_greeks (canonical greek normalization)."""
+    return _normalize_greeks(value, source)
 
 
 def ticker_to_fx_option_snapshot(
@@ -119,6 +120,15 @@ def ticker_to_fx_option_snapshot(
     symbol: str,
     timestamp: datetime | None = None,
 ) -> FXOptionSnapshot:
+    if timestamp is None:
+        ticker_time = getattr(ticker, "time", None)
+        if ticker_time is not None:
+            ts = ticker_time if isinstance(ticker_time, datetime) else datetime.fromtimestamp(ticker_time, tz=timezone.utc)
+        else:
+            logger.warning("ticker.time is None for FX option %s — falling back to datetime.now(UTC)", symbol)
+            ts = datetime.now(timezone.utc)
+    else:
+        ts = timestamp
     return FXOptionSnapshot(
         symbol=symbol,
         underlying_symbol=contract.underlying_symbol,
@@ -131,7 +141,7 @@ def ticker_to_fx_option_snapshot(
         trading_class=contract.trading_class,
         local_symbol=contract.local_symbol,
         con_id=contract.con_id or getattr(getattr(ticker, "contract", None), "conId", None),
-        timestamp=timestamp or datetime.now(timezone.utc),
+        timestamp=ts,
         last=_safe_float(getattr(ticker, "last", None)),
         bid=_safe_float(getattr(ticker, "bid", None)),
         ask=_safe_float(getattr(ticker, "ask", None)),
