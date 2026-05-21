@@ -108,11 +108,6 @@ def _sum_optional(*values: float | None) -> float | None:
     return sum(present) if present else None
 
 
-def _normalize_snapshot_greeks(value: Any, source: OptionGreekSource) -> OptionGreekSet | None:
-    """Delegate to options._normalize_greeks (canonical greek normalization)."""
-    return _normalize_greeks(value, source)
-
-
 def ticker_to_fx_option_snapshot(
     ticker: Any,
     contract: OptionContractSpec,
@@ -163,8 +158,8 @@ def ticker_to_fx_option_snapshot(
         ),
         option_volume=_safe_float(getattr(ticker, "volume", None))
         or _sum_optional(_safe_float(getattr(ticker, "callVolume", None)), _safe_float(getattr(ticker, "putVolume", None))),
-        bid_greeks=_normalize_snapshot_greeks(getattr(ticker, "bidGreeks", None), OptionGreekSource.BID),
-        ask_greeks=_normalize_snapshot_greeks(getattr(ticker, "askGreeks", None), OptionGreekSource.ASK),
-        last_greeks=_normalize_snapshot_greeks(getattr(ticker, "lastGreeks", None), OptionGreekSource.LAST),
-        model_greeks=_normalize_snapshot_greeks(getattr(ticker, "modelGreeks", None), OptionGreekSource.MODEL),
+        bid_greeks=_normalize_greeks(getattr(ticker, "bidGreeks", None), OptionGreekSource.BID),
+        ask_greeks=_normalize_greeks(getattr(ticker, "askGreeks", None), OptionGreekSource.ASK),
+        last_greeks=_normalize_greeks(getattr(ticker, "lastGreeks", None), OptionGreekSource.LAST),
+        model_greeks=_normalize_greeks(getattr(ticker, "modelGreeks", None), OptionGreekSource.MODEL),
     )
