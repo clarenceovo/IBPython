@@ -7,22 +7,27 @@ that any MCP-compatible AI agent can query.
 
 Run:
     python -m src.mcp_server
-    # or with uvicorn for Streamable HTTP:
-    uvicorn src.mcp_server:mcp.streamable_http_app --port 9000
+    # or with Streamable HTTP (binds 127.0.0.1:9000 by default):
+    MCP_HTTP_HOST=0.0.0.0 MCP_HTTP_PORT=9000 MCP_API_KEY=secret python -m src.mcp_server
+    # or with uvicorn:
+    uvicorn src.mcp_server:mcp.streamable_http_app --host 127.0.0.1 --port 9000
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable, Awaitable
 
 from mcp.server.fastmcp import Context, FastMCP
 
+from src.config import config_constant as constants
 from src.config.settings import Settings, load_settings
 from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
 
@@ -621,11 +626,82 @@ def main_stdio() -> None:
     mcp.run(transport="stdio")
 
 
+class MCPBearerAuthMiddleware:
+    """Pure ASGI middleware for MCP HTTP bearer token auth.
+
+    When ``api_key`` is empty (default for stdio transport), auth is skipped.
+    When set, all HTTP requests must include ``Authorization: Bearer <token>``.
+    """
+
+    def __init__(self, app: Any, *, api_key: str) -> None:
+        self.app = app
+        self._api_key = api_key
+
+    async def __call__(
+        self,
+        scope: dict[str, Any],
+        receive: Callable[[], Awaitable[dict[str, Any]]],
+        send: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        if scope["type"] != "http" or not self._api_key:
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        auth_header = headers.get(b"authorization", b"")
+        if isinstance(auth_header, bytes):
+            auth_header = auth_header.decode("latin-1")
+
+        if not auth_header.lower().startswith("bearer "):
+            await self._send_401(send, "MCP API key required")
+            return
+
+        token = auth_header[7:].strip()
+        if not token or not secrets.compare_digest(token, self._api_key.strip()):
+            await self._send_401(send, "invalid MCP API key")
+            return
+
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    async def _send_401(send: Callable[[dict[str, Any]], Awaitable[None]], detail: str) -> None:
+        body = json.dumps({"detail": detail}).encode("utf-8")
+        await send({"type": "http.response.start", "status": 401, "headers": [
+            [b"content-type", b"application/json"],
+            [b"www-authenticate", b"Bearer"],
+            [b"content-length", str(len(body)).encode()],
+        ]})
+        await send({"type": "http.response.body", "body": body})
+
+
+def _get_mcp_http_config() -> tuple[str, int, str]:
+    """Read MCP HTTP transport config from environment variables."""
+    host = os.environ.get(constants.MCP_HTTP_HOST_ENV, constants.DEFAULT_MCP_HTTP_HOST)
+    port = int(os.environ.get(constants.MCP_HTTP_PORT_ENV, str(constants.DEFAULT_MCP_HTTP_PORT)))
+    api_key = os.environ.get(constants.MCP_API_KEY_ENV, constants.DEFAULT_MCP_API_KEY)
+    return host, port, api_key
+
+
 def main_streamable_http() -> None:
-    """Run MCP server over Streamable HTTP (for remote access)."""
+    """Run MCP server over Streamable HTTP (for remote access).
+
+    Binds to ``MCP_HTTP_HOST`` (default ``127.0.0.1``) on ``MCP_HTTP_PORT``
+    (default ``9000``).  When ``MCP_API_KEY`` is set, all requests must
+    include ``Authorization: Bearer <key>``.
+    """
     import uvicorn
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    uvicorn.run(mcp.streamable_http_app, host="0.0.0.0", port=9000)
+
+    host, port, api_key = _get_mcp_http_config()
+
+    app = mcp.streamable_http_app()
+    if api_key:
+        app = MCPBearerAuthMiddleware(app, api_key=api_key)
+        logger.info("MCP HTTP: auth enabled, binding to %s:%s", host, port)
+    else:
+        logger.warning("MCP HTTP: auth disabled (MCP_API_KEY not set), binding to %s:%s", host, port)
+
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":

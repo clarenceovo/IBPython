@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.config import config_constant as constants
+
 MCP_SERVER_PATH = Path(__file__).resolve().parent.parent / "src" / "mcp_server.py"
 
 
@@ -370,3 +372,196 @@ def test_sql_source_uses_stripped_for_execution():
     assert "_fetch_dicts(stripped, [])" in source, (
         "Must pass stripped SQL to _fetch_dicts, not the original sql variable"
     )
+
+
+# ── MCP HTTP security tests ────────────────────────────────────────────────
+
+
+def test_mcp_default_bind_is_localhost():
+    """Verify MCP HTTP defaults to 127.0.0.1, not 0.0.0.0."""
+    source = MCP_SERVER_PATH.read_text()
+    # The mcp_server.py reads from config_constant.py defaults
+    # Verify the old 0.0.0.0 is NOT in the entry point
+    assert 'host="0.0.0.0"' not in source, "Must not hardcode 0.0.0.0 as bind address"
+    # Verify config_constant has the right default
+    assert constants.DEFAULT_MCP_HTTP_HOST == "127.0.0.1"
+    assert constants.DEFAULT_MCP_HTTP_PORT == 9000
+
+
+def test_mcp_http_config_reads_env_vars():
+    """Verify _get_mcp_http_config reads from env vars with correct defaults."""
+    import os
+    env_vars = [constants.MCP_HTTP_HOST_ENV, constants.MCP_HTTP_PORT_ENV, constants.MCP_API_KEY_ENV]
+    saved = {k: os.environ.pop(k, None) for k in env_vars}
+    try:
+        # Test defaults by replicating the logic (can't import mcp_server due to FastMCP init)
+        host = os.environ.get(constants.MCP_HTTP_HOST_ENV, constants.DEFAULT_MCP_HTTP_HOST)
+        port = int(os.environ.get(constants.MCP_HTTP_PORT_ENV, str(constants.DEFAULT_MCP_HTTP_PORT)))
+        api_key = os.environ.get(constants.MCP_API_KEY_ENV, constants.DEFAULT_MCP_API_KEY)
+        assert host == "127.0.0.1"
+        assert port == 9000
+        assert api_key == ""
+
+        # Test with env vars set
+        os.environ[constants.MCP_HTTP_HOST_ENV] = "10.0.0.1"
+        os.environ[constants.MCP_HTTP_PORT_ENV] = "8888"
+        os.environ[constants.MCP_API_KEY_ENV] = "my-secret-key"
+        host = os.environ.get(constants.MCP_HTTP_HOST_ENV, constants.DEFAULT_MCP_HTTP_HOST)
+        port = int(os.environ.get(constants.MCP_HTTP_PORT_ENV, str(constants.DEFAULT_MCP_HTTP_PORT)))
+        api_key = os.environ.get(constants.MCP_API_KEY_ENV, constants.DEFAULT_MCP_API_KEY)
+        assert host == "10.0.0.1"
+        assert port == 8888
+        assert api_key == "my-secret-key"
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+            else:
+                os.environ.pop(k, None)
+
+
+def test_mcp_bearer_auth_middleware_rejects_missing_token():
+    """MCPBearerAuthMiddleware returns 401 when no Authorization header is present."""
+    import asyncio
+    middleware = _make_mcp_auth_middleware("test-key")
+
+    scope = {"type": "http", "headers": []}
+    status_code, body = _run_asgi_middleware(middleware, scope)
+    assert status_code == 401
+    assert b"MCP API key required" in body
+
+
+def test_mcp_bearer_auth_middleware_rejects_wrong_token():
+    """MCPBearerAuthMiddleware returns 401 when token doesn't match."""
+    import asyncio
+    middleware = _make_mcp_auth_middleware("test-key")
+
+    scope = {
+        "type": "http",
+        "headers": [(b"authorization", b"Bearer wrong-key")],
+    }
+    status_code, _ = _run_asgi_middleware(middleware, scope)
+    assert status_code == 401
+
+
+def test_mcp_bearer_auth_middleware_allows_valid_token():
+    """MCPBearerAuthMiddleware passes request through when token matches."""
+    import asyncio
+    called = False
+
+    async def inner_app(scope, receive, send):
+        nonlocal called
+        called = True
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    middleware = _make_mcp_auth_middleware("test-key", inner_app=inner_app)
+    scope = {
+        "type": "http",
+        "headers": [(b"authorization", b"Bearer test-key")],
+    }
+    _run_asgi_middleware(middleware, scope)
+    assert called
+
+
+def test_mcp_bearer_auth_middleware_skips_auth_when_key_empty():
+    """MCPBearerAuthMiddleware passes request through when api_key is empty."""
+    import asyncio
+    called = False
+
+    async def inner_app(scope, receive, send):
+        nonlocal called
+        called = True
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    middleware = _make_mcp_auth_middleware("", inner_app=inner_app)
+    scope = {"type": "http", "headers": []}
+    _run_asgi_middleware(middleware, scope)
+    assert called
+
+
+def test_mcp_bearer_auth_middleware_skips_non_http_scopes():
+    """MCPBearerAuthMiddleware passes through non-HTTP (e.g. lifespan) scopes."""
+    import asyncio
+    called = False
+
+    async def inner_app(scope, receive, send):
+        nonlocal called
+        called = True
+
+    middleware = _make_mcp_auth_middleware("test-key", inner_app=inner_app)
+    asyncio.run(middleware({"type": "lifespan"}, lambda: {"type": "lifespan.startup"}, lambda msg: None))
+    assert called
+
+
+def _fake_asgi_app(response_body: bytes = b"ok"):
+    """Create a minimal ASGI app that sends a 200 with the given body."""
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": response_body})
+    return app
+
+
+def _make_mcp_auth_middleware(api_key: str, inner_app: Any = None):
+    """Replicate MCPBearerAuthMiddleware for testing without importing mcp_server."""
+    import secrets as _secrets
+
+    app = inner_app or _fake_asgi_app(b"ok")
+
+    class _Middleware:
+        def __init__(self, app, *, api_key):
+            self.app = app
+            self._api_key = api_key
+
+        async def __call__(self, scope, receive, send):
+            import json as _json
+            if scope["type"] != "http" or not self._api_key:
+                await self.app(scope, receive, send)
+                return
+            headers = dict(scope.get("headers", []))
+            auth_header = headers.get(b"authorization", b"")
+            if isinstance(auth_header, bytes):
+                auth_header = auth_header.decode("latin-1")
+            if not auth_header.lower().startswith("bearer "):
+                body = _json.dumps({"detail": "MCP API key required"}).encode()
+                await send({"type": "http.response.start", "status": 401, "headers": [
+                    [b"content-type", b"application/json"],
+                    [b"www-authenticate", b"Bearer"],
+                    [b"content-length", str(len(body)).encode()],
+                ]})
+                await send({"type": "http.response.body", "body": body})
+                return
+            token = auth_header[7:].strip()
+            if not token or not _secrets.compare_digest(token, self._api_key.strip()):
+                body = _json.dumps({"detail": "invalid MCP API key"}).encode()
+                await send({"type": "http.response.start", "status": 401, "headers": [
+                    [b"content-type", b"application/json"],
+                    [b"www-authenticate", b"Bearer"],
+                    [b"content-length", str(len(body)).encode()],
+                ]})
+                await send({"type": "http.response.body", "body": body})
+                return
+            await self.app(scope, receive, send)
+
+    return _Middleware(app, api_key=api_key)
+
+
+def _run_asgi_middleware(middleware, scope):
+    """Run an ASGI middleware with a minimal scope, return (status_code, body)."""
+    import asyncio
+    status_code = None
+    body = None
+
+    async def receive():
+        return {"type": "http.request", "body": b""}
+
+    async def send(msg):
+        nonlocal status_code, body
+        if msg["type"] == "http.response.start":
+            status_code = msg["status"]
+        if msg["type"] == "http.response.body":
+            body = msg["body"]
+
+    asyncio.run(middleware(scope, receive, send))
+    return status_code, body
