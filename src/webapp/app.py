@@ -10,7 +10,8 @@ from fastapi.responses import JSONResponse
 from src.config.settings import Settings, load_settings
 from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
 from src.webapp.middleware.correlation import CorrelationIdFilter, CorrelationIdMiddleware
-from src.webapp.routers import account, business, fixed_income, market_data, orders, reference_data, scanner, snapshot, streaming, system, tick_data
+from src.webapp.routers import account, business, fixed_income, market_data_bonds, market_data_equity, market_data_fx, market_data_futures, market_data_options, orders, reference_data, scanner, snapshot, streaming, system, tick_data
+from src.webapp.routers import market_data  # noqa: F401 — kept for import compatibility
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,11 @@ def create_app(
     fastapi_app.include_router(business.router, prefix="/api/v1")
     fastapi_app.include_router(fixed_income.router, prefix="/api/v1")
     fastapi_app.include_router(system.router, prefix="/api/v1")
-    fastapi_app.include_router(market_data.router, prefix="/api/v1")
+    fastapi_app.include_router(market_data_equity.router, prefix="/api/v1")
+    fastapi_app.include_router(market_data_futures.router, prefix="/api/v1")
+    fastapi_app.include_router(market_data_fx.router, prefix="/api/v1")
+    fastapi_app.include_router(market_data_options.router, prefix="/api/v1")
+    fastapi_app.include_router(market_data_bonds.router, prefix="/api/v1")
     fastapi_app.include_router(reference_data.router, prefix="/api/v1")
     fastapi_app.include_router(account.router, prefix="/api/v1")
     fastapi_app.include_router(orders.router, prefix="/api/v1")
