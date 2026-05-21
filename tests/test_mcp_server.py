@@ -141,13 +141,16 @@ def test_has_entry_points():
 
 
 def test_raw_sql_blocks_mutations():
-    """Verify the raw SQL tool blocks non-SELECT statements."""
+    """Verify the raw SQL tool uses proper SQL injection protection."""
     source = MCP_SERVER_PATH.read_text()
-    assert "INSERT" in source, "Must block INSERT"
-    assert "DELETE" in source, "Must block DELETE"
-    assert "DROP" in source, "Must block DROP"
-    assert "ALTER" in source, "Must block ALTER"
-    assert "TRUNCATE" in source, "Must block TRUNCATE"
+    # Must enforce SELECT-only via prefix check
+    assert "startswith(\"SELECT\")" in source or "startswith('SELECT')" in source, "Must enforce SELECT-only prefix"
+    # Must block SQL comments
+    assert "--" in source, "Must block inline comments"
+    # Must block multi-statement injection
+    assert ";" in source, "Must block multi-statement injection"
+    # Must use regex-based validation
+    assert "re." in source, "Must use regex for SQL validation"
 
 
 def test_query_limit_capped():

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -156,11 +157,23 @@ async def query_raw_sql(
         sql: QuestDB SQL query (SELECT only)
     """
     state = _state(ctx)
-    upper = sql.strip().upper()
-    forbidden = {"INSERT", "UPDATE", "DELETE", "CLEAR", "ALTER", "DROP", "CREATE", "TRUNCATE", "VACUUM"}
-    for word in forbidden:
-        if word in upper.split():
-            return json.dumps({"error": f"Only SELECT queries are permitted. Found: {word}"})
+
+    # Strip leading whitespace and block comments (/* ... */)
+    stripped = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL).strip()
+
+    # Block inline comments
+    if "--" in stripped:
+        return json.dumps({"error": "SQL comments (--) are not permitted"})
+    if "/*" in stripped:
+        return json.dumps({"error": "SQL block comments (/* */) are not permitted"})
+
+    # Block multi-statement injection: semicolons followed by non-whitespace
+    if re.search(r";\s*\S", stripped):
+        return json.dumps({"error": "Multi-statement queries are not permitted"})
+
+    # Must start with SELECT
+    if not stripped.upper().startswith("SELECT"):
+        return json.dumps({"error": "Only SELECT queries are permitted"})
 
     try:
         rows = await state.questdb._fetch_dicts(sql, [])
