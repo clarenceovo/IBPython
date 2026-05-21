@@ -156,25 +156,36 @@ async def query_raw_sql(
     """
     state = _state(ctx)
 
-    # Strip leading whitespace and block comments (/* ... */)
+    # Strip block comments (/* ... */) and inline comments (--)
     stripped = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL).strip()
+    stripped = re.sub(r"--.*?$", " ", stripped, flags=re.MULTILINE).strip()
+    # Normalize whitespace for reliable keyword matching
+    normalized = re.sub(r"\s+", " ", stripped).strip()
 
-    # Block inline comments
-    if "--" in stripped:
-        return {"error": "SQL comments (--) are not permitted"}
-    if "/*" in stripped:
-        return {"error": "SQL block comments (/* */) are not permitted"}
+    # Block remaining comment markers (unmatched delimiters)
+    if "/*" in normalized or "*/" in normalized:
+        return {"error": "Malformed SQL block comments are not permitted"}
 
     # Block multi-statement injection: semicolons followed by non-whitespace
-    if re.search(r";\s*\S", stripped):
+    if re.search(r";\s*\S", normalized):
         return {"error": "Multi-statement queries are not permitted"}
 
-    # Must start with SELECT
-    if not stripped.upper().startswith("SELECT"):
-        return {"error": "Only SELECT queries are permitted"}
+    # Must start with an allowed keyword (SELECT or WITH for CTEs)
+    first_keyword = normalized.split()[0].upper() if normalized else ""
+    if first_keyword not in ("SELECT", "WITH"):
+        return {"error": "Only SELECT and WITH (CTE) queries are permitted"}
+
+    # Block dangerous keywords anywhere in the query
+    dangerous_keywords = re.compile(
+        r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|EXECUTE)\b",
+        re.IGNORECASE,
+    )
+    match = dangerous_keywords.search(normalized)
+    if match:
+        return {"error": f"Keyword '{match.group(1).upper()}' is not permitted in queries"}
 
     try:
-        return await state.questdb._fetch_dicts(sql, [])
+        return await state.questdb._fetch_dicts(stripped, [])
     except Exception as e:
         return {"error": str(e)}
 
