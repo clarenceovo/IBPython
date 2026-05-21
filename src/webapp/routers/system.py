@@ -25,7 +25,9 @@ async def health(state: IBKRRestAppState = Depends(get_rest_state)) -> HealthRes
     ibkr_status = None
     feed = getattr(state, "feed", None)
     if feed is not None:
-        if getattr(feed, "_connection_dead", False):
+        if hasattr(feed, "connection_status"):
+            ibkr_status = feed.connection_status()
+        elif getattr(feed, "_connection_dead", False):
             ibkr_status = "down"
         elif hasattr(feed, "_ib") and feed._ib is not None and feed._ib.isConnected():
             ibkr_status = "connected"
@@ -79,7 +81,7 @@ async def ibkr_rate_limits(state: IBKRRestAppState = Depends(get_rest_state)) ->
     """Return the internal IBKR pacing controller snapshot."""
     feed = getattr(state, "feed", None)
     connection = getattr(feed, "_connection", None)
-    snapshot = getattr(connection, "rate_limit_snapshot", None)
+    snapshot = getattr(connection, "rate_limit_snapshot", None) if connection is not None else None
     if callable(snapshot):
         return await snapshot()
     return {"enabled": False, "reason": "not_configured"}

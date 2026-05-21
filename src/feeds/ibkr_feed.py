@@ -254,6 +254,22 @@ class IBKRFeedClient:
         return self._connection._background_tasks
 
     # ------------------------------------------------------------------
+    # Public connection status
+    # ------------------------------------------------------------------
+
+    def connection_status(self) -> str:
+        """Return the current IBKR connection status as a string.
+
+        Returns one of: "connected", "disconnected", or "down".
+        """
+        if getattr(self._connection, '_connection_dead', False):
+            return "down"
+        ib = self._connection.ib
+        if ib is not None and hasattr(ib, 'isConnected') and ib.isConnected():
+            return "connected"
+        return "disconnected"
+
+    # ------------------------------------------------------------------
     # Connection lifecycle — delegated to connection manager
     # ------------------------------------------------------------------
 
