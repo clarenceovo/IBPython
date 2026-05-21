@@ -15,6 +15,7 @@ from src.feeds.exchange_resolver import resolve_equity
 from src.feeds.models import AssetClass
 from src.feeds.snapshot_converters import _safe_float
 from src.feeds.streaming import StreamRequest, StreamSubscription, StreamingTickerSnapshot
+from src.transport.metrics import metrics
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ async def _cleanup_orphaned_subscriptions() -> None:
                         )
                         sub.stop()
                         _active_subscriptions.pop(sid, None)
+                        metrics.streaming_subscriptions_active.dec()
         except Exception:
             logger.exception("Error during subscription cleanup")
 
@@ -207,6 +209,7 @@ async def stream_ticker(
     subscription._set_stop_event(stop_event)
     async with _sub_lock:
         _active_subscriptions[subscription_id] = subscription
+    metrics.streaming_subscriptions_active.inc()
 
     async def event_generator():
         ticker = None
@@ -281,6 +284,7 @@ async def stream_ticker(
                 await state.feed.unsubscribe_ticker(ticker)
             async with _sub_lock:
                 _active_subscriptions.pop(subscription_id, None)
+            metrics.streaming_subscriptions_active.dec()
             logger.info("SSE stream closed: subscription_id=%s updates_sent=%d dropped=%d", subscription_id, updates_sent, subscription.dropped_updates)
 
     # Start the background cleanup task on first subscription
@@ -314,6 +318,7 @@ async def list_active_subscriptions() -> list[StreamSubscription]:
             sub = _active_subscriptions.pop(sid, None)
             if sub is not None:
                 sub.stop()
+                metrics.streaming_subscriptions_active.dec()
         return list(_active_subscriptions.values())
 
 
@@ -329,4 +334,5 @@ async def stop_subscription(subscription_id: str) -> dict[str, str]:
         # Signal the SSE generator to stop, then clean up
         sub.stop()
         _active_subscriptions.pop(subscription_id, None)
+        metrics.streaming_subscriptions_active.dec()
     return {"status": "stopped", "subscription_id": subscription_id}

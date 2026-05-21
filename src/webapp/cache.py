@@ -10,6 +10,8 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
+from src.transport.metrics import metrics
+
 T = TypeVar("T")
 
 
@@ -45,11 +47,14 @@ class AsyncTTLCache:
             now = time.monotonic()
             entry = self._entries.get(key)
             if entry is None:
+                metrics.cache_miss_total.inc({"cache_name": "market_data"})
                 return None
             if entry.expires_at <= now:
                 self._entries.pop(key, None)
+                metrics.cache_miss_total.inc({"cache_name": "market_data"})
                 return None
             self._entries.move_to_end(key)
+            metrics.cache_hit_total.inc({"cache_name": "market_data"})
             return entry.value
 
     async def set(self, key: str, value: Any, *, ttl_seconds: float | None = None) -> None:
