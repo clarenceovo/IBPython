@@ -492,31 +492,54 @@ async def load_news(
 @mcp.tool()
 async def query_equity_snapshots(
     ctx: Context,
+    symbol: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     """Query recent equity snapshots from QuestDB.
 
     Args:
+        symbol: Optional ticker symbol filter (e.g. 'AAPL')
+        start: Optional start datetime in ISO format
+        end: Optional end datetime in ISO format
         limit: Max snapshots to return (default 100)
     """
     state = _state(ctx)
-    return await state.questdb.query_snapshots(limit=limit)
+    start_dt = datetime.fromisoformat(start) if start else None
+    end_dt = datetime.fromisoformat(end) if end else None
+    return await state.questdb.query_snapshots(symbol=symbol, start=start_dt, end=end_dt, limit=limit)
 
 
 @mcp.tool()
 async def query_fx_option_snapshots(
     ctx: Context,
-    currency: str | None = None,
+    symbol: str | None = None,
+    expiry: str | None = None,
+    strike: float | None = None,
+    right: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     """Query FX option snapshots from QuestDB.
 
     Args:
-        currency: Filter by currency pair (e.g. 'EUR.USD')
+        symbol: Optional currency pair filter (e.g. 'EURUSD', 'EUR/USD')
+        expiry: Optional expiry filter
+        strike: Optional strike price filter
+        right: Optional right filter ('C'/'CALL' or 'P'/'PUT')
+        start: Optional start datetime in ISO format
+        end: Optional end datetime in ISO format
         limit: Max snapshots to return (default 100)
     """
     state = _state(ctx)
-    return await state.questdb.query_fx_option_snapshots(currency=currency, limit=limit)
+    start_dt = datetime.fromisoformat(start) if start else None
+    end_dt = datetime.fromisoformat(end) if end else None
+    return await state.questdb.query_fx_option_snapshots(
+        symbol=symbol, expiry=expiry, strike=strike, right=right,
+        start=start_dt, end=end_dt, limit=limit,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

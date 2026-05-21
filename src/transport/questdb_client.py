@@ -229,7 +229,7 @@ class QuestDBClient(MarketOHLCVStore):
     async def query_fx_option_snapshots(
         self,
         *,
-        symbol: str,
+        symbol: str | None = None,
         expiry: str | None = None,
         strike: float | None = None,
         right: str | None = None,
@@ -237,8 +237,11 @@ class QuestDBClient(MarketOHLCVStore):
         end: datetime | None = None,
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
-        clauses = ["symbol = %s"]
-        params: list[Any] = [symbol.replace("/", "").upper()]
+        clauses: list[str] = []
+        params: list[Any] = []
+        if symbol is not None:
+            clauses.append("symbol = %s")
+            params.append(symbol.replace("/", "").upper())
         if expiry is not None:
             clauses.append("expiry = %s")
             params.append(expiry.upper())
@@ -256,9 +259,10 @@ class QuestDBClient(MarketOHLCVStore):
             clauses.append("timestamp < %s")
             params.append(_questdb_timestamp(end))
         params.append(limit)
+        where_clause = f"WHERE {' AND '.join(clauses)} " if clauses else ""
         sql = (
             f"SELECT * FROM {constants.FX_OPTION_SNAPSHOT_TABLE} "
-            f"WHERE {' AND '.join(clauses)} "
+            f"{where_clause}"
             "ORDER BY timestamp DESC "
             "LIMIT %s"
         )
@@ -267,13 +271,16 @@ class QuestDBClient(MarketOHLCVStore):
     async def query_snapshots(
         self,
         *,
-        symbol: str,
+        symbol: str | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
-        clauses = ["symbol = %s"]
-        params: list[Any] = [symbol.upper()]
+        clauses: list[str] = []
+        params: list[Any] = []
+        if symbol is not None:
+            clauses.append("symbol = %s")
+            params.append(symbol.upper())
         if start is not None:
             clauses.append("timestamp >= %s")
             params.append(_questdb_timestamp(start))
@@ -281,9 +288,10 @@ class QuestDBClient(MarketOHLCVStore):
             clauses.append("timestamp < %s")
             params.append(_questdb_timestamp(end))
         params.append(limit)
+        where_clause = f"WHERE {' AND '.join(clauses)} " if clauses else ""
         sql = (
             f"SELECT * FROM {constants.EQUITY_SNAPSHOT_TABLE} "
-            f"WHERE {' AND '.join(clauses)} "
+            f"{where_clause}"
             "ORDER BY timestamp DESC "
             "LIMIT %s"
         )
