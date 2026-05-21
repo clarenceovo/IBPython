@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time as monotonic_time
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
@@ -46,6 +48,9 @@ class QuestDBClient(MarketOHLCVStore):
         database: str = constants.DEFAULT_QUESTDB_DATABASE,
         connection: Any | None = None,
         pool_size: int = 4,
+        redis: Any | None = None,
+        buffer_max_age_seconds: float = 86400.0,
+        buffer_drain_interval_seconds: float = 30.0,
     ) -> None:
         self.host = host
         self.port = port
@@ -62,6 +67,11 @@ class QuestDBClient(MarketOHLCVStore):
         # injected (tests), we skip pool creation and use it directly.
         self._connection = connection
         self._connected = connection is not None
+        # Write-behind buffer
+        self._redis = redis
+        self._buffer_max_age_seconds = buffer_max_age_seconds
+        self._buffer_drain_interval_seconds = buffer_drain_interval_seconds
+        self._drain_task: asyncio.Task[None] | None = None
 
     @property
     def dsn(self) -> str:
@@ -96,8 +106,10 @@ class QuestDBClient(MarketOHLCVStore):
         await self._pool.open()
         self._connected = True
         logger.info("QuestDB connection pool ready")
+        self._start_drain_task()
 
     async def close(self) -> None:
+        self._stop_drain_task()
         if self._pool is not None:
             logger.info("QuestDB closing connection pool")
             await self._pool.close()
@@ -190,19 +202,24 @@ class QuestDBClient(MarketOHLCVStore):
     async def insert_snapshots(self, snapshots: Sequence[EquitySnapshot]) -> int:
         if not snapshots:
             return 0
-        await self._ensure_connection()
-        await self._ensure_table("equity_snapshots", CREATE_EQUITY_SNAPSHOT_TABLE_SQL)
-        rows = [snapshot_to_row(s) for s in snapshots]
-        if self._pool is not None:
-            async with self._pool.connection() as conn:
-                async with conn.cursor() as cur:
+        try:
+            await self._ensure_connection()
+            await self._ensure_table("equity_snapshots", CREATE_EQUITY_SNAPSHOT_TABLE_SQL)
+            rows = [snapshot_to_row(s) for s in snapshots]
+            if self._pool is not None:
+                async with self._pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.executemany(INSERT_EQUITY_SNAPSHOT_SQL, rows)
+                    await conn.commit()
+            else:
+                async with self._connection.cursor() as cur:
                     await cur.executemany(INSERT_EQUITY_SNAPSHOT_SQL, rows)
-                await conn.commit()
-        else:
-            async with self._connection.cursor() as cur:
-                await cur.executemany(INSERT_EQUITY_SNAPSHOT_SQL, rows)
-            await self._connection.commit()
-        return len(snapshots)
+                await self._connection.commit()
+            return len(snapshots)
+        except Exception:
+            logger.warning("insert_snapshots failed, buffering %d rows", len(snapshots), exc_info=True)
+            await self._buffer_failed_rows("equity_snapshots", rows=None, snapshots=snapshots)
+            return 0
 
     async def insert_fx_option_snapshots(self, snapshots: Sequence[FXOptionSnapshot]) -> int:
         if not snapshots:
@@ -308,19 +325,24 @@ class QuestDBClient(MarketOHLCVStore):
     async def insert_bars(self, bars: Sequence[OHLCVBar]) -> int:
         if not bars:
             return 0
-        await self._ensure_connection()
-        await self._ensure_table("market_ohlcv", CREATE_MARKET_OHLCV_TABLE_SQL, alter_sqls=MARKET_OHLCV_IDENTITY_ALTER_SQL)
-        rows = [bar_to_row(bar) for bar in bars]
-        if self._pool is not None:
-            async with self._pool.connection() as conn:
-                async with conn.cursor() as cur:
+        try:
+            await self._ensure_connection()
+            await self._ensure_table("market_ohlcv", CREATE_MARKET_OHLCV_TABLE_SQL, alter_sqls=MARKET_OHLCV_IDENTITY_ALTER_SQL)
+            rows = [bar_to_row(bar) for bar in bars]
+            if self._pool is not None:
+                async with self._pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.executemany(INSERT_MARKET_OHLCV_SQL, rows)
+                    await conn.commit()
+            else:
+                async with self._connection.cursor() as cur:
                     await cur.executemany(INSERT_MARKET_OHLCV_SQL, rows)
-                await conn.commit()
-        else:
-            async with self._connection.cursor() as cur:
-                await cur.executemany(INSERT_MARKET_OHLCV_SQL, rows)
-            await self._connection.commit()
-        return len(bars)
+                await self._connection.commit()
+            return len(bars)
+        except Exception:
+            logger.warning("insert_bars failed, buffering %d rows", len(bars), exc_info=True)
+            await self._buffer_failed_rows("market_ohlcv", rows=None, bars=bars)
+            return 0
 
     async def query_historical_bars(
         self,
@@ -379,3 +401,172 @@ class QuestDBClient(MarketOHLCVStore):
                 columns = [col.name for col in cur.description]
                 rows = await cur.fetchall()
         return [dict(zip(columns, row, strict=True)) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Write-behind buffer
+    # ------------------------------------------------------------------
+
+    def _start_drain_task(self) -> None:
+        """Start the background buffer drain task if Redis is available."""
+        if self._redis is None or self._drain_task is not None:
+            return
+        self._drain_task = asyncio.create_task(self._drain_buffer_loop())
+        logger.info("QuestDB write-behind buffer drain task started")
+
+    def _stop_drain_task(self) -> None:
+        """Cancel the background drain task."""
+        if self._drain_task is not None:
+            self._drain_task.cancel()
+            self._drain_task = None
+            logger.debug("QuestDB write-behind buffer drain task stopped")
+
+    async def _drain_buffer_loop(self) -> None:
+        """Background task that periodically drains buffered rows and retries inserts."""
+        try:
+            while True:
+                await asyncio.sleep(self._buffer_drain_interval_seconds)
+                try:
+                    await self._drain_all_buffers()
+                except Exception:
+                    logger.warning("QuestDB buffer drain cycle failed", exc_info=True)
+        except asyncio.CancelledError:
+            pass
+
+    async def _drain_all_buffers(self) -> None:
+        """Drain all write buffers (equity_snapshots, market_ohlcv, fx_option_snapshots)."""
+        for table in ("equity_snapshots", "market_ohlcv", "fx_option_snapshots"):
+            await self._drain_table_buffer(table)
+
+    async def _drain_table_buffer(self, table: str) -> int:
+        """Drain the buffer for a specific table, retrying inserts."""
+        if self._redis is None:
+            return 0
+        try:
+            key = f"questdb_write_buffer:{table}"
+            raw_client = await self._redis.raw_client()
+            drained = 0
+            while True:
+                raw_entry = await raw_client.lpop(key)
+                if raw_entry is None:
+                    break
+                entry = json.loads(raw_entry if isinstance(raw_entry, str) else raw_entry.decode("utf-8"))
+                # Check max age
+                enqueued_at = entry.get("enqueued_at", 0)
+                if monotonic_time.monotonic() - enqueued_at > self._buffer_max_age_seconds:
+                    logger.debug("Discarding expired buffer entry for table=%s (age=%.0fs)", table, monotonic_time.monotonic() - enqueued_at)
+                    continue
+                # Retry the insert
+                try:
+                    await self._replay_buffer_entry(table, entry)
+                    drained += 1
+                except Exception:
+                    # Re-insert at head for next drain cycle
+                    await raw_client.lpush(key, raw_entry if isinstance(raw_entry, str) else raw_entry.decode("utf-8"))
+                    logger.warning("QuestDB buffer retry failed for table=%s, will retry next cycle", table, exc_info=True)
+                    break
+            if drained > 0:
+                logger.info("QuestDB buffer drained %d entries from table=%s", drained, table)
+            return drained
+        except Exception:
+            logger.warning("QuestDB drain_table_buffer failed for table=%s", table, exc_info=True)
+            return 0
+
+    async def _replay_buffer_entry(self, table: str, entry: dict[str, Any]) -> None:
+        """Replay a single buffered entry."""
+        await self._ensure_connection()
+        if table == "equity_snapshots":
+            rows = entry.get("rows", [])
+            if not rows:
+                return
+            await self._ensure_table("equity_snapshots", CREATE_EQUITY_SNAPSHOT_TABLE_SQL)
+            if self._pool is not None:
+                async with self._pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.executemany(INSERT_EQUITY_SNAPSHOT_SQL, rows)
+                    await conn.commit()
+            else:
+                async with self._connection.cursor() as cur:
+                    await cur.executemany(INSERT_EQUITY_SNAPSHOT_SQL, rows)
+                await self._connection.commit()
+        elif table == "market_ohlcv":
+            rows = entry.get("rows", [])
+            if not rows:
+                return
+            await self._ensure_table("market_ohlcv", CREATE_MARKET_OHLCV_TABLE_SQL, alter_sqls=MARKET_OHLCV_IDENTITY_ALTER_SQL)
+            if self._pool is not None:
+                async with self._pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.executemany(INSERT_MARKET_OHLCV_SQL, rows)
+                    await conn.commit()
+            else:
+                async with self._connection.cursor() as cur:
+                    await cur.executemany(INSERT_MARKET_OHLCV_SQL, rows)
+                await self._connection.commit()
+        elif table == "fx_option_snapshots":
+            rows = entry.get("rows", [])
+            if not rows:
+                return
+            await self._ensure_table("fx_option_snapshots", CREATE_FX_OPTION_SNAPSHOT_TABLE_SQL)
+            if self._pool is not None:
+                async with self._pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.executemany(INSERT_FX_OPTION_SNAPSHOT_SQL, rows)
+                    await conn.commit()
+            else:
+                async with self._connection.cursor() as cur:
+                    await cur.executemany(INSERT_FX_OPTION_SNAPSHOT_SQL, rows)
+                await self._connection.commit()
+
+    async def _buffer_failed_rows(
+        self,
+        table: str,
+        *,
+        rows: Sequence[Any] | None = None,
+        snapshots: Sequence[EquitySnapshot] | None = None,
+        bars: Sequence[OHLCVBar] | None = None,
+    ) -> None:
+        """Serialize failed rows to Redis list for later retry."""
+        if self._redis is None:
+            return
+        try:
+            # Convert to raw rows if not already done
+            if rows is None:
+                if snapshots is not None:
+                    rows = [snapshot_to_row(s) for s in snapshots]
+                elif bars is not None:
+                    rows = [bar_to_row(bar) for bar in bars]
+                else:
+                    return
+
+            # Serialize rows (convert tuples to lists for JSON)
+            serialized_rows = [list(r) if isinstance(r, tuple) else r for r in rows]
+            entry = {
+                "table": table,
+                "rows": serialized_rows,
+                "enqueued_at": monotonic_time.monotonic(),
+            }
+            key = f"questdb_write_buffer:{table}"
+            raw_client = await self._redis.raw_client()
+            await raw_client.rpush(key, json.dumps(entry))
+            depth = await raw_client.llen(key)
+            logger.info("Buffered %d rows to Redis key=%s (depth=%d)", len(serialized_rows), key, depth)
+        except Exception:
+            logger.warning("_buffer_failed_rows: failed for table=%s", table, exc_info=True)
+
+    async def get_write_buffer_depth(self) -> dict[str, int]:
+        """Return the depth of each write buffer for monitoring.
+
+        Returns a dict mapping table name to buffered entry count.
+        """
+        if self._redis is None:
+            return {}
+        try:
+            raw_client = await self._redis.raw_client()
+            depths: dict[str, int] = {}
+            for table in ("equity_snapshots", "market_ohlcv", "fx_option_snapshots"):
+                key = f"questdb_write_buffer:{table}"
+                depths[table] = await raw_client.llen(key)
+            return depths
+        except Exception:
+            logger.warning("get_write_buffer_depth: failed", exc_info=True)
+            return {}
