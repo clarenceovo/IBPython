@@ -362,6 +362,14 @@ class QuestDBClient(MarketOHLCVStore):
         return await self._fetch_dicts(sql, params)
 
     async def _fetch_dicts(self, sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:
+        """Execute a SQL query and return rows as list[dict].
+
+        .. warning::
+            This method executes SQL as-is.  Callers **must** ensure that *sql*
+            has been validated (e.g. SELECT-only) before passing it here.
+            For user-supplied SQL, use the MCP ``query_raw_sql`` tool which
+            runs validation before delegating to this method.
+        """
         await self._ensure_connection()
         if self._pool is not None:
             async with self._pool.connection() as conn:
