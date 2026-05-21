@@ -21,6 +21,7 @@ import time as monotonic_time
 from collections import defaultdict, deque
 from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta, timezone
+from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from src.config import config_constant as constants
@@ -145,6 +146,89 @@ logger = logging.getLogger(__name__)
 
 DETECTION_TIMEOUT = 180
 
+
+class CircuitState(str, Enum):
+    """Circuit breaker states."""
+    CLOSED = "closed"       # Normal operation
+    OPEN = "open"            # Failing fast
+    HALF_OPEN = "half_open"  # Testing recovery
+
+
+class CircuitBreaker:
+    """Simple circuit breaker for IBKR operations.
+
+    Trips after ``failure_threshold`` consecutive failures, then fast-fails
+    all calls for ``recovery_timeout_seconds``.  After the timeout elapses
+    the circuit moves to HALF_OPEN and allows one probe call.  A successful
+    probe resets the breaker; a failed probe reopens it.
+    """
+
+    def __init__(
+        self,
+        *,
+        failure_threshold: int = 5,
+        recovery_timeout_seconds: float = 30.0,
+    ) -> None:
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout_seconds = recovery_timeout_seconds
+        self._consecutive_failures: int = 0
+        self._state: CircuitState = CircuitState.CLOSED
+        self._last_failure_time: float = 0.0
+        self._lock = asyncio.Lock()
+
+    @property
+    def state(self) -> CircuitState:
+        """Current circuit breaker state (thread-safe read)."""
+        if self._state == CircuitState.OPEN:
+            elapsed = monotonic_time.monotonic() - self._last_failure_time
+            if elapsed >= self.recovery_timeout_seconds:
+                return CircuitState.HALF_OPEN
+        return self._state
+
+    @property
+    def is_open(self) -> bool:
+        """True when the circuit is tripped (fast-failing)."""
+        return self.state == CircuitState.OPEN
+
+    def record_success(self) -> None:
+        """Record a successful operation; resets the breaker."""
+        self._consecutive_failures = 0
+        self._state = CircuitState.CLOSED
+
+    def record_failure(self) -> None:
+        """Record a failed operation; trips the breaker if threshold is reached."""
+        self._consecutive_failures += 1
+        self._last_failure_time = monotonic_time.monotonic()
+        if self._consecutive_failures >= self.failure_threshold:
+            self._state = CircuitState.OPEN
+            logger.warning(
+                "Circuit breaker TRIPPED: %d consecutive failures (threshold=%d). "
+                "Fast-failing for %.0fs.",
+                self._consecutive_failures,
+                self.failure_threshold,
+                self.recovery_timeout_seconds,
+            )
+
+    def get_state_dict(self) -> dict[str, Any]:
+        """Return circuit breaker state for health checks."""
+        return {
+            "state": self.state.value,
+            "consecutive_failures": self._consecutive_failures,
+            "failure_threshold": self.failure_threshold,
+            "recovery_timeout_seconds": self.recovery_timeout_seconds,
+            "last_failure_time": self._last_failure_time,
+        }
+
+    async def guard(self) -> None:
+        """Raise RuntimeError if the circuit is open.  Thread-safe."""
+        current_state = self.state
+        if current_state == CircuitState.OPEN:
+            raise RuntimeError(
+                f"IBKR circuit breaker is OPEN (consecutive_failures={self._consecutive_failures}). "
+                f"Fast-failing for {self.recovery_timeout_seconds:.0f}s. "
+                f"Last failure was {monotonic_time.monotonic() - self._last_failure_time:.1f}s ago."
+            )
+
 # Re-export _ibkr_sec_type_for_option_underlying from options module
 from src.feeds.ibkr_options_feed import _ibkr_sec_type_for_option_underlying  # noqa: E402
 
@@ -185,6 +269,10 @@ class IBKRFeedClient:
         rate_limiter: Any | None = None,
         redis: Any | None = None,
     ) -> None:
+        self._circuit_breaker = CircuitBreaker(
+            failure_threshold=5,
+            recovery_timeout_seconds=30.0,
+        )
         if rate_limiter is None:
             try:
                 from src.transport.ibkr_rate_limit import IBKRRateLimitController
@@ -292,29 +380,40 @@ class IBKRFeedClient:
         Delegates through the facade so that test monkeypatches on
         ``client.connect`` are respected.
         """
-        if self._connection.ib is not None and hasattr(self._connection.ib, 'isConnected') and self._connection.ib.isConnected():
-            return
-        async with self._connection._reconnect_lock:
+        # Circuit breaker guard — fast-fail before any I/O
+        await self._circuit_breaker.guard()
+        try:
             if self._connection.ib is not None and hasattr(self._connection.ib, 'isConnected') and self._connection.ib.isConnected():
                 return
-            try:
-                await self.connect()
-            except Exception as exc:
-                root_cause = _root_cause_message(exc)
-                logger.exception(
-                    "IBKR connection unavailable: host=%s port=%d clientId=%d root_cause=%s last_ibkr_error=%s",
-                    self.host,
-                    self.port,
-                    self.client_id,
-                    root_cause,
-                    self._last_ibkr_error,
-                )
-                raise RuntimeError(
-                    f"IBKR not available at {self.host}:{self.port} — "
-                    f"ensure TWS or IB Gateway is running and API connections are enabled. "
-                    f"clientId={self.client_id}. root_cause={root_cause}. "
-                    f"{_last_ibkr_error_message(self._last_ibkr_error)}"
-                ) from exc
+            async with self._connection._reconnect_lock:
+                if self._connection.ib is not None and hasattr(self._connection.ib, 'isConnected') and self._connection.ib.isConnected():
+                    return
+                try:
+                    await self.connect()
+                except Exception as exc:
+                    self._circuit_breaker.record_failure()
+                    root_cause = _root_cause_message(exc)
+                    logger.exception(
+                        "IBKR connection unavailable: host=%s port=%d clientId=%d root_cause=%s last_ibkr_error=%s",
+                        self.host,
+                        self.port,
+                        self.client_id,
+                        root_cause,
+                        self._last_ibkr_error,
+                    )
+                    raise RuntimeError(
+                        f"IBKR not available at {self.host}:{self.port} — "
+                        f"ensure TWS or IB Gateway is running and API connections are enabled. "
+                        f"clientId={self.client_id}. root_cause={root_cause}. "
+                        f"{_last_ibkr_error_message(self._last_ibkr_error)}"
+                    ) from exc
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            self._circuit_breaker.record_failure()
+            raise
+        else:
+            self._circuit_breaker.record_success()
 
     # ------------------------------------------------------------------
     # Retry — delegated to connection manager
@@ -324,7 +423,17 @@ class IBKRFeedClient:
         return self._connection.is_transient_error(exc)
 
     async def _with_retry(self, call: Any, *, operation: str) -> Any:
-        return await self._connection.with_retry(call, operation=operation)
+        try:
+            result = await self._connection.with_retry(call, operation=operation)
+            self._circuit_breaker.record_success()
+            return result
+        except Exception:
+            self._circuit_breaker.record_failure()
+            raise
+
+    def circuit_breaker_state(self) -> dict[str, Any]:
+        """Return the current circuit breaker state for health checks."""
+        return self._circuit_breaker.get_state_dict()
 
     def _disconnect_stale_client(self) -> None:
         self._connection._disconnect_stale_client()
