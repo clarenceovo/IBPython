@@ -101,6 +101,11 @@ class Settings(BaseModel):
         gt=0,
     )
 
+    ibkr_api_bearer_token: str = Field(
+        default=constants.DEFAULT_IBKR_API_BEARER_TOKEN,
+        alias=constants.IBKR_API_BEARER_TOKEN_ENV,
+    )
+
     # Telegram alerting
     telegram_bot_token: str = Field(
         default=constants.DEFAULT_TELEGRAM_BOT_TOKEN,

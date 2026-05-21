@@ -1190,3 +1190,98 @@ def test_ttl_cache_single_flights_concurrent_same_key_requests() -> None:
 
     assert values == [42, 42, 42]
     assert calls == 1
+
+
+# ── API-wide bearer token auth tests ────────────────────────────────────────
+
+
+def test_api_bearer_auth_disabled_by_default() -> None:
+    """When IBKR_API_BEARER_TOKEN is empty (default), all endpoints are open."""
+    state = FakeState()
+    assert state.settings.ibkr_api_bearer_token == ""
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/system/health")
+
+    assert response.status_code == 200
+
+
+def test_api_bearer_auth_enabled_allows_valid_token() -> None:
+    """When IBKR_API_BEARER_TOKEN is set, valid token grants access."""
+    state = FakeState()
+    state.settings = Settings(
+        ibkr_rest_app_name="IBKRRestAppTest",
+        ibkr_rest_market_data_ttl_seconds=60,
+        ibkr_rest_market_data_cache_maxsize=16,
+        ibkr_api_bearer_token="secret-api-key",
+    )
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/system/health",
+            headers={"Authorization": "Bearer secret-api-key"},
+        )
+
+    assert response.status_code == 200
+
+
+def test_api_bearer_auth_enabled_rejects_missing_token() -> None:
+    """When IBKR_API_BEARER_TOKEN is set, requests without token get 401."""
+    state = FakeState()
+    state.settings = Settings(
+        ibkr_rest_app_name="IBKRRestAppTest",
+        ibkr_rest_market_data_ttl_seconds=60,
+        ibkr_rest_market_data_cache_maxsize=16,
+        ibkr_api_bearer_token="secret-api-key",
+    )
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/system/health")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "API bearer token required"
+    assert "Bearer" in response.headers.get("www-authenticate", "")
+
+
+def test_api_bearer_auth_enabled_rejects_wrong_token() -> None:
+    """When IBKR_API_BEARER_TOKEN is set, wrong token gets 401."""
+    state = FakeState()
+    state.settings = Settings(
+        ibkr_rest_app_name="IBKRRestAppTest",
+        ibkr_rest_market_data_ttl_seconds=60,
+        ibkr_rest_market_data_cache_maxsize=16,
+        ibkr_api_bearer_token="secret-api-key",
+    )
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/system/health",
+            headers={"Authorization": "Bearer wrong-key"},
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "invalid API bearer token"
+
+
+def test_api_bearer_auth_enabled_rejects_empty_token() -> None:
+    """When IBKR_API_BEARER_TOKEN is set, empty bearer token gets 401."""
+    state = FakeState()
+    state.settings = Settings(
+        ibkr_rest_app_name="IBKRRestAppTest",
+        ibkr_rest_market_data_ttl_seconds=60,
+        ibkr_rest_market_data_cache_maxsize=16,
+        ibkr_api_bearer_token="secret-api-key",
+    )
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/system/health",
+            headers={"Authorization": "Bearer "},
+        )
+
+    assert response.status_code == 401

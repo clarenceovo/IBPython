@@ -105,6 +105,12 @@ CONFIG_VALUE_SPECS: tuple[ConfigValueSpec, ...] = (
         constants.DEFAULT_IBKR_REST_MARKET_DATA_CACHE_MAXSIZE,
         int,
     ),
+    ConfigValueSpec(
+        "ibkr_api_bearer_token",
+        constants.IBKR_API_BEARER_TOKEN_ENV,
+        constants.DEFAULT_IBKR_API_BEARER_TOKEN,
+        parse_str,
+    ),
 )
 
 _SPECS_BY_FIELD_NAME = {spec.field_name: spec for spec in CONFIG_VALUE_SPECS}
@@ -135,6 +141,7 @@ _CANONICAL_FIELD_NAME_BY_ENV_NAME = {
     "IBKR_REST_CONNECT_ON_STARTUP": "ibkr_rest_connect_on_startup",
     "IBKR_REST_MARKET_DATA_TTL_SECONDS": "ibkr_rest_market_data_ttl_seconds",
     "IBKR_REST_MARKET_DATA_CACHE_MAXSIZE": "ibkr_rest_market_data_cache_maxsize",
+    "IBKR_API_BEARER_TOKEN": "ibkr_api_bearer_token",
 }
 
 
