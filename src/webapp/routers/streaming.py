@@ -5,7 +5,7 @@ import json
 import logging
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -21,8 +21,67 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/streaming", tags=["market-data"])
 
-# Track active subscriptions in-memory
+# Track active subscriptions in-memory.
+# NOTE: This is single-process state. For multi-worker deployments (e.g. uvicorn --workers),
+# use sticky sessions (ip_hash or cookie-based) so that subscription management requests
+# always route to the worker that owns the subscription.
 _active_subscriptions: dict[str, StreamSubscription] = {}
+
+# TTL-based auto-cleanup: subscriptions older than this are considered stale.
+# Configurable via environment or direct patch; defaults to 1 hour.
+MAX_SUBSCRIPTION_LIFETIME_SECONDS: float = 3600.0
+
+# Interval for the background cleanup task.
+_CLEANUP_INTERVAL_SECONDS: float = 60.0
+
+# Reference to the background cleanup task (single-process only).
+_cleanup_task: asyncio.Task[None] | None = None
+
+
+def _is_subscription_expired(sub: StreamSubscription) -> bool:
+    """Check if a subscription has exceeded its TTL."""
+    age = (datetime.now(timezone.utc) - sub.connected_at).total_seconds()
+    return age > MAX_SUBSCRIPTION_LIFETIME_SECONDS
+
+
+async def _cleanup_orphaned_subscriptions() -> None:
+    """Background task that periodically stops and removes stale subscriptions."""
+    while True:
+        await asyncio.sleep(_CLEANUP_INTERVAL_SECONDS)
+        try:
+            expired_ids = [
+                sid
+                for sid, sub in _active_subscriptions.items()
+                if _is_subscription_expired(sub)
+            ]
+            for sid in expired_ids:
+                sub = _active_subscriptions.get(sid)
+                if sub is not None:
+                    logger.warning(
+                        "Cleaning up expired subscription: subscription_id=%s age=%.0fs",
+                        sid,
+                        (datetime.now(timezone.utc) - sub.connected_at).total_seconds(),
+                    )
+                    sub.stop()
+                    _active_subscriptions.pop(sid, None)
+        except Exception:
+            logger.exception("Error during subscription cleanup")
+
+
+def start_cleanup_task() -> None:
+    """Start the background cleanup task if not already running."""
+    global _cleanup_task
+    if _cleanup_task is None or _cleanup_task.done():
+        _cleanup_task = asyncio.create_task(_cleanup_orphaned_subscriptions())
+        _cleanup_task.set_name("streaming-subscription-cleanup")
+
+
+def stop_cleanup_task() -> None:
+    """Cancel the background cleanup task."""
+    global _cleanup_task
+    if _cleanup_task is not None and not _cleanup_task.done():
+        _cleanup_task.cancel()
+        _cleanup_task = None
 
 
 STREAM_REQUEST_EXAMPLES = {
@@ -177,6 +236,9 @@ async def stream_ticker(
             _active_subscriptions.pop(subscription_id, None)
             logger.info("SSE stream closed: subscription_id=%s updates_sent=%d", subscription_id, updates_sent)
 
+    # Start the background cleanup task on first subscription
+    start_cleanup_task()
+
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
@@ -195,6 +257,15 @@ async def stream_ticker(
     summary="List active streaming subscriptions",
 )
 async def list_active_subscriptions() -> list[StreamSubscription]:
+    # Clean up expired subscriptions on read
+    expired_ids = [
+        sid for sid, sub in _active_subscriptions.items()
+        if _is_subscription_expired(sub)
+    ]
+    for sid in expired_ids:
+        sub = _active_subscriptions.pop(sid, None)
+        if sub is not None:
+            sub.stop()
     return list(_active_subscriptions.values())
 
 
