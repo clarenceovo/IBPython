@@ -151,6 +151,7 @@ class MarketDataRedisClient:
                 return False
             return bool(await self._client.ping())
         except Exception:
+            logger.debug("Redis health_check failed", exc_info=True)
             return False
 
     async def __aenter__(self) -> "MarketDataRedisClient":

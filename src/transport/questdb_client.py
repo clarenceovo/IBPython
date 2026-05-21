@@ -139,6 +139,7 @@ class QuestDBClient(MarketOHLCVStore):
                 return True
             return False
         except Exception:
+            logger.debug("QuestDB health_check failed", exc_info=True)
             return False
 
     async def __aenter__(self) -> "QuestDBClient":
@@ -172,7 +173,7 @@ class QuestDBClient(MarketOHLCVStore):
                                 try:
                                     await cur.execute(sql)
                                 except Exception:
-                                    logger.debug("QuestDB identity column migration skipped/already applied: %s", sql, exc_info=True)
+                                    logger.warning("QuestDB identity column migration skipped/already applied: %s", sql, exc_info=True)
                     await conn.commit()
             else:
                 async with self._connection.cursor() as cur:
@@ -182,7 +183,7 @@ class QuestDBClient(MarketOHLCVStore):
                             try:
                                 await cur.execute(sql)
                             except Exception:
-                                logger.debug("QuestDB identity column migration skipped/already applied: %s", sql, exc_info=True)
+                                logger.warning("QuestDB identity column migration skipped/already applied: %s", sql, exc_info=True)
                 await self._connection.commit()
             self._created_tables.add(table_key)
             logger.debug("QuestDB table created: %s", table_key)
@@ -217,7 +218,7 @@ class QuestDBClient(MarketOHLCVStore):
                 await self._connection.commit()
             return len(snapshots)
         except Exception:
-            logger.warning("insert_snapshots failed, buffering %d rows", len(snapshots), exc_info=True)
+            logger.error("insert_snapshots failed, buffering %d rows", len(snapshots), exc_info=True)
             await self._buffer_failed_rows("equity_snapshots", rows=None, snapshots=snapshots)
             return 0
 
@@ -340,7 +341,7 @@ class QuestDBClient(MarketOHLCVStore):
                 await self._connection.commit()
             return len(bars)
         except Exception:
-            logger.warning("insert_bars failed, buffering %d rows", len(bars), exc_info=True)
+            logger.error("insert_bars failed, buffering %d rows", len(bars), exc_info=True)
             await self._buffer_failed_rows("market_ohlcv", rows=None, bars=bars)
             return 0
 

@@ -603,6 +603,7 @@ class EquitySnapshotJobHandler:
                     )
                     snapshots.append(snap)
                 except Exception:
+                    logger.warning("failed to create snapshot for symbol=%s", s, exc_info=True)
                     failed.append(s)
 
         await self._feed.cancel_equity_tickers(tickers)
