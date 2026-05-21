@@ -211,25 +211,65 @@ async def stream_ticker(
     async def event_generator():
         ticker = None
         updates_sent = 0
+        queue: asyncio.Queue[StreamingTickerSnapshot] = asyncio.Queue(maxsize=100)
         try:
             ticker = await state.feed.subscribe_ticker(spec)
-            while not stop_event.is_set():
-                if request.max_updates > 0 and updates_sent >= request.max_updates:
-                    yield f'event: done\ndata: {{"subscription_id": "{subscription_id}", "reason": "max_updates_reached"}}\n\n'
-                    break
 
-                snapshot = _ticker_to_snapshot(ticker, spec)
-                data = snapshot.model_dump_json()
-                yield f"data: {data}\n\n"
-                updates_sent += 1
-                subscription.updates_sent = updates_sent
+            async def _ticker_to_queue() -> None:
+                """Producer: push ticker snapshots to the bounded queue."""
+                while not stop_event.is_set():
+                    snapshot = _ticker_to_snapshot(ticker, spec)
+                    try:
+                        queue.put_nowait(snapshot)
+                    except asyncio.QueueFull:
+                        # Drop oldest item to make room
+                        try:
+                            queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            pass
+                        try:
+                            queue.put_nowait(snapshot)
+                        except asyncio.QueueFull:
+                            pass
+                        subscription.dropped_updates += 1
+                        logger.warning(
+                            "SSE queue full, dropped oldest update: subscription_id=%s dropped=%d",
+                            subscription_id,
+                            subscription.dropped_updates,
+                        )
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=request.update_interval_seconds)
+                        return  # stop_event was set
+                    except TimeoutError:
+                        pass  # normal tick interval elapsed
 
-                # Sleep but wake early if stopped
+            producer_task = asyncio.create_task(_ticker_to_queue())
+            try:
+                while not stop_event.is_set():
+                    if request.max_updates > 0 and updates_sent >= request.max_updates:
+                        yield f'event: done\ndata: {{"subscription_id": "{subscription_id}", "reason": "max_updates_reached"}}\n\n'
+                        break
+
+                    try:
+                        snapshot = await asyncio.wait_for(
+                            queue.get(),
+                            timeout=request.update_interval_seconds * 5,
+                        )
+                    except TimeoutError:
+                        # No data for a while — send keepalive
+                        yield ": keepalive\n\n"
+                        continue
+
+                    data = snapshot.model_dump_json()
+                    yield f"data: {data}\n\n"
+                    updates_sent += 1
+                    subscription.updates_sent = updates_sent
+            finally:
+                producer_task.cancel()
                 try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=request.update_interval_seconds)
-                    break  # stop_event was set
-                except TimeoutError:
-                    pass  # normal tick interval elapsed
+                    await producer_task
+                except asyncio.CancelledError:
+                    pass
         except asyncio.CancelledError:
             logger.info("SSE stream cancelled: subscription_id=%s updates_sent=%d", subscription_id, updates_sent)
         except Exception:
@@ -241,7 +281,7 @@ async def stream_ticker(
                 await state.feed.unsubscribe_ticker(ticker)
             async with _sub_lock:
                 _active_subscriptions.pop(subscription_id, None)
-            logger.info("SSE stream closed: subscription_id=%s updates_sent=%d", subscription_id, updates_sent)
+            logger.info("SSE stream closed: subscription_id=%s updates_sent=%d dropped=%d", subscription_id, updates_sent, subscription.dropped_updates)
 
     # Start the background cleanup task on first subscription
     start_cleanup_task()

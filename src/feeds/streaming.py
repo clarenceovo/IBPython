@@ -52,6 +52,7 @@ class StreamSubscription(BaseModel):
     currency: str = Field(min_length=1)
     connected_at: datetime
     updates_sent: int = 0
+    dropped_updates: int = 0
 
     def stop(self) -> None:
         """Signal the SSE generator to stop via the internal stop event."""
