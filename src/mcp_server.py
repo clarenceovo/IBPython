@@ -86,7 +86,7 @@ async def query_historical_ohlcv(
     start: str | None = None,
     end: str | None = None,
     limit: int = 5000,
-) -> str:
+) -> list[dict[str, Any]]:
     """Query historical OHLCV bars from QuestDB.
 
     Args:
@@ -103,7 +103,7 @@ async def query_historical_ohlcv(
     start_dt = datetime.fromisoformat(start) if start else None
     end_dt = datetime.fromisoformat(end) if end else None
 
-    rows = await state.questdb.query_historical_bars(
+    return await state.questdb.query_historical_bars(
         symbol=symbol,
         asset_class=asset_class,
         bar_size=bar_size,
@@ -112,7 +112,6 @@ async def query_historical_ohlcv(
         end=end_dt,
         limit=limit,
     )
-    return json.dumps(rows, default=str, indent=2)
 
 
 @mcp.tool()
@@ -122,7 +121,7 @@ async def query_latest_bars(
     bar_size: str | None = None,
     contract_key: str | None = None,
     limit: int = 100,
-) -> str:
+) -> list[dict[str, Any]]:
     """Query latest OHLCV bars across all symbols from QuestDB.
 
     Uses QuestDB LATEST ON to get the most recent bar per symbol+contract_key.
@@ -134,20 +133,19 @@ async def query_latest_bars(
         limit: Max rows (default 100)
     """
     state = _state(ctx)
-    rows = await state.questdb.query_latest_bars(
+    return await state.questdb.query_latest_bars(
         asset_class=asset_class,
         bar_size=bar_size,
         contract_key=contract_key,
         limit=limit,
     )
-    return json.dumps(rows, default=str, indent=2)
 
 
 @mcp.tool()
 async def query_raw_sql(
     ctx: Context,
     sql: str,
-) -> str:
+) -> dict[str, Any] | list[dict[str, Any]]:
     """Execute a raw SQL query against QuestDB.
 
     Use for ad-hoc analytics, aggregations, and JOINs that the structured tools don't cover.
@@ -163,23 +161,22 @@ async def query_raw_sql(
 
     # Block inline comments
     if "--" in stripped:
-        return json.dumps({"error": "SQL comments (--) are not permitted"})
+        return {"error": "SQL comments (--) are not permitted"}
     if "/*" in stripped:
-        return json.dumps({"error": "SQL block comments (/* */) are not permitted"})
+        return {"error": "SQL block comments (/* */) are not permitted"}
 
     # Block multi-statement injection: semicolons followed by non-whitespace
     if re.search(r";\s*\S", stripped):
-        return json.dumps({"error": "Multi-statement queries are not permitted"})
+        return {"error": "Multi-statement queries are not permitted"}
 
     # Must start with SELECT
     if not stripped.upper().startswith("SELECT"):
-        return json.dumps({"error": "Only SELECT queries are permitted"})
+        return {"error": "Only SELECT queries are permitted"}
 
     try:
-        rows = await state.questdb._fetch_dicts(sql, [])
-        return json.dumps(rows, default=str, indent=2)
+        return await state.questdb._fetch_dicts(sql, [])
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return {"error": str(e)}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -192,7 +189,7 @@ async def get_latest_bar_from_cache(
     asset_class: str,
     bar_size: str,
     symbol: str | None = None,
-) -> str:
+) -> dict[str, Any]:
     """Get the latest bar from Redis cache for a symbol or entire asset class.
 
     Args:
@@ -208,8 +205,8 @@ async def get_latest_bar_from_cache(
         symbol=symbol,
     )
     if bar is None:
-        return json.dumps({"message": "No cached bar found"})
-    return json.dumps({
+        return {"message": "No cached bar found"}
+    return {
         "symbol": bar.symbol,
         "asset_class": str(bar.asset_class),
         "exchange": bar.exchange,
@@ -222,27 +219,27 @@ async def get_latest_bar_from_cache(
         "volume": bar.volume,
         "bar_size": bar.bar_size,
         "source": bar.source,
-    }, indent=2)
+    }
 
 
 @mcp.tool()
 async def list_scheduler_jobs(
     ctx: Context,
-) -> str:
+) -> dict[str, Any]:
     """List all registered scheduler jobs from Redis.
 
     Returns job names that can be used with other scheduler tools.
     """
     state = _state(ctx)
     keys = await state.redis.scan_scheduler_jobs()
-    return json.dumps({"jobs": keys, "count": len(keys)}, indent=2)
+    return {"jobs": keys, "count": len(keys)}
 
 
 @mcp.tool()
 async def get_redis_key(
     ctx: Context,
     key: str,
-) -> str:
+) -> dict[str, Any]:
     """Read a raw Redis key. For debugging and inspection.
 
     Args:
@@ -251,13 +248,13 @@ async def get_redis_key(
     state = _state(ctx)
     raw = await state.redis.get_raw(key)
     if raw is None:
-        return json.dumps({"message": f"Key '{key}' not found"})
+        return {"message": f"Key '{key}' not found"}
     if isinstance(raw, bytes):
         try:
             raw = raw.decode("utf-8")
         except UnicodeDecodeError:
             raw = raw.hex()
-    return json.dumps({"key": key, "value": raw}, indent=2)
+    return {"key": key, "value": raw}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -271,7 +268,7 @@ async def load_option_chains(
     asset_class: str = "EQUITY",
     exchange: str = "SMART",
     currency: str = "USD",
-) -> str:
+) -> list[dict[str, Any]]:
     """Load option chain for a symbol from IBKR.
 
     Returns all available expirations and strikes for the given underlying.
@@ -303,14 +300,14 @@ async def load_option_chains(
             "trading_class": getattr(chain, "trading_class", None),
             "multiplier": getattr(chain, "multiplier", None),
         })
-    return json.dumps(result, default=str, indent=2)
+    return result
 
 
 @mcp.tool()
 async def load_account_summary(
     ctx: Context,
     account: str = "",
-) -> str:
+) -> dict[str, dict[str, str]]:
     """Load IBKR account summary (NetLiquidation, AvailableFunds, etc).
 
     Args:
@@ -318,20 +315,18 @@ async def load_account_summary(
     """
     state = _state(ctx)
     rows = await state.feed.load_account_summary(account=account)
-    result = {row.tag: {"value": row.value, "currency": row.currency} for row in rows}
-    return json.dumps(result, indent=2)
+    return {row.tag: {"value": row.value, "currency": row.currency} for row in rows}
 
 
 @mcp.tool()
 async def load_live_positions(
     ctx: Context,
-) -> str:
+) -> list[dict[str, Any]]:
     """Load all live positions from IBKR."""
     state = _state(ctx)
     positions = await state.feed.load_live_positions()
-    result = []
-    for p in positions:
-        result.append({
+    return [
+        {
             "symbol": p.symbol,
             "sec_type": p.sec_type,
             "exchange": p.exchange,
@@ -340,8 +335,9 @@ async def load_live_positions(
             "average_cost": p.average_cost,
             "account": p.account,
             "con_id": p.con_id,
-        })
-    return json.dumps(result, default=str, indent=2)
+        }
+        for p in positions
+    ]
 
 
 @mcp.tool()
@@ -355,7 +351,7 @@ async def load_historical_ohlcv_live(
     duration: str = "1 M",
     what_to_show: str = "TRADES",
     use_rth: bool = True,
-) -> str:
+) -> list[dict[str, Any]]:
     """Load historical OHLCV bars directly from IBKR (not QuestDB).
 
     Use this when you need data not yet persisted, or for real-time snapshots.
@@ -384,24 +380,24 @@ async def load_historical_ohlcv_live(
         use_rth=use_rth,
     )
     bars = await state.feed.load_historical_ohlcv(request)
-    result = []
-    for bar in bars:
-        result.append({
+    return [
+        {
             "timestamp": bar.timestamp.isoformat(),
             "open": bar.open,
             "high": bar.high,
             "low": bar.low,
             "close": bar.close,
             "volume": bar.volume,
-        })
-    return json.dumps(result, indent=2)
+        }
+        for bar in bars
+    ]
 
 
 @mcp.tool()
 async def search_contracts(
     ctx: Context,
     pattern: str,
-) -> str:
+) -> dict[str, Any] | list[Any]:
     """Search IBKR contract database for matching symbols.
 
     Args:
@@ -410,8 +406,8 @@ async def search_contracts(
     state = _state(ctx)
     results = await state.feed.search_matching_symbols(pattern)
     if not results:
-        return json.dumps({"message": "No matching contracts found"})
-    return json.dumps(results, default=str, indent=2)
+        return {"message": "No matching contracts found"}
+    return results
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -424,7 +420,7 @@ async def load_fundamentals(
     symbol: str,
     exchange: str = "SMART",
     report_type: str = "ReportSnapshot",
-) -> str:
+) -> dict[str, Any]:
     """Load fundamental data for a stock from IBKR.
 
     Returns raw XML report from IBKR. Report types: ReportSnapshot, ReportsFinSummary,
@@ -444,12 +440,12 @@ async def load_fundamentals(
         report_type=report_type,
     )
     report = await state.feed.load_fundamental_data(request)
-    return json.dumps({
+    return {
         "symbol": report.symbol,
         "report_type": str(report.report_type),
         "received_at": report.received_at.isoformat(),
         "raw_xml": report.raw_xml[:5000],  # Truncate for MCP context limits
-    }, indent=2)
+    }
 
 
 @mcp.tool()
@@ -458,7 +454,7 @@ async def load_news(
     symbol: str,
     provider_codes: list[str] | None = None,
     limit: int = 20,
-) -> str:
+) -> dict[str, Any] | list[dict[str, Any]]:
     """Load recent news headlines for a symbol from IBKR.
 
     Args:
@@ -477,7 +473,7 @@ async def load_news(
         contract = await state.feed.qualify_contract(spec)
         con_id = contract.conId
     except Exception:
-        return json.dumps({"error": f"Could not resolve contract for {symbol}"})
+        return {"error": f"Could not resolve contract for {symbol}"}
 
     providers = tuple(provider_codes or ["BRFG", "BRFUP"])
     request = HistoricalNewsRequest(
@@ -486,7 +482,7 @@ async def load_news(
         total_results=min(limit, 300),
     )
     articles = await state.feed.load_historical_news(request)
-    return json.dumps([a.model_dump() for a in articles], default=str, indent=2)
+    return [a.model_dump() for a in articles]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -497,15 +493,14 @@ async def load_news(
 async def query_equity_snapshots(
     ctx: Context,
     limit: int = 100,
-) -> str:
+) -> list[dict[str, Any]]:
     """Query recent equity snapshots from QuestDB.
 
     Args:
         limit: Max snapshots to return (default 100)
     """
     state = _state(ctx)
-    rows = await state.questdb.query_snapshots(limit=limit)
-    return json.dumps(rows, default=str, indent=2)
+    return await state.questdb.query_snapshots(limit=limit)
 
 
 @mcp.tool()
@@ -513,7 +508,7 @@ async def query_fx_option_snapshots(
     ctx: Context,
     currency: str | None = None,
     limit: int = 100,
-) -> str:
+) -> list[dict[str, Any]]:
     """Query FX option snapshots from QuestDB.
 
     Args:
@@ -521,8 +516,7 @@ async def query_fx_option_snapshots(
         limit: Max snapshots to return (default 100)
     """
     state = _state(ctx)
-    rows = await state.questdb.query_fx_option_snapshots(currency=currency, limit=limit)
-    return json.dumps(rows, default=str, indent=2)
+    return await state.questdb.query_fx_option_snapshots(currency=currency, limit=limit)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
