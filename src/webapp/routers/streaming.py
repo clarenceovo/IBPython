@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
@@ -14,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from src.feeds.contracts import ContractSpec
 from src.feeds.exchange_resolver import resolve_equity
 from src.feeds.models import AssetClass
+from src.feeds.snapshot_converters import _safe_float
 from src.feeds.streaming import StreamRequest, StreamSubscription, StreamingTickerSnapshot
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 
@@ -115,16 +115,6 @@ STREAM_REQUEST_EXAMPLES = {
         },
     },
 }
-
-
-def _safe_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        v = float(value)
-        return v if math.isfinite(v) else None
-    except (TypeError, ValueError):
-        return None
 
 
 def _ticker_to_snapshot(ticker: Any, spec: ContractSpec) -> StreamingTickerSnapshot:
