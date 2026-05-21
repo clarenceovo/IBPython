@@ -35,6 +35,7 @@ from src.feeds.orders import (
 )
 from src.feeds.ibkr_order_client import IBKROrderClient
 from src.feeds.ibkr_connection import IBKRConnectionManager
+from src.feeds.exceptions import IBKROrderError
 
 
 # ---------------------------------------------------------------------------
@@ -730,7 +731,7 @@ class TestIBKROrderClientCancelOrder:
         client = IBKROrderClient(conn)
 
         async def run() -> None:
-            with pytest.raises(RuntimeError, match="bound IBKR order_id"):
+            with pytest.raises(IBKROrderError, match="bound IBKR order_id"):
                 await client.cancel_order("DU123", 0)
 
         asyncio.run(run())
@@ -765,7 +766,7 @@ class TestIBKROrderClientModifyOrder:
         client = IBKROrderClient(conn)
 
         async def run() -> None:
-            with pytest.raises(RuntimeError, match="not found"):
+            with pytest.raises(IBKROrderError, match="not found"):
                 await client.modify_order("DU123", 9999, ModifyOrderRequest(price=155.0))
 
         asyncio.run(run())
@@ -777,7 +778,7 @@ class TestIBKROrderClientModifyOrder:
         client = IBKROrderClient(conn)
 
         async def run() -> None:
-            with pytest.raises(RuntimeError, match="bound IBKR order_id"):
+            with pytest.raises(IBKROrderError, match="bound IBKR order_id"):
                 await client.modify_order("DU123", 0, ModifyOrderRequest(price=155.0))
 
         asyncio.run(run())

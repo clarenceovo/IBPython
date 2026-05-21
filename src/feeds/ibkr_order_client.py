@@ -20,6 +20,7 @@ from typing import Any
 from src.feeds.ibkr_connection import IBKRConnectionManager, wait_for_ibkr_request
 from src.feeds.contracts import ContractSpec, build_ibkr_contract
 from src.feeds.models import AssetClass
+from src.feeds.exceptions import IBKROrderError
 from src.feeds.orders import (
     CachedOrderLookup,
     CancelOrderResponse,
@@ -223,7 +224,7 @@ class IBKROrderClient:
                 and result.equity_with_loan > 0
                 and result.initial_margin > result.equity_with_loan
             ):
-                raise RuntimeError(
+                raise IBKROrderError(
                     "pre-trade risk rejected order: initial margin after trade exceeds equity with loan"
                 )
             return result
@@ -432,9 +433,9 @@ class IBKROrderClient:
         """Cancel an existing order by account ID and order ID."""
         await self._connection.ensure_connected()
         if not account_id.strip():
-            raise RuntimeError("account_id is required to cancel orders")
+            raise IBKROrderError("account_id is required to cancel orders")
         if order_id <= 0:
-            raise RuntimeError("bound IBKR order_id is required to cancel orders")
+            raise IBKROrderError("bound IBKR order_id is required to cancel orders")
 
         cancel_uuid = str(_uuid.uuid4())
         logger.info("cancel_order: uuid=%s account=%s order_id=%d", cancel_uuid, account_id, order_id)
@@ -466,7 +467,7 @@ class IBKROrderClient:
 
         target_account = str(getattr(target_order, "acctCode", "") or getattr(target_order, "account", "")).strip()
         if target_account and target_account != account_id:
-            raise RuntimeError(f"Order {order_id} belongs to account {target_account}, not {account_id}")
+            raise IBKROrderError(f"Order {order_id} belongs to account {target_account}, not {account_id}")
 
         order_status = getattr(target_trade, "orderStatus", None) or target_order
         current_status = str(getattr(order_status, "status", "")).lower()
@@ -505,9 +506,9 @@ class IBKROrderClient:
         """Modify an existing order."""
         await self._connection.ensure_connected()
         if not account_id.strip():
-            raise RuntimeError("account_id is required to modify orders")
+            raise IBKROrderError("account_id is required to modify orders")
         if order_id <= 0:
-            raise RuntimeError("bound IBKR order_id is required to modify orders")
+            raise IBKROrderError("bound IBKR order_id is required to modify orders")
 
         modify_uuid = str(_uuid.uuid4())
         logger.info("modify_order: uuid=%s account=%s order_id=%d", modify_uuid, account_id, order_id)
@@ -525,13 +526,13 @@ class IBKROrderClient:
         target_trade = self._find_trade_by_order_id(open_trades, order_id)
 
         if target_trade is None:
-            raise RuntimeError(f"Order {order_id} not found in open orders")
+            raise IBKROrderError(f"Order {order_id} not found in open orders")
 
         order = target_trade.order
         contract = target_trade.contract
         target_account = str(getattr(order, "acctCode", "") or getattr(order, "account", "")).strip()
         if target_account and target_account != account_id:
-            raise RuntimeError(f"Order {order_id} belongs to account {target_account}, not {account_id}")
+            raise IBKROrderError(f"Order {order_id} belongs to account {target_account}, not {account_id}")
 
         if modifications.price is not None:
             order.lmtPrice = modifications.price

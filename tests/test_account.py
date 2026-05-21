@@ -18,6 +18,7 @@ from src.feeds.account import (
 from src.feeds.ibkr_feed import IBKRFeedClient
 from src.feeds import ibkr_feed
 from src.feeds.ibkr_account_feed import IBKRAccountFeedClient
+from src.feeds.exceptions import IBKRConnectionError
 
 
 def _contract() -> SimpleNamespace:
@@ -163,7 +164,7 @@ def test_ibkr_ensure_connected_preserves_root_cause_in_error_message() -> None:
     client.connect = failing_connect  # type: ignore[method-assign]
 
     async def run() -> None:
-        with pytest.raises(RuntimeError) as exc_info:
+        with pytest.raises(IBKRConnectionError) as exc_info:
             await client._ensure_connected()
         message = str(exc_info.value)
         assert "127.0.0.1:4001" in message

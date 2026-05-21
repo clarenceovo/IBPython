@@ -15,6 +15,7 @@ from enum import Enum
 from typing import Any
 
 from src.transport.metrics import metrics
+from src.feeds.exceptions import IBKRCircuitOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +99,10 @@ class CircuitBreaker:
         }
 
     async def guard(self) -> None:
-        """Raise RuntimeError if the circuit is open.  Thread-safe."""
+        """Raise IBKRCircuitOpenError if the circuit is open.  Thread-safe."""
         current_state = self.state
         if current_state == CircuitState.OPEN:
-            raise RuntimeError(
+            raise IBKRCircuitOpenError(
                 f"IBKR circuit breaker is OPEN (consecutive_failures={self._consecutive_failures}). "
                 f"Fast-failing for {self.recovery_timeout_seconds:.0f}s. "
                 f"Last failure was {monotonic_time.monotonic() - self._last_failure_time:.1f}s ago."

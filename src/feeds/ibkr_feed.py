@@ -95,6 +95,10 @@ from src.feeds.ibkr_connection import (
     acquire_market_data_line,
     wait_for_ibkr_request,
 )
+from src.feeds.exceptions import (  # noqa: E402
+    IBKRConnectionError,
+    IBKRContractResolutionError,
+)
 from src.feeds.ibkr_historical import (
     IBKRHistoricalClient,
     normalize_ibkr_bars,
@@ -318,13 +322,13 @@ class IBKRFeedClient:
                         root_cause,
                         self._last_ibkr_error,
                     )
-                    raise RuntimeError(
+                    raise IBKRConnectionError(
                         f"IBKR not available at {self.host}:{self.port} — "
                         f"ensure TWS or IB Gateway is running and API connections are enabled. "
                         f"clientId={self.client_id}. root_cause={root_cause}. "
                         f"{_last_ibkr_error_message(self._last_ibkr_error)}"
                     ) from exc
-        except RuntimeError:
+        except (IBKRConnectionError, RuntimeError):
             raise
         except Exception as exc:
             await self._circuit_breaker.record_failure()
@@ -395,12 +399,12 @@ class IBKRFeedClient:
         try:
             selected = await self._resolve_contract_from_details(contract, spec)
         except Exception as exc:
-            raise RuntimeError(
+            raise IBKRContractResolutionError(
                 f"IBKR could not qualify contract for {spec.symbol}.{_qualification_hint(spec)} "
                 f"contract_details_root_cause={_root_cause_message(exc)}"
             ) from exc
         if selected is None:
-            raise RuntimeError(f"IBKR could not qualify contract for {spec.symbol}.{_qualification_hint(spec)}")
+            raise IBKRContractResolutionError(f"IBKR could not qualify contract for {spec.symbol}.{_qualification_hint(spec)}")
         logger.info(
             "qualify_contract fallback selected %s con_id=%s exchange=%s primary_exchange=%s in %.2fs",
             spec.symbol,

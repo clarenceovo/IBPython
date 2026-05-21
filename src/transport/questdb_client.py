@@ -9,9 +9,11 @@ from datetime import datetime
 from typing import Any
 
 from src.config import config_constant as constants
+from src.feeds.exceptions import QuestDBConnectionError, QuestDBWriteError
 from src.feeds.models import AssetClass, OHLCVBar
 from src.feeds.snapshotter import EquitySnapshot, FXOptionSnapshot
 from src.transport.market_data_store import MarketOHLCVStore
+from src.transport.metrics import metrics
 from src.transport.questdb_queries import (
     CREATE_EQUITY_SNAPSHOT_TABLE_SQL,
     CREATE_FX_OPTION_SNAPSHOT_TABLE_SQL,
@@ -89,7 +91,7 @@ class QuestDBClient(MarketOHLCVStore):
         try:
             from psycopg_pool import AsyncConnectionPool
         except ImportError as exc:
-            raise RuntimeError(
+            raise QuestDBConnectionError(
                 "psycopg-pool is required for QuestDBClient. "
                 "Install with: pip install psycopg-pool"
             ) from exc
@@ -203,6 +205,7 @@ class QuestDBClient(MarketOHLCVStore):
     async def insert_snapshots(self, snapshots: Sequence[EquitySnapshot]) -> int:
         if not snapshots:
             return 0
+        t0 = monotonic_time.monotonic()
         try:
             await self._ensure_connection()
             await self._ensure_table("equity_snapshots", CREATE_EQUITY_SNAPSHOT_TABLE_SQL)
@@ -216,11 +219,16 @@ class QuestDBClient(MarketOHLCVStore):
                 async with self._connection.cursor() as cur:
                     await cur.executemany(INSERT_EQUITY_SNAPSHOT_SQL, rows)
                 await self._connection.commit()
+            elapsed = monotonic_time.monotonic() - t0
+            metrics.questdb_insert_duration.observe(elapsed, {"table": "equity_snapshots"})
             return len(snapshots)
         except Exception:
+            elapsed = monotonic_time.monotonic() - t0
+            metrics.questdb_insert_duration.observe(elapsed, {"table": "equity_snapshots"})
+            metrics.questdb_insert_failures.inc({"table": "equity_snapshots"})
             logger.error("insert_snapshots failed, buffering %d rows", len(snapshots), exc_info=True)
             await self._buffer_failed_rows("equity_snapshots", rows=None, snapshots=snapshots)
-            return 0
+            raise QuestDBWriteError(f"Failed to insert {len(snapshots)} equity snapshots") from None
 
     async def insert_fx_option_snapshots(self, snapshots: Sequence[FXOptionSnapshot]) -> int:
         if not snapshots:
@@ -326,6 +334,7 @@ class QuestDBClient(MarketOHLCVStore):
     async def insert_bars(self, bars: Sequence[OHLCVBar]) -> int:
         if not bars:
             return 0
+        t0 = monotonic_time.monotonic()
         try:
             await self._ensure_connection()
             await self._ensure_table("market_ohlcv", CREATE_MARKET_OHLCV_TABLE_SQL, alter_sqls=MARKET_OHLCV_IDENTITY_ALTER_SQL)
@@ -339,11 +348,16 @@ class QuestDBClient(MarketOHLCVStore):
                 async with self._connection.cursor() as cur:
                     await cur.executemany(INSERT_MARKET_OHLCV_SQL, rows)
                 await self._connection.commit()
+            elapsed = monotonic_time.monotonic() - t0
+            metrics.questdb_insert_duration.observe(elapsed, {"table": "market_ohlcv"})
             return len(bars)
         except Exception:
+            elapsed = monotonic_time.monotonic() - t0
+            metrics.questdb_insert_duration.observe(elapsed, {"table": "market_ohlcv"})
+            metrics.questdb_insert_failures.inc({"table": "market_ohlcv"})
             logger.error("insert_bars failed, buffering %d rows", len(bars), exc_info=True)
             await self._buffer_failed_rows("market_ohlcv", rows=None, bars=bars)
-            return 0
+            raise QuestDBWriteError(f"Failed to insert {len(bars)} OHLCV bars") from None
 
     async def query_historical_bars(
         self,

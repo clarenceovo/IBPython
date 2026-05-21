@@ -12,6 +12,8 @@ import time as monotonic_time
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from src.config import config_constant as constants
+from src.transport.metrics import metrics
+from src.feeds.exceptions import IBKRConnectionError
 
 if TYPE_CHECKING:
     from src.feeds.contracts import ContractSpec
@@ -224,7 +226,7 @@ class IBKRConnectionManager:
                 operation="connect",
             )
             if not self._ib.isConnected():
-                raise RuntimeError("connectAsync returned but IBKR client is not connected")
+                raise IBKRConnectionError("connectAsync returned but IBKR client is not connected")
             logger.info("connected to IBKR in %.2fs", monotonic_time.monotonic() - t0)
             self._ib.setTimeout(DETECTION_TIMEOUT)
         except Exception:
@@ -272,7 +274,7 @@ class IBKRConnectionManager:
                     root_cause,
                     self._last_ibkr_error,
                 )
-                raise RuntimeError(
+                raise IBKRConnectionError(
                     f"IBKR not available at {self.host}:{self.port} — "
                     f"ensure TWS or IB Gateway is running and API connections are enabled. "
                     f"clientId={self.client_id}. root_cause={root_cause}. "
@@ -427,10 +429,14 @@ class IBKRConnectionManager:
     async def with_retry(self, call: Any, *, operation: str) -> Any:
         """Execute an async callable with retry logic for transient errors."""
         last_error: BaseException | None = None
+        t0 = monotonic_time.monotonic()
         for attempt in range(1, self.retry_attempts + 1):
             try:
                 await self.wait_for_ibkr_request(operation=operation)
-                return await call()
+                result = await call()
+                elapsed = monotonic_time.monotonic() - t0
+                metrics.ibkr_request_duration.observe(elapsed, {"operation": operation, "status": "ok"})
+                return result
             except Exception as exc:  # pragma: no cover - exercised with live gateways.
                 last_error = exc
                 if not self.is_transient_error(exc) or attempt >= self.retry_attempts:
@@ -438,6 +444,10 @@ class IBKRConnectionManager:
                 delay = self.retry_base_delay_seconds * (2 ** (attempt - 1))
                 logger.warning("IBKR %s failed on attempt %d/%d; retrying in %.2fs", operation, attempt, self.retry_attempts, delay)
                 await asyncio.sleep(delay)
+        elapsed = monotonic_time.monotonic() - t0
+        error_type = type(last_error).__name__ if last_error else "Unknown"
+        metrics.ibkr_request_duration.observe(elapsed, {"operation": operation, "status": "error"})
+        metrics.ibkr_request_errors.inc({"operation": operation, "error_type": error_type})
         raise RuntimeError(f"IBKR operation failed after retries: {operation}") from last_error
 
     # Backwards-compatible alias used by facade

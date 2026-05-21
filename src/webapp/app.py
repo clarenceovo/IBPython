@@ -15,6 +15,15 @@ from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
 from src.webapp.middleware.correlation import CorrelationIdFilter, CorrelationIdMiddleware
 from src.webapp.routers import account, business, fixed_income, market_data_bonds, market_data_equity, market_data_fx, market_data_futures, market_data_options, orders, reference_data, scanner, snapshot, streaming, system, tick_data
 from src.webapp.routers import market_data  # noqa: F401 — kept for import compatibility
+from src.feeds.exceptions import (
+    IBKRConnectionError,
+    IBKRCircuitOpenError,
+    IBKRContractResolutionError,
+    IBKRPacingError,
+    IBKROrderError,
+    QuestDBWriteError,
+    QuestDBConnectionError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +191,41 @@ def create_app(
     async def metrics_endpoint() -> bytes:
         """Expose Prometheus-compatible metrics in text format."""
         return metrics.expose().encode("utf-8")
+
+    @fastapi_app.exception_handler(IBKRConnectionError)
+    async def ibkr_connection_error_handler(_request: Request, exc: IBKRConnectionError) -> JSONResponse:
+        logger.warning("IBKR connection error: %s", exc)
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    @fastapi_app.exception_handler(IBKRCircuitOpenError)
+    async def ibkr_circuit_open_error_handler(_request: Request, exc: IBKRCircuitOpenError) -> JSONResponse:
+        logger.warning("IBKR circuit breaker open: %s", exc)
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    @fastapi_app.exception_handler(IBKRContractResolutionError)
+    async def ibkr_contract_resolution_error_handler(_request: Request, exc: IBKRContractResolutionError) -> JSONResponse:
+        logger.warning("IBKR contract resolution error: %s", exc)
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    @fastapi_app.exception_handler(IBKRPacingError)
+    async def ibkr_pacing_error_handler(_request: Request, exc: IBKRPacingError) -> JSONResponse:
+        logger.warning("IBKR pacing violation: %s", exc)
+        return JSONResponse(status_code=429, content={"detail": str(exc)})
+
+    @fastapi_app.exception_handler(IBKROrderError)
+    async def ibkr_order_error_handler(_request: Request, exc: IBKROrderError) -> JSONResponse:
+        logger.warning("IBKR order error: %s", exc)
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+    @fastapi_app.exception_handler(QuestDBWriteError)
+    async def questdb_write_error_handler(_request: Request, exc: QuestDBWriteError) -> JSONResponse:
+        logger.error("QuestDB write error: %s", exc)
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    @fastapi_app.exception_handler(QuestDBConnectionError)
+    async def questdb_connection_error_handler(_request: Request, exc: QuestDBConnectionError) -> JSONResponse:
+        logger.error("QuestDB connection error: %s", exc)
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
 
     @fastapi_app.exception_handler(RuntimeError)
     async def runtime_error_handler(_request: Request, exc: RuntimeError) -> JSONResponse:
