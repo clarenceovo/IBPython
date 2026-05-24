@@ -636,8 +636,10 @@ class IBKRFeedClient:
     async def capture_equity_snapshots(
         self,
         symbols: Sequence[tuple[str, str, str, str, int]],
+        *,
+        snapshot_wait_seconds: float = 11.5,
     ) -> list[Any]:
-        return await self._reference.capture_equity_snapshots(symbols)
+        return await self._reference.capture_equity_snapshots(symbols, snapshot_wait_seconds=snapshot_wait_seconds)
 
     async def cancel_equity_tickers(self, tickers: Sequence[Any]) -> None:
         return await self._reference.cancel_equity_tickers(tickers)
@@ -766,4 +768,3 @@ class IBKRFeedClient:
 
     async def search_matching_symbols(self, pattern: str) -> "list":
         return await self._marketdata_ext.search_matching_symbols(pattern)
-

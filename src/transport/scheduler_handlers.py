@@ -590,28 +590,37 @@ class EquitySnapshotJobHandler:
             resolved = resolve_equity(raw_sym)
             symbol_params.append((resolved.symbol, resolved.exchange, resolved.currency, resolved.primary_exchange, 0))
 
-        tickers = await self._feed.capture_equity_snapshots(symbol_params)
+        capture_results = await self._feed.capture_equity_snapshots(symbol_params)
+        tickers_to_cancel = [result.ticker for result in capture_results if getattr(result, "ticker", None) is not None]
 
-        for i, ticker in enumerate(tickers):
-            if i < len(symbol_params):
-                s, ex, cur, pe, _ = symbol_params[i]
+        try:
+            for result in capture_results:
+                ticker = getattr(result, "ticker", None)
+                if ticker is None:
+                    failed.append(getattr(result, "symbol", getattr(result, "requested_symbol", "UNKNOWN")))
+                    continue
                 try:
                     ticker_time = getattr(ticker, "time", None)
                     snap = ticker_to_snapshot(
-                        ticker, symbol=s, exchange=ex, currency=cur, primary_exchange=pe,
+                        ticker,
+                        symbol=result.symbol,
+                        exchange=result.exchange,
+                        currency=result.currency,
+                        primary_exchange=result.primary_exchange,
+                        con_id=result.con_id,
                         timestamp=ticker_time if isinstance(ticker_time, datetime) else None,
                     )
                     snapshots.append(snap)
                 except Exception:
-                    logger.warning("failed to create snapshot for symbol=%s", s, exc_info=True)
-                    failed.append(s)
-
-        await self._feed.cancel_equity_tickers(tickers)
+                    logger.warning("failed to create snapshot for symbol=%s", result.symbol, exc_info=True)
+                    failed.append(result.symbol)
+        finally:
+            await self._feed.cancel_equity_tickers(tickers_to_cancel)
 
         captured_symbols = {s.symbol for s in snapshots}
         for raw_sym in watchlist.symbols:
             resolved = resolve_equity(raw_sym)
-            if resolved.symbol not in captured_symbols:
+            if resolved.symbol not in captured_symbols and resolved.symbol not in failed:
                 failed.append(resolved.symbol)
 
         # Persist to QuestDB first, cache to Redis only on success

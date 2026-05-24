@@ -6,6 +6,7 @@ import logging
 import math
 import time as monotonic_time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
@@ -22,6 +23,18 @@ from src.feeds.models import AssetClass, FXOHLCVBar, FutureOHLCVBar, OHLCVBar, O
 logger = logging.getLogger(__name__)
 
 US_EQUITY_PRIMARY_EXCHANGE_PREFERENCE: tuple[str, ...] = ("NASDAQ", "NYSE", "ARCA", "AMEX", "BATS")
+
+
+@dataclass(frozen=True)
+class HistoricalAutoChunkPlan:
+    """Computed range plan for an oversized IBKR historical request."""
+
+    start_datetime: datetime
+    end_datetime: datetime
+    requested_duration_seconds: float
+    max_duration: str
+    max_duration_seconds: float
+    estimated_chunks: int
 
 
 def _contract_details_contract(detail: Any) -> Any:
@@ -162,12 +175,37 @@ def _ibkr_duration_between(start: datetime, end: datetime) -> str:
     if days <= 1:
         return f"{int(total_seconds)} S"
     if days <= 365:
-        return f"{int(days) + 1} D"
-    months = int(days / 30) + 1
+        return f"{math.ceil(days)} D"
+    months = math.ceil(days / 30)
     if months <= 18:
         return f"{months} M"
-    years = int(days / 365) + 1
+    years = math.ceil(days / 365)
     return f"{years} Y"
+
+
+def plan_historical_auto_chunk(request: OHLCVRequest, *, now: datetime | None = None) -> HistoricalAutoChunkPlan | None:
+    """Return a range plan when a request exceeds IBKR's max duration for its bar size."""
+    if request.start_datetime is not None:
+        return None
+    requested_seconds = _ibkr_duration_to_seconds(request.duration)
+    max_duration = _ibkr_max_duration_for_bar_size(request.bar_size)
+    max_seconds = _ibkr_duration_to_seconds(max_duration)
+    if requested_seconds <= max_seconds:
+        return None
+
+    end_datetime = request.end_datetime or now or datetime.now(timezone.utc)
+    if end_datetime.tzinfo is None:
+        end_datetime = end_datetime.replace(tzinfo=timezone.utc)
+    end_datetime = end_datetime.astimezone(timezone.utc)
+    start_datetime = end_datetime - timedelta(seconds=requested_seconds)
+    return HistoricalAutoChunkPlan(
+        start_datetime=start_datetime,
+        end_datetime=end_datetime,
+        requested_duration_seconds=requested_seconds,
+        max_duration=max_duration,
+        max_duration_seconds=max_seconds,
+        estimated_chunks=max(1, math.ceil(requested_seconds / max_seconds)),
+    )
 
 
 def _format_ibkr_end_datetime(value: datetime | None) -> str:
@@ -486,6 +524,31 @@ class IBKRHistoricalClient:
                 range_request,
                 start_datetime=request.start_datetime,
                 end_datetime=request.end_datetime,
+            )
+
+        auto_chunk_plan = plan_historical_auto_chunk(request)
+        if auto_chunk_plan is not None:
+            logger.info(
+                "load_historical_ohlcv: auto_chunking oversized request symbol=%s bar_size=%s duration=%s "
+                "max_duration=%s estimated_chunks=%d range=%s → %s",
+                request.symbol,
+                request.bar_size,
+                request.duration,
+                auto_chunk_plan.max_duration,
+                auto_chunk_plan.estimated_chunks,
+                auto_chunk_plan.start_datetime.isoformat(),
+                auto_chunk_plan.end_datetime.isoformat(),
+            )
+            range_request = request.model_copy(
+                update={
+                    "start_datetime": None,
+                    "end_datetime": auto_chunk_plan.end_datetime,
+                }
+            )
+            return await self.load_historical_ohlcv_range(
+                range_request,
+                start_datetime=auto_chunk_plan.start_datetime,
+                end_datetime=auto_chunk_plan.end_datetime,
             )
 
         await self._connection.ensure_connected()

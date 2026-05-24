@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Depends
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from src.feeds.ibkr_historical import plan_historical_auto_chunk
 from src.feeds.models import AssetClass, OHLCVBar, OHLCVRequest
 from src.webapp.cache import stable_cache_key
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
+
+logger = logging.getLogger(__name__)
 
 
 class HistoricalOHLCVLoadRequest(BaseModel):
@@ -101,7 +105,25 @@ async def load_ohlcv_with_controls(
     cache_namespace: str,
     state: IBKRRestAppState,
 ) -> list[OHLCVBar]:
-    # When start_datetime is provided, use paginated range fetch.
+    auto_chunk_plan = None
+    if start_datetime is None:
+        auto_chunk_plan = plan_historical_auto_chunk(request)
+        if auto_chunk_plan is not None:
+            logger.info(
+                "FastAPI historical OHLCV auto_chunking symbol=%s bar_size=%s duration=%s "
+                "max_duration=%s estimated_chunks=%d range=%s -> %s",
+                request.symbol,
+                request.bar_size,
+                request.duration,
+                auto_chunk_plan.max_duration,
+                auto_chunk_plan.estimated_chunks,
+                auto_chunk_plan.start_datetime.isoformat(),
+                auto_chunk_plan.end_datetime.isoformat(),
+            )
+            start_datetime = auto_chunk_plan.start_datetime
+            request = request.model_copy(update={"end_datetime": auto_chunk_plan.end_datetime})
+
+    # When start_datetime is provided or inferred for an oversized request, use paginated range fetch.
     if start_datetime is not None and start_datetime != request.end_datetime:
         if use_ttl_cache and not persist:
             key = stable_cache_key(
@@ -109,6 +131,7 @@ async def load_ohlcv_with_controls(
                 {
                     "request": request.model_dump(mode="json"),
                     "start_datetime": start_datetime.isoformat(),
+                    "auto_chunk": auto_chunk_plan is not None,
                 },
             )
             cached = await state.market_data_cache.get(key)

@@ -489,7 +489,7 @@ python scripts/validate_scheduler_jobs.py --schedule-dir schedulejob --include-r
 
 ## OHLCV Persistence Backends
 
-OHLCV snapshots persist through `MarketOHLCVStore`, a base interface implemented by both `QuestDBClient` and `MySQLClient`. The snapshotter and `OHLCVLoader` do not branch on vendor-specific clients; they call `insert_bars(...)` on the configured store.
+OHLCV snapshots are requested by the scheduler through the FastAPI OHLCV endpoint configured with `IBKR_REST_BASE_URL`. The API process owns IBKR access, normalization, latest-bar cache updates, and persistence through `MarketOHLCVStore`, a base interface implemented by both `QuestDBClient` and `MySQLClient`. The scheduler keeps job timing, symbol expansion, bookmarks, and status state; it no longer needs a direct QuestDB writer for `ohlcv_snapshot` jobs.
 
 Backend selection:
 
@@ -505,11 +505,11 @@ Both backends expose the same operational surface:
 - `query_historical_bars(...)`
 - `query_latest_bars(...)`
 
-QuestDB should remain the default for high-volume time-series capture because the table is timestamped and day-partitioned. MySQL is useful when operators want the snapshotter to land bars beside relational portfolio, strategy, or reporting tables. Both stores persist a deterministic `contract_key` plus nullable IBKR contract identity fields (`con_id`, `local_symbol`, `contract_month`, `expiry`, `strike`, `right`, `trading_class`, `what_to_show`, and `use_rth`). MySQL keys bars by `(contract_key, bar_size, timestamp)` with `ON DUPLICATE KEY UPDATE`, so same-root futures or options at the same timestamp stay distinct and repeated snapshots remain idempotent.
+QuestDB should remain the default for high-volume time-series capture because `EquityOHLCV` is timestamped and day-partitioned. MySQL is useful when operators want bars beside relational portfolio, strategy, or reporting tables and keeps the `market_ohlcv` table name. Both stores persist a deterministic `contract_key` plus nullable IBKR contract identity fields (`con_id`, `local_symbol`, `contract_month`, `expiry`, `strike`, `right`, `trading_class`, `what_to_show`, and `use_rth`). MySQL keys bars by `(contract_key, bar_size, timestamp)` with `ON DUPLICATE KEY UPDATE`, so same-root futures or options at the same timestamp stay distinct and repeated snapshots remain idempotent.
 
 ## OHLCV Snapshot Jobs
 
-`job_type="ohlcv_snapshot"` is the production scheduler path for multi-market OHLCV capture. It supports either interval scheduling or five-field cron expressions. Cron fields support `*`, ranges, lists, steps, and weekday names such as `mon-fri`.
+`job_type="ohlcv_snapshot"` is the production scheduler path for multi-market OHLCV capture. For each runnable symbol, it posts to `POST /api/v1/market-data/ohlcv` on `IBKR_REST_BASE_URL` with `persist`, `cache_latest`, and `use_ttl_cache=false`, then updates Redis bookmarks from the API response timestamps. It supports either interval scheduling or five-field cron expressions. Cron fields support `*`, ranges, lists, steps, and weekday names such as `mon-fri`.
 
 If both `cron` and `interval_seconds` are present, cron controls trigger timing. `interval_seconds` remains operational metadata and must match `params.snap_interval_seconds` for OHLCV jobs.
 
@@ -840,9 +840,11 @@ Operational recommendations:
 
 ## Market OHLCV Schema
 
-Main table: `market_ohlcv`
+QuestDB main table: `EquityOHLCV`
 
 QuestDB schema: timestamped on `timestamp`, partitioned by day, stores metadata as JSON text plus nullable contract identity columns.
+
+MySQL main table: `market_ohlcv`
 
 MySQL schema: InnoDB table with `(contract_key, bar_size, timestamp)` primary key, secondary indexes for latest/history reads, nullable contract identity columns, and `metadata JSON`.
 

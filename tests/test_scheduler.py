@@ -1,8 +1,11 @@
 import asyncio
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from src.feeds.models import AssetClass, OHLCVBar
+from src.feeds.snapshotter import EquitySnapshotCaptureResult, SnapshotWatchlist
 from src.transport.scheduler import (
+    EquitySnapshotJobHandler,
     GenericScheduler,
     MarketSnapshotJobHandler,
     OHLCVSnapshotJobHandler,
@@ -68,6 +71,7 @@ class FakeRedis:
         self.leases: dict[str, tuple[str, float]] = {}
         self.now = 0.0
         self.runs: dict[str, list[dict]] = {}
+        self.equity_snapshots: dict[str, object] = {}
 
     async def get_ohlcv_snapshot_last_ts(self, job_name: str, symbol: str, bar_size: str):
         return self.last_ts.get((job_name, symbol, bar_size))
@@ -105,6 +109,10 @@ class FakeRedis:
 
     async def record_scheduler_run(self, job_name: str, payload: dict):
         self.runs.setdefault(job_name, []).append(payload)
+
+    async def set_latest_equity_snapshot(self, snapshot):
+        self.equity_snapshots[snapshot.symbol] = snapshot
+        return "equity-snapshot-key"
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
@@ -655,6 +663,83 @@ def test_ohlcv_snapshot_handler_returns_failed_when_all_symbols_fail() -> None:
 
         assert result.status == "failed"
         assert result.metrics["symbols_failed"] == 1
+
+    asyncio.run(run())
+
+
+def test_equity_snapshot_scheduler_preserves_symbol_identity_and_cleans_up_tickers() -> None:
+    class FakeEquityFeed:
+        def __init__(self) -> None:
+            self.requests = []
+            self.cancelled_tickers = []
+
+        async def capture_equity_snapshots(self, symbols):
+            symbol_rows = tuple(symbols)
+            self.requests.append(symbol_rows)
+            results = [
+                EquitySnapshotCaptureResult(
+                    requested_symbol="AAPL",
+                    symbol="AAPL",
+                    exchange="SMART",
+                    currency="USD",
+                    primary_exchange="NASDAQ",
+                    error="simulated subscription failure",
+                )
+            ]
+            for symbol, exchange, currency, primary_exchange, con_id in symbol_rows[1:]:
+                ticker = SimpleNamespace(
+                    contract=SimpleNamespace(conId=con_id or 12345, symbol=symbol),
+                    time=datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc),
+                    last=100.5,
+                    bid=100.0,
+                    ask=101.0,
+                    volume=1000,
+                )
+                results.append(
+                    EquitySnapshotCaptureResult(
+                        requested_symbol=symbol,
+                        symbol=symbol,
+                        exchange=exchange,
+                        currency=currency,
+                        primary_exchange=primary_exchange,
+                        con_id=con_id or 12345,
+                        ticker=ticker,
+                    )
+                )
+            return results
+
+        async def cancel_equity_tickers(self, tickers):
+            self.cancelled_tickers.extend(tickers)
+
+    class FakeQuestDB:
+        def __init__(self) -> None:
+            self.snapshots = []
+
+        async def insert_snapshots(self, snapshots):
+            self.snapshots.extend(snapshots)
+            return len(snapshots)
+
+    async def run() -> None:
+        redis = FakeRedis()
+        watchlist = SnapshotWatchlist(name="core", symbols=("AAPL", "MSFT"))
+        redis.raw["SnapshotWatchlist::core"] = watchlist.model_dump_json()
+        feed = FakeEquityFeed()
+        questdb = FakeQuestDB()
+        handler = EquitySnapshotJobHandler(None, feed=feed, redis=redis, questdb=questdb)
+        job = SchedulerJobDefinition(
+            name="equity_core",
+            job_type="equity_snapshot",
+            interval_seconds=60,
+            params={"watchlist_name": "core", "persist": True, "cache_latest": True},
+        )
+
+        await handler(job)
+
+        assert feed.requests[0][0][0] == "AAPL"
+        assert feed.requests[0][1][0] == "MSFT"
+        assert [snapshot.symbol for snapshot in questdb.snapshots] == ["MSFT"]
+        assert redis.equity_snapshots["MSFT"].symbol == "MSFT"
+        assert len(feed.cancelled_tickers) == 1
 
     asyncio.run(run())
 

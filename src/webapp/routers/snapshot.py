@@ -228,50 +228,57 @@ async def capture_snapshots(
         resolved = resolve_equity(raw_symbol)
         specs.append((resolved.symbol, resolved.exchange, resolved.currency, resolved.primary_exchange))
 
-    # Subscribe to all tickers at once
+    # Request all one-shot IBKR snapshots at once. Results preserve requested symbol identity.
     symbol_params = [(s, ex, cur, pe, 0) for s, ex, cur, pe in specs]
-    tickers = await state.feed.capture_equity_snapshots(symbol_params)
+    capture_results = await state.feed.capture_equity_snapshots(symbol_params)
+    tickers_to_cancel = [result.ticker for result in capture_results if getattr(result, "ticker", None) is not None]
 
-    # Convert tickers to snapshots
-    for i, ticker in enumerate(tickers):
-        if i < len(specs):
-            s, ex, cur, pe = specs[i]
+    try:
+        # Convert successful per-symbol results to snapshots without relying on list positions.
+        for result in capture_results:
+            ticker = getattr(result, "ticker", None)
+            if ticker is None:
+                failed.append(getattr(result, "symbol", getattr(result, "requested_symbol", "UNKNOWN")))
+                continue
             try:
-                # Use ticker's time if available (exchange arrival time)
                 ticker_time = getattr(ticker, "time", None)
                 snap = ticker_to_snapshot(
-                    ticker, symbol=s, exchange=ex, currency=cur, primary_exchange=pe,
+                    ticker,
+                    symbol=result.symbol,
+                    exchange=result.exchange,
+                    currency=result.currency,
+                    primary_exchange=result.primary_exchange,
+                    con_id=result.con_id,
                     timestamp=ticker_time if isinstance(ticker_time, datetime) else None,
                 )
                 snapshots.append(snap)
             except Exception:
-                failed.append(s)
-                logger.warning("failed to build snapshot for %s", s, exc_info=True)
+                failed.append(result.symbol)
+                logger.warning("failed to build snapshot for %s", result.symbol, exc_info=True)
 
-    # Also track symbols that didn't get a ticker at all
-    captured_symbols = {s.symbol for s in snapshots}
-    for raw_symbol in payload.symbols:
-        resolved = resolve_equity(raw_symbol)
-        if resolved.symbol not in captured_symbols:
-            failed.append(resolved.symbol)
+        # Also track symbols that didn't get a successfully converted snapshot.
+        captured_symbols = {snapshot.symbol for snapshot in snapshots}
+        for raw_symbol in payload.symbols:
+            resolved = resolve_equity(raw_symbol)
+            if resolved.symbol not in captured_symbols and resolved.symbol not in failed:
+                failed.append(resolved.symbol)
 
-    # Persist to QuestDB
-    if payload.persist and snapshots and state.questdb is not None:
-        try:
-            await state.questdb.insert_snapshots(snapshots)
-        except Exception:
-            logger.exception("failed to persist snapshots to QuestDB")
-
-    # Cache latest in Redis
-    if payload.cache_latest and snapshots and state.redis is not None:
-        for snap in snapshots:
+        # Persist to QuestDB
+        if payload.persist and snapshots and state.questdb is not None:
             try:
-                await state.redis.set_latest_equity_snapshot(snap)
+                await state.questdb.insert_snapshots(snapshots)
             except Exception:
-                logger.warning("failed to cache snapshot for %s", snap.symbol, exc_info=True)
+                logger.exception("failed to persist snapshots to QuestDB")
 
-    # Clean up tickers
-    await state.feed.cancel_equity_tickers(tickers)
+        # Cache latest in Redis
+        if payload.cache_latest and snapshots and state.redis is not None:
+            for snap in snapshots:
+                try:
+                    await state.redis.set_latest_equity_snapshot(snap)
+                except Exception:
+                    logger.warning("failed to cache snapshot for %s", snap.symbol, exc_info=True)
+    finally:
+        await state.feed.cancel_equity_tickers(tickers_to_cancel)
 
     duration = monotonic_time.monotonic() - t0
     return SnapshotResult(

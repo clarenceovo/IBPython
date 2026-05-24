@@ -14,7 +14,7 @@ from src.feeds.index_composition import IndexCompositionPayload
 from src.feeds.models import AssetClass, OHLCVBar, OptionOHLCVBar
 from src.feeds.news import HistoricalNewsHeadline, NewsArticle, NewsProvider
 from src.feeds.options import OptionAnalyticsSnapshot, OptionSkewSurfaceResponse
-from src.feeds.snapshotter import FXOptionSnapshot
+from src.feeds.snapshotter import EquitySnapshot, EquitySnapshotCaptureResult, FXOptionSnapshot
 from src.feeds.tick_data import HistoricalTickResponse, MarketRule, PriceIncrement
 import src.webapp.app as app_module
 import src.webapp.routers.business as business_router
@@ -77,6 +77,7 @@ class FakeRedis:
     def __init__(self) -> None:
         self.latest_call: tuple[AssetClass, str, str | None] | None = None
         self.compositions: dict[str, IndexCompositionPayload] = {}
+        self.equity_snapshots: dict[str, EquitySnapshot] = {}
         self.fx_option_snapshots: dict[tuple[str, str, float, str], FXOptionSnapshot] = {}
 
     async def health_check(self) -> bool:
@@ -106,6 +107,10 @@ class FakeRedis:
         self.fx_option_snapshots[(snapshot.symbol, snapshot.expiry, snapshot.strike, snapshot.right)] = snapshot
         return "fx-option-key"
 
+    async def set_latest_equity_snapshot(self, snapshot: EquitySnapshot) -> str:
+        self.equity_snapshots[snapshot.symbol] = snapshot
+        return "equity-snapshot-key"
+
     async def get_latest_fx_option_snapshot(
         self,
         *,
@@ -131,6 +136,8 @@ class FakeFeed:
         self.historical_tick_requests: list[object] = []
         self.market_rule_requests: list[int] = []
         self.fx_option_snapshot_requests: list[tuple[object, ...]] = []
+        self.equity_snapshot_requests: list[tuple[tuple[str, str, str, str, int], ...]] = []
+        self.cancelled_equity_tickers: list[object] = []
         self.provider_calls = 0
         self.news_providers = [NewsProvider(provider_code="BZ", provider_name="Benzinga")]
 
@@ -250,6 +257,53 @@ class FakeFeed:
             )
         return snapshots
 
+    async def capture_equity_snapshots(
+        self,
+        symbols: object,
+        *,
+        snapshot_wait_seconds: float = 11.5,
+    ) -> list[EquitySnapshotCaptureResult]:
+        symbol_rows = tuple(symbols)
+        self.equity_snapshot_requests.append(symbol_rows)
+        results: list[EquitySnapshotCaptureResult] = []
+        for symbol, exchange, currency, primary_exchange, con_id in symbol_rows:
+            if symbol == "AAPL":
+                results.append(
+                    EquitySnapshotCaptureResult(
+                        requested_symbol=symbol,
+                        symbol=symbol,
+                        exchange=exchange,
+                        currency=currency,
+                        primary_exchange=primary_exchange,
+                        con_id=con_id,
+                        error="simulated subscription failure",
+                    )
+                )
+                continue
+            ticker = SimpleNamespace(
+                contract=SimpleNamespace(conId=con_id or 999, symbol=symbol),
+                time=datetime(2026, 1, 1, 14, 30, tzinfo=timezone.utc),
+                last=100.5,
+                bid=100.0,
+                ask=101.0,
+                volume=1000,
+            )
+            results.append(
+                EquitySnapshotCaptureResult(
+                    requested_symbol=symbol,
+                    symbol=symbol,
+                    exchange=exchange,
+                    currency=currency,
+                    primary_exchange=primary_exchange,
+                    con_id=con_id or 999,
+                    ticker=ticker,
+                )
+            )
+        return results
+
+    async def cancel_equity_tickers(self, tickers: object) -> None:
+        self.cancelled_equity_tickers.extend(tickers)
+
     async def load_live_positions(self) -> list[LivePositionDTO]:
         return [
             LivePositionDTO(
@@ -309,12 +363,17 @@ class FakeFeed:
 
 class FakeQuestDB:
     def __init__(self) -> None:
+        self.equity_snapshots: list[EquitySnapshot] = []
         self.fx_option_snapshots: list[FXOptionSnapshot] = []
         self.fx_option_queries: list[object] = []
         self.created_fx_option_table = False
 
     async def create_fx_option_snapshot_table(self) -> None:
         self.created_fx_option_table = True
+
+    async def insert_snapshots(self, snapshots: list[EquitySnapshot]) -> int:
+        self.equity_snapshots.extend(snapshots)
+        return len(snapshots)
 
     async def insert_fx_option_snapshots(self, snapshots: list[FXOptionSnapshot]) -> int:
         self.fx_option_snapshots.extend(snapshots)
@@ -890,6 +949,32 @@ def test_generic_ohlcv_endpoint_supports_start_and_end_datetime_range() -> None:
     assert end == datetime(2026, 1, 2, 21, 0, tzinfo=timezone.utc)
 
 
+def test_ohlcv_endpoint_auto_chunks_oversized_ibkr_request() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/market-data/ohlcv/equity",
+            json={
+                "symbol": "SPY",
+                "duration": "2 D",
+                "bar_size": "1 min",
+                "end_datetime": "2026-01-03T21:00:00Z",
+                "cache_latest": False,
+                "use_ttl_cache": False,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()[0]["source"] == "range-test"
+    assert state.loader.calls == 0
+    request, start, end = state.feed.range_calls[0]
+    assert getattr(request, "symbol") == "SPY"
+    assert start == datetime(2026, 1, 1, 21, 0, tzinfo=timezone.utc)
+    assert end == datetime(2026, 1, 3, 21, 0, tzinfo=timezone.utc)
+
+
 def test_market_data_ohlcv_endpoint_uses_ttl_cache() -> None:
     state = FakeState()
     app = create_app(settings=state.settings, state=state)
@@ -1064,6 +1149,28 @@ def test_fx_option_ohlcv_wrapper_and_snapshot_collection() -> None:
     assert latest.json()["symbol"] == "EURUSD"
     assert query.status_code == 200
     assert state.questdb.fx_option_queries[0]["symbol"] == "EURUSD"
+
+
+def test_equity_snapshot_capture_preserves_symbol_identity_and_cleans_up_tickers() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/snapshot/capture",
+            json={"symbols": ["AAPL", "MSFT"], "persist": True, "cache_latest": True},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["symbols_requested"] == 2
+    assert body["symbols_captured"] == 1
+    assert body["symbols_failed"] == 1
+    assert body["failed_symbols"] == ["AAPL"]
+    assert body["snapshots"][0]["symbol"] == "MSFT"
+    assert state.questdb.equity_snapshots[0].symbol == "MSFT"
+    assert state.redis.equity_snapshots["MSFT"].symbol == "MSFT"
+    assert len(state.feed.cancelled_equity_tickers) == 1
 
 
 def test_commodity_metadata_ticks_news_and_business_front_forward_contracts() -> None:

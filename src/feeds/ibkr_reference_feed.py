@@ -41,6 +41,7 @@ from src.feeds.scanner import (
     ContractSearchRequest,
     ContractSearchResult,
 )
+from src.feeds.snapshotter import EquitySnapshotCaptureResult
 
 if TYPE_CHECKING:
     from src.feeds.ibkr_historical import IBKRHistoricalClient
@@ -359,11 +360,15 @@ class IBKRReferenceFeedClient:
     async def capture_equity_snapshots(
         self,
         symbols: Sequence[tuple[str, str, str, str, int]],
-    ) -> list[Any]:
-        """Capture point-in-time snapshots for a list of equity contracts."""
+        *,
+        snapshot_wait_seconds: float = 11.5,
+    ) -> list[EquitySnapshotCaptureResult]:
+        """Capture IBKR one-shot market-data snapshots for equity contracts."""
         await self._connection.ensure_connected()
-        tickers: list[Any] = []
+        results: list[EquitySnapshotCaptureResult] = []
+        subscribed_tickers: list[Any] = []
         for symbol, exchange, currency, primary_exchange, con_id in symbols:
+            lease = None
             try:
                 from ib_insync import Contract
                 kwargs: dict[str, Any] = {
@@ -386,16 +391,44 @@ class IBKRReferenceFeedClient:
                 )
                 await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
                 try:
-                    ticker = self._ib.reqMktData(contract, "", False, False)
+                    ticker = self._ib.reqMktData(contract, "", True, False)
                 except Exception:
                     await lease.release()
                     raise
                 self._market_data_leases_by_ticker_id[id(ticker)] = lease
-                tickers.append(ticker)
-            except Exception:
+                subscribed_tickers.append(ticker)
+                ticker_contract = getattr(ticker, "contract", contract)
+                results.append(
+                    EquitySnapshotCaptureResult(
+                        requested_symbol=symbol,
+                        symbol=symbol.upper(),
+                        exchange=exchange.upper(),
+                        currency=currency.upper(),
+                        primary_exchange=primary_exchange.upper() if primary_exchange else "",
+                        con_id=int(getattr(ticker_contract, "conId", None) or con_id or 0),
+                        ticker=ticker,
+                    )
+                )
+            except Exception as exc:
                 logger.warning("failed to subscribe ticker for %s", symbol, exc_info=True)
-        await asyncio.sleep(1.0)
-        return tickers
+                results.append(
+                    EquitySnapshotCaptureResult(
+                        requested_symbol=symbol,
+                        symbol=symbol.upper(),
+                        exchange=exchange.upper(),
+                        currency=currency.upper(),
+                        primary_exchange=primary_exchange.upper() if primary_exchange else "",
+                        con_id=int(con_id or 0),
+                        error=str(exc),
+                    )
+                )
+        try:
+            if subscribed_tickers:
+                await asyncio.sleep(snapshot_wait_seconds)
+        except BaseException:
+            await self.cancel_equity_tickers(subscribed_tickers)
+            raise
+        return results
 
     async def cancel_equity_tickers(self, tickers: Sequence[Any]) -> None:
         """Cancel market data subscriptions for a batch of tickers."""

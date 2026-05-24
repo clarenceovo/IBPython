@@ -166,6 +166,15 @@ def test_query_limit_capped():
     assert "50_000" in source or "50000" in source, "Historical query limit must be capped"
 
 
+def test_live_ohlcv_tool_uses_auto_chunking_helper():
+    """Verify live MCP OHLCV protects IBKR from oversized single historical requests."""
+    source = MCP_SERVER_PATH.read_text()
+    function_source = source[source.index("async def load_historical_ohlcv_live") : source.index("async def search_contracts")]
+
+    assert "plan_historical_auto_chunk" in function_source
+    assert "load_historical_ohlcv_range" in function_source
+
+
 def test_server_status_resource_content():
     """Verify the status resource returns valid JSON structure."""
     source = MCP_SERVER_PATH.read_text()

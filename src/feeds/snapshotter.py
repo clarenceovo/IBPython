@@ -16,6 +16,7 @@ from __future__ import annotations
 # Re-export all models
 from src.feeds.snapshot_models import (
     EquitySnapshot,
+    EquitySnapshotCaptureResult,
     FXOptionSnapshot,
     FXOptionSnapshotQuery,
     SnapshotQuery,
@@ -34,6 +35,7 @@ from src.feeds.snapshot_converters import (
 __all__ = [
     # Models
     "EquitySnapshot",
+    "EquitySnapshotCaptureResult",
     "FXOptionSnapshot",
     "FXOptionSnapshotQuery",
     "SnapshotQuery",

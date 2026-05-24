@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.feeds.options import OptionGreekSet, OptionGreekSource
+
+
+@dataclass(frozen=True)
+class EquitySnapshotCaptureResult:
+    """Per-symbol result for an IBKR equity snapshot request."""
+
+    requested_symbol: str
+    symbol: str
+    exchange: str
+    currency: str
+    primary_exchange: str = ""
+    con_id: int = 0
+    ticker: Any | None = None
+    error: str | None = None
+
+    @property
+    def success(self) -> bool:
+        return self.ticker is not None and self.error is None
 
 
 class EquitySnapshot(BaseModel):
