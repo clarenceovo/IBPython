@@ -55,7 +55,7 @@ class _Counter:
         else:
             if not snapshot:
                 label_str = ",".join(f'{k}=""' for k in self._label_names)
-                lines.append(f"{{{label_str}}} 0")
+                lines.append(f"{self._name}{{{label_str}}} 0")
             else:
                 for key, val in sorted(snapshot.items()):
                     label_parts = ",".join(f'{k}="{v}"' for k, v in zip(self._label_names, key))
@@ -108,7 +108,7 @@ class _Gauge:
         else:
             if not snapshot:
                 label_str = ",".join(f'{k}=""' for k in self._label_names)
-                lines.append(f"{{{label_str}}} 0")
+                lines.append(f"{self._name}{{{label_str}}} 0")
             else:
                 for key, val in sorted(snapshot.items()):
                     label_parts = ",".join(f'{k}="{v}"' for k, v in zip(self._label_names, key))
@@ -181,20 +181,21 @@ class _Histogram:
                 lines.append(f"{self._name}_bucket{le_str}")
 
             inf_val = entry.get("_le_inf", 0.0)
-            lines.append(f'{self._name}_bucket{{le="+Inf"}} {inf_val}')
-
             s = entry.get("_sum", 0.0)
             c = entry.get("_count", 0.0)
             if self._label_names:
                 parts = ",".join(f'{k}="{v}"' for k, v in zip(self._label_names, key))
+                lines.append(f'{self._name}_bucket{{{parts},le="+Inf"}} {inf_val}')
                 lines.append(f"{self._name}_sum{{{parts}}} {s}")
                 lines.append(f"{self._name}_count{{{parts}}} {c}")
             else:
+                lines.append(f'{self._name}_bucket{{le="+Inf"}} {inf_val}')
                 lines.append(f"{self._name}_sum {s}")
                 lines.append(f"{self._name}_count {c}")
 
         if not snapshot:
-            _emit_for((), {"_sum": 0.0, "_count": 0.0})
+            empty_key = tuple("" for _ in self._label_names)
+            _emit_for(empty_key, {"_sum": 0.0, "_count": 0.0})
         else:
             for key in sorted(snapshot):
                 _emit_for(key, snapshot[key])
@@ -287,6 +288,38 @@ class MetricsCollector:
             label_names=("method", "path", "status"),
         )
 
+        # Market data production controls
+        self.market_data_snapshot_total: _Counter = _Counter(
+            "market_data_snapshot_total",
+            "Total equity snapshot outcomes",
+            label_names=("asset_class", "status", "source"),
+        )
+        self.market_data_snapshot_cleanup_failures_total: _Counter = _Counter(
+            "market_data_snapshot_cleanup_failures_total",
+            "Total market data snapshot cleanup failures",
+            label_names=("asset_class", "operation"),
+        )
+        self.market_data_historical_auto_chunks_total: _Counter = _Counter(
+            "market_data_historical_auto_chunks_total",
+            "Total historical OHLCV auto-chunking decisions",
+            label_names=("asset_class", "operation", "status"),
+        )
+        self.market_data_historical_chunks_total: _Counter = _Counter(
+            "market_data_historical_chunks_total",
+            "Total historical OHLCV chunks fetched",
+            label_names=("asset_class", "operation"),
+        )
+        self.market_data_historical_bars_total: _Counter = _Counter(
+            "market_data_historical_bars_total",
+            "Total historical OHLCV bars returned",
+            label_names=("asset_class", "operation"),
+        )
+        self.market_data_quality_failures_total: _Counter = _Counter(
+            "market_data_quality_failures_total",
+            "Total market data quality failures",
+            label_names=("asset_class", "data_type", "severity"),
+        )
+
         # All metrics in a stable order for exposition
         self._all_metrics: list[_Counter | _Gauge | _Histogram] = [
             self.ibkr_request_duration,
@@ -300,6 +333,12 @@ class MetricsCollector:
             self.scheduler_job_duration,
             self.scheduler_job_failures,
             self.http_request_duration,
+            self.market_data_snapshot_total,
+            self.market_data_snapshot_cleanup_failures_total,
+            self.market_data_historical_auto_chunks_total,
+            self.market_data_historical_chunks_total,
+            self.market_data_historical_bars_total,
+            self.market_data_quality_failures_total,
         ]
 
     def expose(self) -> str:

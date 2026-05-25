@@ -47,8 +47,8 @@ jobs:
       - name: Run Ruff
         run: python -m ruff check src tests
 
-      - name: Advisory type check
-        run: python -m mypy src/feeds/data_quality.py src/feeds/ohlcv_loader.py src/transport/ibkr_rate_limit.py || true
+      - name: Type check hardened market-data modules
+        run: python -m mypy src/feeds/data_quality.py src/feeds/ohlcv_loader.py src/feeds/ibkr_historical.py src/feeds/snapshot_models.py src/webapp/routers/market_data_shared.py src/transport/ibkr_rate_limit.py
 
       - name: Compile source and tests
         run: python -m compileall -q src tests

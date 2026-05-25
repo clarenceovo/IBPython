@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -27,6 +28,15 @@ class EquitySnapshotCaptureResult:
     @property
     def success(self) -> bool:
         return self.ticker is not None and self.error is None
+
+
+class EquitySnapshotQualityError(ValueError):
+    """Raised when an equity snapshot fails production quality checks."""
+
+    def __init__(self, symbol: str, issues: tuple[str, ...]) -> None:
+        self.symbol = symbol
+        self.issues = issues
+        super().__init__(f"equity snapshot quality failed for {symbol}: {', '.join(issues)}")
 
 
 class EquitySnapshot(BaseModel):
@@ -106,6 +116,57 @@ class EquitySnapshot(BaseModel):
         if isinstance(payload, bytes):
             payload = payload.decode("utf-8")
         return cls.model_validate_json(payload)
+
+
+def equity_snapshot_quality_issues(snapshot: EquitySnapshot) -> tuple[str, ...]:
+    """Return production data-quality issue codes for an equity snapshot."""
+    issues: list[str] = []
+    if snapshot.timestamp.tzinfo is None or snapshot.timestamp.utcoffset() is None:
+        issues.append("naive_timestamp")
+
+    price_fields = {
+        "last": snapshot.last,
+        "bid": snapshot.bid,
+        "ask": snapshot.ask,
+        "close": snapshot.close,
+        "mark_price": snapshot.mark_price,
+        "mid_price": snapshot.mid_price,
+    }
+    usable_price = False
+    for field_name, value in price_fields.items():
+        if value is None:
+            continue
+        if not math.isfinite(float(value)):
+            issues.append(f"non_finite_{field_name}")
+        elif value > 0:
+            usable_price = True
+    if not usable_price:
+        issues.append("missing_usable_price")
+
+    size_fields = {
+        "bid_size": snapshot.bid_size,
+        "ask_size": snapshot.ask_size,
+        "last_size": snapshot.last_size,
+        "volume": snapshot.volume,
+    }
+    for field_name, value in size_fields.items():
+        if value is None:
+            continue
+        if not math.isfinite(float(value)):
+            issues.append(f"non_finite_{field_name}")
+        elif value < 0:
+            issues.append(f"negative_{field_name}")
+
+    if snapshot.bid is not None and snapshot.ask is not None and snapshot.bid > 0 and snapshot.ask > 0 and snapshot.ask < snapshot.bid:
+        issues.append("crossed_bid_ask")
+    return tuple(sorted(set(issues)))
+
+
+def validate_equity_snapshot_quality(snapshot: EquitySnapshot) -> None:
+    """Raise if a snapshot is not safe to persist/cache as production market data."""
+    issues = equity_snapshot_quality_issues(snapshot)
+    if issues:
+        raise EquitySnapshotQualityError(snapshot.symbol, issues)
 
 
 class SnapshotWatchlist(BaseModel):

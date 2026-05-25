@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from src.config import config_constant as constants
 from src.feeds.bonds import (
     BondYieldBar,
     BondYieldHistoryRequest,
@@ -42,6 +43,7 @@ from src.feeds.scanner import (
     ContractSearchResult,
 )
 from src.feeds.snapshotter import EquitySnapshotCaptureResult
+from src.transport.metrics import metrics
 
 if TYPE_CHECKING:
     from src.feeds.ibkr_historical import IBKRHistoricalClient
@@ -361,7 +363,8 @@ class IBKRReferenceFeedClient:
         self,
         symbols: Sequence[tuple[str, str, str, str, int]],
         *,
-        snapshot_wait_seconds: float = 11.5,
+        snapshot_wait_seconds: float = constants.DEFAULT_IBKR_EQUITY_SNAPSHOT_WAIT_SECONDS,
+        lease_ttl_seconds: float = constants.DEFAULT_IBKR_EQUITY_SNAPSHOT_LEASE_TTL_SECONDS,
     ) -> list[EquitySnapshotCaptureResult]:
         """Capture IBKR one-shot market-data snapshots for equity contracts."""
         await self._connection.ensure_connected()
@@ -387,7 +390,7 @@ class IBKRReferenceFeedClient:
                     self._connection,
                     contract_key=_rate_limit_contract_key(contract, operation),
                     operation=operation,
-                    ttl_seconds=30.0,
+                    ttl_seconds=lease_ttl_seconds,
                 )
                 await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
                 try:
@@ -430,10 +433,11 @@ class IBKRReferenceFeedClient:
             raise
         return results
 
-    async def cancel_equity_tickers(self, tickers: Sequence[Any]) -> None:
+    async def cancel_equity_tickers(self, tickers: Sequence[Any]) -> int:
         """Cancel market data subscriptions for a batch of tickers."""
         if self._ib is None:
-            return
+            return 0
+        cleanup_failures = 0
         for ticker in tickers:
             try:
                 contract = getattr(ticker, "contract", None)
@@ -441,8 +445,20 @@ class IBKRReferenceFeedClient:
                     await wait_for_ibkr_request(self._connection, operation="equity_snapshot:cancelMktData")
                     self._ib.cancelMktData(contract)
             except Exception:
+                cleanup_failures += 1
+                metrics.market_data_snapshot_cleanup_failures_total.inc(
+                    {"asset_class": "equity", "operation": "cancelMktData"}
+                )
                 logger.debug("error cancelling ticker", exc_info=True)
             finally:
                 lease = self._market_data_leases_by_ticker_id.pop(id(ticker), None)
                 if lease is not None:
-                    await lease.release()
+                    try:
+                        await lease.release()
+                    except Exception:
+                        cleanup_failures += 1
+                        metrics.market_data_snapshot_cleanup_failures_total.inc(
+                            {"asset_class": "equity", "operation": "release_lease"}
+                        )
+                        logger.debug("error releasing market data lease", exc_info=True)
+        return cleanup_failures

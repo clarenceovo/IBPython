@@ -710,6 +710,7 @@ def test_equity_snapshot_scheduler_preserves_symbol_identity_and_cleans_up_ticke
 
         async def cancel_equity_tickers(self, tickers):
             self.cancelled_tickers.extend(tickers)
+            return 0
 
     class FakeQuestDB:
         def __init__(self) -> None:
@@ -733,13 +734,68 @@ def test_equity_snapshot_scheduler_preserves_symbol_identity_and_cleans_up_ticke
             params={"watchlist_name": "core", "persist": True, "cache_latest": True},
         )
 
-        await handler(job)
+        result = await handler(job)
 
         assert feed.requests[0][0][0] == "AAPL"
         assert feed.requests[0][1][0] == "MSFT"
         assert [snapshot.symbol for snapshot in questdb.snapshots] == ["MSFT"]
         assert redis.equity_snapshots["MSFT"].symbol == "MSFT"
         assert len(feed.cancelled_tickers) == 1
+        assert result.status == "partial_success"
+        assert result.metrics["symbols_captured"] == 1
+        assert result.metrics["symbols_failed"] == 1
+        assert result.metrics["cleanup_failures"] == 0
+
+    asyncio.run(run())
+
+
+def test_equity_snapshot_scheduler_reports_cleanup_failures() -> None:
+    class CleanupFailingFeed:
+        async def capture_equity_snapshots(self, symbols):
+            symbol, exchange, currency, primary_exchange, con_id = tuple(symbols)[0]
+            ticker = SimpleNamespace(
+                contract=SimpleNamespace(conId=con_id or 12345, symbol=symbol),
+                time=datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc),
+                last=100.5,
+                bid=100.0,
+                ask=101.0,
+                volume=1000,
+            )
+            return [
+                EquitySnapshotCaptureResult(
+                    requested_symbol=symbol,
+                    symbol=symbol,
+                    exchange=exchange,
+                    currency=currency,
+                    primary_exchange=primary_exchange,
+                    con_id=con_id or 12345,
+                    ticker=ticker,
+                )
+            ]
+
+        async def cancel_equity_tickers(self, tickers):
+            raise RuntimeError("cleanup failed")
+
+    class FakeQuestDB:
+        async def insert_snapshots(self, snapshots):
+            return len(snapshots)
+
+    async def run() -> None:
+        redis = FakeRedis()
+        redis.raw["SnapshotWatchlist::core"] = SnapshotWatchlist(name="core", symbols=("MSFT",)).model_dump_json()
+        handler = EquitySnapshotJobHandler(None, feed=CleanupFailingFeed(), redis=redis, questdb=FakeQuestDB())
+        job = SchedulerJobDefinition(
+            name="equity_core",
+            job_type="equity_snapshot",
+            interval_seconds=60,
+            params={"watchlist_name": "core", "persist": True, "cache_latest": True},
+        )
+
+        result = await handler(job)
+
+        assert result.status == "partial_success"
+        assert result.metrics["symbols_captured"] == 1
+        assert result.metrics["cleanup_failures"] == 1
 
     asyncio.run(run())
 

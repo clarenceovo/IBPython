@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
+from src.config import config_constant as constants
 from src.feeds.contracts import ContractSpec, build_ibkr_contract
 from src.feeds.ibkr_connection import (
     IBKRConnectionManager,
@@ -19,6 +20,7 @@ from src.feeds.ibkr_connection import (
     _root_cause_message,
 )
 from src.feeds.models import AssetClass, FXOHLCVBar, FutureOHLCVBar, OHLCVBar, OHLCVRequest, OptionOHLCVBar
+from src.transport.metrics import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,20 @@ class HistoricalAutoChunkPlan:
     max_duration: str
     max_duration_seconds: float
     estimated_chunks: int
+
+
+class HistoricalRequestTooLargeError(ValueError):
+    """Raised when an OHLCV request would exceed the configured IBKR chunk cap."""
+
+    def __init__(self, *, symbol: str, bar_size: str, estimated_chunks: int, max_chunks: int) -> None:
+        self.symbol = symbol
+        self.bar_size = bar_size
+        self.estimated_chunks = estimated_chunks
+        self.max_chunks = max_chunks
+        super().__init__(
+            f"historical OHLCV request for {symbol} bar_size={bar_size!r} requires "
+            f"~{estimated_chunks} IBKR chunks, exceeding configured max {max_chunks}"
+        )
 
 
 def _contract_details_contract(detail: Any) -> Any:
@@ -206,6 +222,22 @@ def plan_historical_auto_chunk(request: OHLCVRequest, *, now: datetime | None = 
         max_duration_seconds=max_seconds,
         estimated_chunks=max(1, math.ceil(requested_seconds / max_seconds)),
     )
+
+
+def ensure_historical_chunk_limit(request: OHLCVRequest, plan: HistoricalAutoChunkPlan | None, *, max_chunks: int) -> None:
+    """Fail before issuing IBKR requests when a range would exceed the production chunk cap."""
+    if max_chunks <= 0:
+        raise ValueError("max_chunks must be positive")
+    if plan is not None and plan.estimated_chunks > max_chunks:
+        metrics.market_data_historical_auto_chunks_total.inc(
+            {"asset_class": request.asset_class.value, "operation": "plan", "status": "rejected"}
+        )
+        raise HistoricalRequestTooLargeError(
+            symbol=request.symbol,
+            bar_size=request.bar_size,
+            estimated_chunks=plan.estimated_chunks,
+            max_chunks=max_chunks,
+        )
 
 
 def _format_ibkr_end_datetime(value: datetime | None) -> str:
@@ -442,10 +474,9 @@ class IBKRHistoricalClient:
         *,
         start_datetime: datetime,
         end_datetime: datetime | None = None,
+        max_chunks: int = constants.DEFAULT_IBKR_HISTORICAL_MAX_CHUNKS,
     ) -> list[OHLCVBar]:
         """Paginated historical OHLCV fetch across a date range."""
-        await self._connection.ensure_connected()
-
         if end_datetime is None:
             end_datetime = datetime.now(timezone.utc)
         if start_datetime.tzinfo is None:
@@ -460,17 +491,29 @@ class IBKRHistoricalClient:
         if total_seconds <= 0:
             logger.info("load_historical_ohlcv_range: empty range, returning []")
             return []
+        estimated_chunks = max(1, math.ceil(total_seconds / chunk_seconds))
+        if estimated_chunks > max_chunks:
+            metrics.market_data_historical_auto_chunks_total.inc(
+                {"asset_class": request.asset_class.value, "operation": "range", "status": "rejected"}
+            )
+            raise HistoricalRequestTooLargeError(
+                symbol=request.symbol,
+                bar_size=request.bar_size,
+                estimated_chunks=estimated_chunks,
+                max_chunks=max_chunks,
+            )
+
+        await self._connection.ensure_connected()
 
         logger.info(
             "load_historical_ohlcv_range: symbol=%s bar_size=%s range=%s → %s (%.0f seconds, ~%d chunks)",
             request.symbol, request.bar_size, start_datetime.isoformat(), end_datetime.isoformat(),
-            total_seconds, max(1, int(total_seconds / chunk_seconds)),
+            total_seconds, estimated_chunks,
         )
 
         all_bars: list[OHLCVBar] = []
         chunk_end = end_datetime
         chunk_count = 0
-        max_chunks = 60
 
         while chunk_end > start_datetime and chunk_count < max_chunks:
             chunk_start = max(start_datetime, chunk_end - _seconds_to_timedelta(chunk_seconds))
@@ -515,19 +558,37 @@ class IBKRHistoricalClient:
             len(unique_bars), request.symbol, chunk_count,
             start_datetime.date().isoformat(), end_datetime.date().isoformat(),
         )
+        metrics.market_data_historical_chunks_total.inc(
+            {"asset_class": request.asset_class.value, "operation": "range"},
+            amount=chunk_count,
+        )
+        metrics.market_data_historical_bars_total.inc(
+            {"asset_class": request.asset_class.value, "operation": "range"},
+            amount=len(unique_bars),
+        )
         return unique_bars
 
-    async def load_historical_ohlcv(self, request: OHLCVRequest) -> list[OHLCVBar]:
+    async def load_historical_ohlcv(
+        self,
+        request: OHLCVRequest,
+        *,
+        max_chunks: int = constants.DEFAULT_IBKR_HISTORICAL_MAX_CHUNKS,
+    ) -> list[OHLCVBar]:
         if request.start_datetime is not None:
             range_request = request.model_copy(update={"start_datetime": None})
             return await self.load_historical_ohlcv_range(
                 range_request,
                 start_datetime=request.start_datetime,
                 end_datetime=request.end_datetime,
+                max_chunks=max_chunks,
             )
 
         auto_chunk_plan = plan_historical_auto_chunk(request)
         if auto_chunk_plan is not None:
+            ensure_historical_chunk_limit(request, auto_chunk_plan, max_chunks=max_chunks)
+            metrics.market_data_historical_auto_chunks_total.inc(
+                {"asset_class": request.asset_class.value, "operation": "feed", "status": "planned"}
+            )
             logger.info(
                 "load_historical_ohlcv: auto_chunking oversized request symbol=%s bar_size=%s duration=%s "
                 "max_duration=%s estimated_chunks=%d range=%s → %s",
@@ -549,6 +610,7 @@ class IBKRHistoricalClient:
                 range_request,
                 start_datetime=auto_chunk_plan.start_datetime,
                 end_datetime=auto_chunk_plan.end_datetime,
+                max_chunks=max_chunks,
             )
 
         await self._connection.ensure_connected()

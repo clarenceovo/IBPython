@@ -19,6 +19,7 @@ import httpx
 from src.feeds.models import OHLCVRequest
 from src.feeds.ohlcv_loader import estimate_expected_bars
 from src.feeds.snapshotter import SnapshotWatchlist
+from src.transport.metrics import metrics
 from src.transport.redis_client import ohlcv_snapshot_calendar_key
 from src.transport.scheduler_models import (
     IndexCompositionReloadParams,
@@ -578,12 +579,14 @@ class EquitySnapshotJobHandler:
             raise RuntimeError("EquitySnapshotJobHandler requires feed client (pass feed to constructor)")
 
         from src.feeds.exchange_resolver import resolve_equity
-        from src.feeds.snapshotter import ticker_to_snapshot, EquitySnapshot
+        from src.feeds.snapshotter import ticker_to_snapshot, EquitySnapshot, validate_equity_snapshot_quality
 
         import time as _time
         t0 = _time.monotonic()
         snapshots: list[EquitySnapshot] = []
         failed: list[str] = []
+        cache_failures = 0
+        persist_failed = False
 
         symbol_params = []
         for raw_sym in watchlist.symbols:
@@ -598,6 +601,7 @@ class EquitySnapshotJobHandler:
                 ticker = getattr(result, "ticker", None)
                 if ticker is None:
                     failed.append(getattr(result, "symbol", getattr(result, "requested_symbol", "UNKNOWN")))
+                    metrics.market_data_snapshot_total.inc({"asset_class": "equity", "status": "failed", "source": "scheduler"})
                     continue
                 try:
                     ticker_time = getattr(ticker, "time", None)
@@ -610,12 +614,27 @@ class EquitySnapshotJobHandler:
                         con_id=result.con_id,
                         timestamp=ticker_time if isinstance(ticker_time, datetime) else None,
                     )
+                    validate_equity_snapshot_quality(snap)
                     snapshots.append(snap)
+                    metrics.market_data_snapshot_total.inc({"asset_class": "equity", "status": "captured", "source": "scheduler"})
                 except Exception:
                     logger.warning("failed to create snapshot for symbol=%s", result.symbol, exc_info=True)
                     failed.append(result.symbol)
+                    metrics.market_data_snapshot_total.inc({"asset_class": "equity", "status": "failed", "source": "scheduler"})
+                    metrics.market_data_quality_failures_total.inc(
+                        {"asset_class": "equity", "data_type": "snapshot", "severity": "error"}
+                    )
         finally:
-            await self._feed.cancel_equity_tickers(tickers_to_cancel)
+            try:
+                cleanup_result = await self._feed.cancel_equity_tickers(tickers_to_cancel)
+                cleanup_failures = int(cleanup_result or 0)
+            except Exception:
+                cleanup_failures = len(tickers_to_cancel)
+                metrics.market_data_snapshot_cleanup_failures_total.inc(
+                    {"asset_class": "equity", "operation": "cancelMktData"},
+                    amount=cleanup_failures,
+                )
+                logger.warning("failed to clean up equity snapshot tickers", exc_info=True)
 
         captured_symbols = {s.symbol for s in snapshots}
         for raw_sym in watchlist.symbols:
@@ -632,12 +651,14 @@ class EquitySnapshotJobHandler:
                 persist_ok = True
             except Exception:
                 logger.exception("failed to persist snapshots to QuestDB — skipping Redis cache")
+                persist_failed = True
 
         if cache_latest and snapshots and persist_ok:
             for snap in snapshots:
                 try:
                     await self._redis.set_latest_equity_snapshot(snap)
                 except Exception:
+                    cache_failures += 1
                     logger.debug("failed to cache snapshot for %s", snap.symbol, exc_info=True)
         elif cache_latest and snapshots and not persist_ok:
             logger.warning("skipping Redis cache because QuestDB persist failed for %d snapshots", len(snapshots))
@@ -649,6 +670,27 @@ class EquitySnapshotJobHandler:
             len(snapshots),
             len(failed),
             duration,
+        )
+        if snapshots and not failed and not persist_failed and cache_failures == 0 and cleanup_failures == 0:
+            status = "success"
+        elif snapshots:
+            status = "partial_success"
+        else:
+            status = "failed"
+        return SchedulerRunResult(
+            status=status,
+            metrics={
+                "symbols_requested": len(watchlist.symbols),
+                "symbols_captured": len(snapshots),
+                "symbols_failed": len(failed),
+                "failed_symbols": tuple(failed),
+                "persisted": bool(persist_ok),
+                "persist_failed": persist_failed,
+                "cached": max(0, len(snapshots) - cache_failures) if cache_latest and persist_ok else 0,
+                "cache_failures": cache_failures,
+                "cleanup_failures": cleanup_failures,
+                "duration_ms": round(duration * 1000.0, 3),
+            },
         )
 
 

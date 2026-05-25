@@ -147,6 +147,7 @@ class FakeFeed:
         *,
         start_datetime: datetime,
         end_datetime: datetime | None = None,
+        max_chunks: int = 60,
     ) -> list[OHLCVBar]:
         self.range_calls.append((request, start_datetime, end_datetime))
         return [
@@ -262,6 +263,7 @@ class FakeFeed:
         symbols: object,
         *,
         snapshot_wait_seconds: float = 11.5,
+        lease_ttl_seconds: float = 30.0,
     ) -> list[EquitySnapshotCaptureResult]:
         symbol_rows = tuple(symbols)
         self.equity_snapshot_requests.append(symbol_rows)
@@ -301,8 +303,9 @@ class FakeFeed:
             )
         return results
 
-    async def cancel_equity_tickers(self, tickers: object) -> None:
+    async def cancel_equity_tickers(self, tickers: object) -> int:
         self.cancelled_equity_tickers.extend(tickers)
+        return 0
 
     async def load_live_positions(self) -> list[LivePositionDTO]:
         return [
@@ -973,6 +976,30 @@ def test_ohlcv_endpoint_auto_chunks_oversized_ibkr_request() -> None:
     assert getattr(request, "symbol") == "SPY"
     assert start == datetime(2026, 1, 1, 21, 0, tzinfo=timezone.utc)
     assert end == datetime(2026, 1, 3, 21, 0, tzinfo=timezone.utc)
+
+
+def test_ohlcv_endpoint_rejects_auto_chunk_request_over_configured_cap() -> None:
+    state = FakeState()
+    state.settings = Settings(ibkr_historical_max_chunks=1)
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/market-data/ohlcv/equity",
+            json={
+                "symbol": "SPY",
+                "duration": "2 D",
+                "bar_size": "1 min",
+                "end_datetime": "2026-01-03T21:00:00Z",
+                "cache_latest": False,
+                "use_ttl_cache": False,
+            },
+        )
+
+    assert response.status_code == 422
+    assert "exceeding configured max 1" in response.json()["detail"]
+    assert state.loader.calls == 0
+    assert state.feed.range_calls == []
 
 
 def test_market_data_ohlcv_endpoint_uses_ttl_cache() -> None:

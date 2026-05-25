@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from src.feeds.ibkr_historical import _ibkr_duration_between, plan_historical_auto_chunk
+import pytest
+
+from src.feeds.ibkr_historical import (
+    HistoricalRequestTooLargeError,
+    _ibkr_duration_between,
+    ensure_historical_chunk_limit,
+    plan_historical_auto_chunk,
+)
 from src.feeds.models import AssetClass, OHLCVRequest
 
 
@@ -44,3 +51,18 @@ def test_range_chunk_duration_does_not_exceed_exact_max_chunk() -> None:
     end = datetime(2026, 1, 8, tzinfo=timezone.utc)
 
     assert _ibkr_duration_between(start, end) == "7 D"
+
+
+def test_historical_auto_chunk_limit_rejects_oversized_request_before_ibkr() -> None:
+    request = OHLCVRequest(
+        symbol="SPY",
+        asset_class=AssetClass.EQUITY,
+        exchange="SMART",
+        currency="USD",
+        duration="3 D",
+        bar_size="1 min",
+    )
+    plan = plan_historical_auto_chunk(request, now=datetime(2026, 1, 4, tzinfo=timezone.utc))
+
+    with pytest.raises(HistoricalRequestTooLargeError, match="exceeding configured max 2"):
+        ensure_historical_chunk_limit(request, plan, max_chunks=2)

@@ -29,7 +29,7 @@ lint:
 	$(PY) -m ruff check src tests
 
 typecheck:
-	$(PY) -m mypy src/feeds/data_quality.py src/feeds/ohlcv_loader.py src/transport/ibkr_rate_limit.py || true
+	$(PY) -m mypy src/feeds/data_quality.py src/feeds/ohlcv_loader.py src/feeds/ibkr_historical.py src/feeds/snapshot_models.py src/webapp/routers/market_data_shared.py src/transport/ibkr_rate_limit.py
 
 services-up:
 	docker compose up -d redis questdb

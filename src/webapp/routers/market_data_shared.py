@@ -6,11 +6,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import Depends
+from fastapi import Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from src.feeds.ibkr_historical import plan_historical_auto_chunk
+from src.feeds.ibkr_historical import HistoricalRequestTooLargeError, ensure_historical_chunk_limit, plan_historical_auto_chunk
 from src.feeds.models import AssetClass, OHLCVBar, OHLCVRequest
+from src.transport.metrics import metrics
 from src.webapp.cache import stable_cache_key
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 
@@ -109,6 +110,17 @@ async def load_ohlcv_with_controls(
     if start_datetime is None:
         auto_chunk_plan = plan_historical_auto_chunk(request)
         if auto_chunk_plan is not None:
+            try:
+                ensure_historical_chunk_limit(
+                    request,
+                    auto_chunk_plan,
+                    max_chunks=state.settings.ibkr_historical_max_chunks,
+                )
+            except HistoricalRequestTooLargeError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            metrics.market_data_historical_auto_chunks_total.inc(
+                {"asset_class": request.asset_class.value, "operation": "fastapi", "status": "planned"}
+            )
             logger.info(
                 "FastAPI historical OHLCV auto_chunking symbol=%s bar_size=%s duration=%s "
                 "max_duration=%s estimated_chunks=%d range=%s -> %s",
@@ -138,11 +150,15 @@ async def load_ohlcv_with_controls(
             if cached is not None:
                 return cached
 
-        bars = await state.feed.load_historical_ohlcv_range(
-            request,
-            start_datetime=start_datetime,
-            end_datetime=request.end_datetime,
-        )
+        try:
+            bars = await state.feed.load_historical_ohlcv_range(
+                request,
+                start_datetime=start_datetime,
+                end_datetime=request.end_datetime,
+                max_chunks=state.settings.ibkr_historical_max_chunks,
+            )
+        except HistoricalRequestTooLargeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         if persist:
             await state.loader.persist_bars(bars)
@@ -178,7 +194,7 @@ def contract_int(value: Any, *names: str) -> int | None:
         raw = getattr(value, name, None)
         if raw not in (None, ""):
             try:
-                return int(raw)
+                return int(str(raw))
             except (TypeError, ValueError):
                 return None
     return None

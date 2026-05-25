@@ -17,11 +17,14 @@ from __future__ import annotations
 from src.feeds.snapshot_models import (
     EquitySnapshot,
     EquitySnapshotCaptureResult,
+    EquitySnapshotQualityError,
     FXOptionSnapshot,
     FXOptionSnapshotQuery,
     SnapshotQuery,
     SnapshotResult,
     SnapshotWatchlist,
+    equity_snapshot_quality_issues,
+    validate_equity_snapshot_quality,
 )
 
 # Re-export all converters and helpers
@@ -36,11 +39,14 @@ __all__ = [
     # Models
     "EquitySnapshot",
     "EquitySnapshotCaptureResult",
+    "EquitySnapshotQualityError",
     "FXOptionSnapshot",
     "FXOptionSnapshotQuery",
     "SnapshotQuery",
     "SnapshotResult",
     "SnapshotWatchlist",
+    "equity_snapshot_quality_issues",
+    "validate_equity_snapshot_quality",
     # Converters
     "fx_option_contract_key",
     "fx_pair_parts",

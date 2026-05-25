@@ -5,12 +5,32 @@ from __future__ import annotations
 import logging
 import math
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Protocol
 
 from src.feeds.options import OptionContractSpec, OptionGreekSet, OptionGreekSource, _normalize_greeks
 from src.feeds.snapshot_models import EquitySnapshot, FXOptionSnapshot
 
 logger = logging.getLogger(__name__)
+
+
+class EquityTickerLike(Protocol):
+    """Subset of ib_insync.Ticker fields consumed by equity snapshot conversion."""
+
+    time: Any
+    last: Any
+    bid: Any
+    ask: Any
+    bidSize: Any
+    askSize: Any
+    lastSize: Any
+    volume: Any
+    open_: Any
+    high: Any
+    low: Any
+    close: Any
+    vwap: Any
+    markPrice: Any
+    halted: Any
 
 
 def _safe_float(value: Any) -> float | None:
@@ -24,7 +44,7 @@ def _safe_float(value: Any) -> float | None:
 
 
 def ticker_to_snapshot(
-    ticker: Any,
+    ticker: EquityTickerLike,
     *,
     symbol: str,
     exchange: str,

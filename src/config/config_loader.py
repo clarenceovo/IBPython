@@ -106,6 +106,30 @@ CONFIG_VALUE_SPECS: tuple[ConfigValueSpec, ...] = (
         int,
     ),
     ConfigValueSpec(
+        "ibkr_equity_snapshot_wait_seconds",
+        constants.IBKR_EQUITY_SNAPSHOT_WAIT_SECONDS_ENV,
+        constants.DEFAULT_IBKR_EQUITY_SNAPSHOT_WAIT_SECONDS,
+        float,
+    ),
+    ConfigValueSpec(
+        "ibkr_equity_snapshot_lease_ttl_seconds",
+        constants.IBKR_EQUITY_SNAPSHOT_LEASE_TTL_SECONDS_ENV,
+        constants.DEFAULT_IBKR_EQUITY_SNAPSHOT_LEASE_TTL_SECONDS,
+        float,
+    ),
+    ConfigValueSpec(
+        "ibkr_historical_max_chunks",
+        constants.IBKR_HISTORICAL_MAX_CHUNKS_ENV,
+        constants.DEFAULT_IBKR_HISTORICAL_MAX_CHUNKS,
+        int,
+    ),
+    ConfigValueSpec(
+        "ibpython_live_smoke",
+        constants.IBPYTHON_LIVE_SMOKE_ENV,
+        constants.DEFAULT_IBPYTHON_LIVE_SMOKE,
+        parse_bool,
+    ),
+    ConfigValueSpec(
         "ibkr_api_bearer_token",
         constants.IBKR_API_BEARER_TOKEN_ENV,
         constants.DEFAULT_IBKR_API_BEARER_TOKEN,
@@ -141,6 +165,10 @@ _CANONICAL_FIELD_NAME_BY_ENV_NAME = {
     "IBKR_REST_CONNECT_ON_STARTUP": "ibkr_rest_connect_on_startup",
     "IBKR_REST_MARKET_DATA_TTL_SECONDS": "ibkr_rest_market_data_ttl_seconds",
     "IBKR_REST_MARKET_DATA_CACHE_MAXSIZE": "ibkr_rest_market_data_cache_maxsize",
+    "IBKR_EQUITY_SNAPSHOT_WAIT_SECONDS": "ibkr_equity_snapshot_wait_seconds",
+    "IBKR_EQUITY_SNAPSHOT_LEASE_TTL_SECONDS": "ibkr_equity_snapshot_lease_ttl_seconds",
+    "IBKR_HISTORICAL_MAX_CHUNKS": "ibkr_historical_max_chunks",
+    "IBPYTHON_LIVE_SMOKE": "ibpython_live_smoke",
     "IBKR_API_BEARER_TOKEN": "ibkr_api_bearer_token",
 }
 

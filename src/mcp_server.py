@@ -383,8 +383,9 @@ async def load_historical_ohlcv_live(
         use_rth: Use regular trading hours only (default True)
     """
     state = _state(ctx)
-    from src.feeds.ibkr_historical import plan_historical_auto_chunk
+    from src.feeds.ibkr_historical import ensure_historical_chunk_limit, plan_historical_auto_chunk
     from src.feeds.models import AssetClass, OHLCVRequest
+    from src.transport.metrics import metrics
 
     request = OHLCVRequest(
         symbol=symbol,
@@ -398,6 +399,10 @@ async def load_historical_ohlcv_live(
     )
     auto_chunk_plan = plan_historical_auto_chunk(request)
     if auto_chunk_plan is not None:
+        ensure_historical_chunk_limit(request, auto_chunk_plan, max_chunks=state.settings.ibkr_historical_max_chunks)
+        metrics.market_data_historical_auto_chunks_total.inc(
+            {"asset_class": request.asset_class.value, "operation": "mcp", "status": "planned"}
+        )
         logger.info(
             "MCP historical OHLCV auto_chunking symbol=%s bar_size=%s duration=%s estimated_chunks=%d",
             request.symbol,
@@ -410,9 +415,10 @@ async def load_historical_ohlcv_live(
             range_request,
             start_datetime=auto_chunk_plan.start_datetime,
             end_datetime=auto_chunk_plan.end_datetime,
+            max_chunks=state.settings.ibkr_historical_max_chunks,
         )
     else:
-        bars = await state.feed.load_historical_ohlcv(request)
+        bars = await state.feed.load_historical_ohlcv(request, max_chunks=state.settings.ibkr_historical_max_chunks)
     return [
         {
             "timestamp": bar.timestamp.isoformat(),

@@ -110,6 +110,7 @@ async def get_commodity_futures(
                         request,
                         start_datetime=payload.start_datetime,
                         end_datetime=payload.end_datetime,
+                        max_chunks=state.settings.ibkr_historical_max_chunks,
                     )
                     if payload.cache_latest and bars:
                         await state.loader.cache_latest_bar(bars[-1])

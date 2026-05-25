@@ -15,9 +15,11 @@ from src.feeds.snapshotter import (
     SnapshotQuery,
     SnapshotResult,
     SnapshotWatchlist,
+    equity_snapshot_quality_issues,
     fx_option_contract_key,
     ticker_to_fx_option_snapshot,
     ticker_to_snapshot,
+    validate_equity_snapshot_quality,
 )
 from src.feeds.snapshot_converters import _safe_float
 from src.feeds.options import OptionContractSpec, OptionRight
@@ -118,6 +120,42 @@ class TestEquitySnapshot:
         json_bytes = snap.to_redis_json().encode("utf-8")
         restored = EquitySnapshot.from_redis_json(json_bytes)
         assert restored.symbol == "MSFT"
+
+    def test_quality_validation_accepts_usable_snapshot(self):
+        snap = EquitySnapshot(
+            symbol="AAPL",
+            exchange="SMART",
+            currency="USD",
+            timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            bid=149.99,
+            ask=150.01,
+            volume=1000,
+        )
+
+        validate_equity_snapshot_quality(snap)
+        assert equity_snapshot_quality_issues(snap) == ()
+
+    def test_quality_validation_rejects_crossed_and_empty_snapshot(self):
+        crossed = EquitySnapshot(
+            symbol="AAPL",
+            exchange="SMART",
+            currency="USD",
+            timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            bid=151.0,
+            ask=150.0,
+            volume=-1,
+        )
+        empty = EquitySnapshot(
+            symbol="MSFT",
+            exchange="SMART",
+            currency="USD",
+            timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+
+        assert set(equity_snapshot_quality_issues(crossed)) == {"crossed_bid_ask", "negative_volume"}
+        assert equity_snapshot_quality_issues(empty) == ("missing_usable_price",)
+        with pytest.raises(ValueError, match="equity snapshot quality failed"):
+            validate_equity_snapshot_quality(empty)
 
 
 class TestTickerToSnapshot:

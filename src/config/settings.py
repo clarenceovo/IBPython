@@ -76,6 +76,25 @@ class Settings(BaseModel):
         alias=constants.IBKR_REST_MARKET_DATA_CACHE_MAXSIZE_ENV,
         gt=0,
     )
+    ibkr_equity_snapshot_wait_seconds: float = Field(
+        default=constants.DEFAULT_IBKR_EQUITY_SNAPSHOT_WAIT_SECONDS,
+        alias=constants.IBKR_EQUITY_SNAPSHOT_WAIT_SECONDS_ENV,
+        gt=0,
+    )
+    ibkr_equity_snapshot_lease_ttl_seconds: float = Field(
+        default=constants.DEFAULT_IBKR_EQUITY_SNAPSHOT_LEASE_TTL_SECONDS,
+        alias=constants.IBKR_EQUITY_SNAPSHOT_LEASE_TTL_SECONDS_ENV,
+        gt=0,
+    )
+    ibkr_historical_max_chunks: int = Field(
+        default=constants.DEFAULT_IBKR_HISTORICAL_MAX_CHUNKS,
+        alias=constants.IBKR_HISTORICAL_MAX_CHUNKS_ENV,
+        gt=0,
+    )
+    ibpython_live_smoke: bool = Field(
+        default=constants.DEFAULT_IBPYTHON_LIVE_SMOKE,
+        alias=constants.IBPYTHON_LIVE_SMOKE_ENV,
+    )
     ibkr_order_auth_redis_key: str = Field(
         default=constants.DEFAULT_IBKR_ORDER_AUTH_REDIS_KEY,
         alias=constants.IBKR_ORDER_AUTH_REDIS_KEY_ENV,

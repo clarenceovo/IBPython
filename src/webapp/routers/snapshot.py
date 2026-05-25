@@ -23,7 +23,9 @@ from src.feeds.snapshotter import (
     SnapshotWatchlist,
     fx_pair_parts,
     ticker_to_snapshot,
+    validate_equity_snapshot_quality,
 )
+from src.transport.metrics import metrics
 from src.webapp.cache import stable_cache_key
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 
@@ -230,7 +232,11 @@ async def capture_snapshots(
 
     # Request all one-shot IBKR snapshots at once. Results preserve requested symbol identity.
     symbol_params = [(s, ex, cur, pe, 0) for s, ex, cur, pe in specs]
-    capture_results = await state.feed.capture_equity_snapshots(symbol_params)
+    capture_results = await state.feed.capture_equity_snapshots(
+        symbol_params,
+        snapshot_wait_seconds=state.settings.ibkr_equity_snapshot_wait_seconds,
+        lease_ttl_seconds=state.settings.ibkr_equity_snapshot_lease_ttl_seconds,
+    )
     tickers_to_cancel = [result.ticker for result in capture_results if getattr(result, "ticker", None) is not None]
 
     try:
@@ -239,6 +245,7 @@ async def capture_snapshots(
             ticker = getattr(result, "ticker", None)
             if ticker is None:
                 failed.append(getattr(result, "symbol", getattr(result, "requested_symbol", "UNKNOWN")))
+                metrics.market_data_snapshot_total.inc({"asset_class": "equity", "status": "failed", "source": "fastapi"})
                 continue
             try:
                 ticker_time = getattr(ticker, "time", None)
@@ -251,9 +258,15 @@ async def capture_snapshots(
                     con_id=result.con_id,
                     timestamp=ticker_time if isinstance(ticker_time, datetime) else None,
                 )
+                validate_equity_snapshot_quality(snap)
                 snapshots.append(snap)
+                metrics.market_data_snapshot_total.inc({"asset_class": "equity", "status": "captured", "source": "fastapi"})
             except Exception:
                 failed.append(result.symbol)
+                metrics.market_data_snapshot_total.inc({"asset_class": "equity", "status": "failed", "source": "fastapi"})
+                metrics.market_data_quality_failures_total.inc(
+                    {"asset_class": "equity", "data_type": "snapshot", "severity": "error"}
+                )
                 logger.warning("failed to build snapshot for %s", result.symbol, exc_info=True)
 
         # Also track symbols that didn't get a successfully converted snapshot.
@@ -278,7 +291,14 @@ async def capture_snapshots(
                 except Exception:
                     logger.warning("failed to cache snapshot for %s", snap.symbol, exc_info=True)
     finally:
-        await state.feed.cancel_equity_tickers(tickers_to_cancel)
+        try:
+            await state.feed.cancel_equity_tickers(tickers_to_cancel)
+        except Exception:
+            metrics.market_data_snapshot_cleanup_failures_total.inc(
+                {"asset_class": "equity", "operation": "cancelMktData"},
+                amount=len(tickers_to_cancel),
+            )
+            logger.warning("failed to clean up equity snapshot tickers", exc_info=True)
 
     duration = monotonic_time.monotonic() - t0
     return SnapshotResult(

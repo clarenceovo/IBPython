@@ -172,6 +172,7 @@ def test_live_ohlcv_tool_uses_auto_chunking_helper():
     function_source = source[source.index("async def load_historical_ohlcv_live") : source.index("async def search_contracts")]
 
     assert "plan_historical_auto_chunk" in function_source
+    assert "ensure_historical_chunk_limit" in function_source
     assert "load_historical_ohlcv_range" in function_source
 
 

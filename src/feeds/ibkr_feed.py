@@ -437,13 +437,19 @@ class IBKRFeedClient:
         *,
         start_datetime: datetime,
         end_datetime: datetime | None = None,
+        max_chunks: int = constants.DEFAULT_IBKR_HISTORICAL_MAX_CHUNKS,
     ) -> list[OHLCVBar]:
         return await self._historical.load_historical_ohlcv_range(
-            request, start_datetime=start_datetime, end_datetime=end_datetime,
+            request, start_datetime=start_datetime, end_datetime=end_datetime, max_chunks=max_chunks,
         )
 
-    async def load_historical_ohlcv(self, request: OHLCVRequest) -> list[OHLCVBar]:
-        return await self._historical.load_historical_ohlcv(request)
+    async def load_historical_ohlcv(
+        self,
+        request: OHLCVRequest,
+        *,
+        max_chunks: int = constants.DEFAULT_IBKR_HISTORICAL_MAX_CHUNKS,
+    ) -> list[OHLCVBar]:
+        return await self._historical.load_historical_ohlcv(request, max_chunks=max_chunks)
 
     async def load_trading_schedule(
         self,
@@ -637,11 +643,16 @@ class IBKRFeedClient:
         self,
         symbols: Sequence[tuple[str, str, str, str, int]],
         *,
-        snapshot_wait_seconds: float = 11.5,
+        snapshot_wait_seconds: float = constants.DEFAULT_IBKR_EQUITY_SNAPSHOT_WAIT_SECONDS,
+        lease_ttl_seconds: float = constants.DEFAULT_IBKR_EQUITY_SNAPSHOT_LEASE_TTL_SECONDS,
     ) -> list[Any]:
-        return await self._reference.capture_equity_snapshots(symbols, snapshot_wait_seconds=snapshot_wait_seconds)
+        return await self._reference.capture_equity_snapshots(
+            symbols,
+            snapshot_wait_seconds=snapshot_wait_seconds,
+            lease_ttl_seconds=lease_ttl_seconds,
+        )
 
-    async def cancel_equity_tickers(self, tickers: Sequence[Any]) -> None:
+    async def cancel_equity_tickers(self, tickers: Sequence[Any]) -> int:
         return await self._reference.cancel_equity_tickers(tickers)
 
     # ------------------------------------------------------------------

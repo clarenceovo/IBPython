@@ -15,6 +15,7 @@ from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
 from src.webapp.middleware.correlation import CorrelationIdFilter, CorrelationIdMiddleware
 from src.webapp.routers import account, business, fixed_income, market_data_bonds, market_data_equity, market_data_fx, market_data_futures, market_data_options, orders, reference_data, scanner, snapshot, streaming, system, tick_data
 from src.webapp.routers import market_data  # noqa: F401 — kept for import compatibility
+from src.feeds.ibkr_historical import HistoricalRequestTooLargeError
 from src.feeds.exceptions import (
     IBKRConnectionError,
     IBKRCircuitOpenError,
@@ -216,6 +217,11 @@ def create_app(
     async def ibkr_order_error_handler(_request: Request, exc: IBKROrderError) -> JSONResponse:
         logger.warning("IBKR order error: %s", exc)
         return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+    @fastapi_app.exception_handler(HistoricalRequestTooLargeError)
+    async def historical_request_too_large_handler(_request: Request, exc: HistoricalRequestTooLargeError) -> JSONResponse:
+        logger.warning("historical OHLCV request rejected: %s", exc)
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
 
     @fastapi_app.exception_handler(QuestDBWriteError)
     async def questdb_write_error_handler(_request: Request, exc: QuestDBWriteError) -> JSONResponse:
