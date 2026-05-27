@@ -225,6 +225,7 @@ def build_market_data_store(settings: Any) -> MarketOHLCVStore:
         return QuestDBClient(
             host=settings.questdb_host,
             port=settings.questdb_port,
+            write_port=settings.questdb_write_port,
             user=settings.questdb_user,
             password=settings.questdb_password,
             database=settings.questdb_database,

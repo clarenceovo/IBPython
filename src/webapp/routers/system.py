@@ -16,7 +16,6 @@ class HealthResponse(BaseModel):
     app_name: str
     ibkr_connection: str | None = None
     redis_connection: str | None = None
-    questdb_connection: str | None = None
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -40,15 +39,8 @@ async def health(state: IBKRRestAppState = Depends(get_rest_state)) -> HealthRes
         redis_ok = await state.redis.health_check()
         redis_status = "connected" if redis_ok else "down"
 
-    # QuestDB status
-    questdb_status = None
-    if hasattr(state, "questdb") and state.questdb is not None:
-        questdb_ok = await state.questdb.health_check() if hasattr(state.questdb, "health_check") else None
-        if questdb_ok is not None:
-            questdb_status = "connected" if questdb_ok else "down"
-
     # Aggregate status
-    statuses = [s for s in [ibkr_status, redis_status, questdb_status] if s is not None]
+    statuses = [s for s in [ibkr_status, redis_status] if s is not None]
     if any(s == "down" for s in statuses):
         overall = "degraded"
     elif ibkr_status == "connected":
@@ -61,7 +53,6 @@ async def health(state: IBKRRestAppState = Depends(get_rest_state)) -> HealthRes
         app_name=state.settings.ibkr_rest_app_name,
         ibkr_connection=ibkr_status,
         redis_connection=redis_status,
-        questdb_connection=questdb_status,
     )
 
 

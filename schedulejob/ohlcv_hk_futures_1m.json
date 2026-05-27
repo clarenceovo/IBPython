@@ -1,14 +1,14 @@
 {
   "name": "ohlcv_hk_futures_1m",
   "job_type": "ohlcv_snapshot",
-  "interval_seconds": 60,
+  "interval_seconds": 180,
   "enabled": true,
-  "run_immediately": false,
+  "run_immediately": true,
   "params": {
     "start_time": "09:15",
-    "end_time": "16:30",
+    "end_time": "03:00",
     "timezone": "Asia/Hong_Kong",
-    "snap_interval_seconds": 60,
+    "snap_interval_seconds": 180,
     "snap_days": ["mon", "tue", "wed", "thu", "fri"],
     "detect_holiday": true,
     "capture_rth": true,

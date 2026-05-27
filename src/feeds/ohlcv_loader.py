@@ -60,7 +60,7 @@ class OHLCVLoader:
                 return bars
 
         if cache_latest and bars and self.redis is not None:
-            await self.redis.set_latest_bar(bars[-1])
+            await self.cache_latest_bar(bars[-1])
 
         return bars
 
@@ -72,7 +72,15 @@ class OHLCVLoader:
     async def cache_latest_bar(self, bar: OHLCVBar) -> None:
         """Cache the latest bar to Redis."""
         if self.redis is not None:
-            await self.redis.set_latest_bar(bar)
+            try:
+                await self.redis.set_latest_bar(bar)
+            except Exception:
+                logger.warning(
+                    "Redis latest-bar cache failed for %s %s; returning loaded OHLCV bars anyway",
+                    bar.symbol,
+                    bar.bar_size,
+                    exc_info=True,
+                )
 
 
 # ------------------------------------------------------------------

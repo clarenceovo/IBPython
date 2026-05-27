@@ -218,6 +218,7 @@ def ibkr_contract_kwargs(spec: ContractSpec) -> dict[str, Any]:
             "currency": quote,
         }
     elif spec.asset_class is AssetClass.FUTURE:
+        local_symbol = spec.local_symbol or _hkfe_local_symbol(symbol, exchange, spec.last_trade_date_or_contract_month)
         kwargs = {
             "secType": "FUT",
             "symbol": symbol,
@@ -228,8 +229,8 @@ def ibkr_contract_kwargs(spec: ContractSpec) -> dict[str, Any]:
             kwargs["lastTradeDateOrContractMonth"] = spec.last_trade_date_or_contract_month
         if spec.multiplier:
             kwargs["multiplier"] = spec.multiplier
-        if spec.local_symbol:
-            kwargs["localSymbol"] = spec.local_symbol
+        if local_symbol:
+            kwargs["localSymbol"] = local_symbol
     elif spec.asset_class is AssetClass.INDEX:
         kwargs = {
             "secType": "IND",
@@ -296,3 +297,32 @@ def _split_fx_symbol(symbol: str, currency: str) -> tuple[str, str]:
     if len(symbol) == 6:
         return symbol[:3], symbol[3:]
     return symbol, currency
+
+
+_FUTURES_MONTH_CODES = {
+    1: "F",
+    2: "G",
+    3: "H",
+    4: "J",
+    5: "K",
+    6: "M",
+    7: "N",
+    8: "Q",
+    9: "U",
+    10: "V",
+    11: "X",
+    12: "Z",
+}
+
+
+def _hkfe_local_symbol(symbol: str, exchange: str, contract_month: str | None) -> str | None:
+    if exchange != "HKFE" or contract_month is None or len(contract_month) < 6:
+        return None
+    year_month = contract_month[:6]
+    if not year_month.isdigit():
+        return None
+    month = int(year_month[4:6])
+    month_code = _FUTURES_MONTH_CODES.get(month)
+    if month_code is None:
+        return None
+    return f"{symbol}{month_code}{year_month[3]}"

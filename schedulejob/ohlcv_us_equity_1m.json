@@ -1,14 +1,14 @@
 {
   "name": "ohlcv_us_equity_1m",
   "job_type": "ohlcv_snapshot",
-  "interval_seconds": 60,
+  "interval_seconds": 600,
   "enabled": true,
   "run_immediately": true,
   "params": {
     "start_time": "09:30",
     "end_time": "16:00",
     "timezone": "America/New_York",
-    "snap_interval_seconds": 60,
+    "snap_interval_seconds": 600,
     "snap_days": ["mon", "tue", "wed", "thu", "fri"],
     "detect_holiday": true,
     "capture_rth": true,
@@ -29,6 +29,14 @@
       },
       {
         "symbol": "TSLA",
+        "primary_exchange": "NASDAQ"
+      },
+            {
+        "symbol": "NVDA",
+        "primary_exchange": "NASDAQ"
+      },
+      {
+        "symbol": "MU",
         "primary_exchange": "NASDAQ"
       }
     ]

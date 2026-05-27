@@ -377,29 +377,6 @@ class FakeFeed:
         return []
 
 
-class FakeQuestDB:
-    def __init__(self) -> None:
-        self.equity_snapshots: list[EquitySnapshot] = []
-        self.fx_option_snapshots: list[FXOptionSnapshot] = []
-        self.fx_option_queries: list[object] = []
-        self.created_fx_option_table = False
-
-    async def create_fx_option_snapshot_table(self) -> None:
-        self.created_fx_option_table = True
-
-    async def insert_snapshots(self, snapshots: list[EquitySnapshot]) -> int:
-        self.equity_snapshots.extend(snapshots)
-        return len(snapshots)
-
-    async def insert_fx_option_snapshots(self, snapshots: list[FXOptionSnapshot]) -> int:
-        self.fx_option_snapshots.extend(snapshots)
-        return len(snapshots)
-
-    async def query_fx_option_snapshots(self, **kwargs: object) -> list[dict[str, object]]:
-        self.fx_option_queries.append(kwargs)
-        return [{"symbol": kwargs["symbol"], "expiry": kwargs.get("expiry")}]
-
-
 class FakeFixedIncomeProvider:
     name = "test_fixed_income_provider"
 
@@ -490,7 +467,6 @@ class FakeState:
         self.loader = FakeLoader()
         self.feed = FakeFeed()
         self.redis = FakeRedis()
-        self.questdb = FakeQuestDB()
         self.market_data_cache = AsyncTTLCache(ttl_seconds=60, max_size=16)
         self.event_contracts = FakeEventContractsClient()
         self.fixed_income_reference_provider = FakeFixedIncomeProvider()
@@ -1350,12 +1326,10 @@ def test_fx_option_ohlcv_wrapper_and_snapshot_collection() -> None:
     assert capture.status_code == 200
     assert capture.json()["captured"] == 1
     assert state.feed.fx_option_snapshot_requests[0][0].underlying_symbol == "EUR"
-    assert state.questdb.created_fx_option_table is True
-    assert len(state.questdb.fx_option_snapshots) == 1
+    assert capture.json()["persisted"] == 0
     assert latest.status_code == 200
     assert latest.json()["symbol"] == "EURUSD"
-    assert query.status_code == 200
-    assert state.questdb.fx_option_queries[0]["symbol"] == "EURUSD"
+    assert query.status_code == 410
 
 
 def test_equity_snapshot_capture_preserves_symbol_identity_and_cleans_up_tickers() -> None:
@@ -1375,7 +1349,6 @@ def test_equity_snapshot_capture_preserves_symbol_identity_and_cleans_up_tickers
     assert body["symbols_failed"] == 1
     assert body["failed_symbols"] == ["AAPL"]
     assert body["snapshots"][0]["symbol"] == "MSFT"
-    assert state.questdb.equity_snapshots[0].symbol == "MSFT"
     assert state.redis.equity_snapshots["MSFT"].symbol == "MSFT"
     assert len(state.feed.cancelled_equity_tickers) == 1
 

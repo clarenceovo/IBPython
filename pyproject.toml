@@ -9,6 +9,7 @@ dependencies = [
   "redis>=5.0",
   "psycopg[binary]>=3.2",
   "psycopg-pool>=3.2",
+  "questdb>=4.1",
   "ib-insync>=0.9.86",
   "pandas>=2.2",
   "python-dotenv>=1.0",

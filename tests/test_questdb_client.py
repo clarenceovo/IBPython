@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from src.feeds.models import AssetClass, FutureOHLCVBar, OHLCVBar, OptionOHLCVBar
 from src.feeds.snapshotter import FXOptionSnapshot
 from src.transport.market_data_store import MarketOHLCVStore
@@ -12,6 +14,8 @@ from src.transport.questdb_client import (
     build_historical_query,
     build_latest_query,
     fx_option_snapshot_to_row,
+    _is_already_applied_migration_error,
+    market_ohlcv_row_to_ilp_payload,
 )
 
 
@@ -24,6 +28,17 @@ def test_create_table_sql_uses_partitioned_market_table() -> None:
 def test_insert_sql_targets_market_table() -> None:
     assert INSERT_MARKET_OHLCV_SQL.startswith("INSERT INTO EquityOHLCV")
     assert "VALUES (%s" in INSERT_MARKET_OHLCV_SQL
+
+
+def test_questdb_client_rejects_ilp_port_as_postgres_port() -> None:
+    with pytest.raises(ValueError, match="QUESTDB_PORT=8812"):
+        QuestDBClient(port=9009, write_port=9009)
+
+
+def test_questdb_migration_duplicate_column_errors_are_classified_as_already_applied() -> None:
+    assert _is_already_applied_migration_error(Exception("column 'con_id' already exists")) is True
+    assert _is_already_applied_migration_error(Exception("duplicate column")) is True
+    assert _is_already_applied_migration_error(Exception("network timeout")) is False
 
 
 def test_bar_to_row_serializes_metadata() -> None:
@@ -49,6 +64,33 @@ def test_bar_to_row_serializes_metadata() -> None:
     assert row[4] == datetime(2026, 1, 1)
     assert row[12] == "EQUITY:SPY:SMART:USD"
     assert row[-1] == '{"a": 1}'
+
+
+def test_market_ohlcv_row_to_ilp_payload_splits_symbols_columns_and_timestamp() -> None:
+    bar = OHLCVBar(
+        symbol="SPY",
+        asset_class="equity",
+        exchange="SMART",
+        currency="USD",
+        timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        open=1,
+        high=2,
+        low=1,
+        close=1.5,
+        volume=100,
+        bar_size="1 min",
+        metadata={"a": 1},
+    )
+
+    symbols, columns, timestamp = market_ohlcv_row_to_ilp_payload(bar_to_row(bar))
+
+    assert symbols["symbol"] == "SPY"
+    assert symbols["asset_class"] == "equity"
+    assert symbols["contract_key"] == "EQUITY:SPY:SMART:USD"
+    assert columns["open"] == 1
+    assert columns["volume"] == 100
+    assert columns["metadata"] == '{"a": 1}'
+    assert timestamp == datetime(2026, 1, 1)
 
 
 def test_bar_to_row_preserves_future_contract_identity() -> None:

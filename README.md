@@ -88,6 +88,7 @@ Core variables:
 | `IBKR_REST_BASE_URL` | `http://localhost:8000` | Base URL the scheduler uses when calling FastAPI OHLCV endpoints |
 | `QUESTDB_HOST` | `127.0.0.1` | QuestDB PostgreSQL wire host |
 | `QUESTDB_PORT` | `8812` | QuestDB PostgreSQL wire port |
+| `QUESTDB_WRITE_PORT` | `9009` | QuestDB ILP/TCP write port |
 | `QUESTDB_USER` | `admin` | QuestDB user |
 | `QUESTDB_PASSWORD` | `quest` | QuestDB password |
 | `QUESTDB_DATABASE` | `qdb` | QuestDB database |
@@ -101,7 +102,7 @@ Core variables:
 | `INDEX_COMPOSITION_PROVIDER` | empty | External index constituent provider name |
 | `FIXED_INCOME_REFERENCE_PROVIDER` | empty | Optional import path for CTD basket and conversion-factor provider. For local demos only, use `src.feeds.fixed_income_reference:provider`. |
 | `IBKR_REST_APP_NAME` | `IBKRRestApp` | FastAPI title |
-| `IBKR_REST_CONNECT_ON_STARTUP` | `false` | Connect transports during API startup |
+| `IBKR_REST_CONNECT_ON_STARTUP` | `false` | Connect IBKR and Redis during API startup |
 | `IBKR_REST_MARKET_DATA_TTL_SECONDS` | `5` | REST market-data TTL cache default |
 | `IBKR_REST_MARKET_DATA_CACHE_MAXSIZE` | `512` | REST TTL cache max entries |
 | `IBKR_ORDER_AUTH_REDIS_KEY` | `OrderAuth::bearer_token` | Redis key containing the bearer token payload required by `/api/v1/orders/*` |
@@ -205,11 +206,11 @@ The API and scheduler use separate IBKR client IDs by default:
 
 Keep those distinct from notebooks and other API clients.
 
-QuestDB remains the default market-data store. To route OHLCV snapshot persistence to MySQL instead, set `MARKET_DATA_DB_BACKEND=mysql` and configure the `MYSQL_*` variables in `.env`.
+QuestDB remains the default scheduler/snapshotter market-data store. To route OHLCV snapshot persistence to MySQL instead, set `MARKET_DATA_DB_BACKEND=mysql` and configure the `MYSQL_*` variables in `.env`.
 
 ## REST API
 
-`IBKRRestApp` is a thin async HTTP bridge over the Pydantic DTOs in `src/feeds`. It keeps business logic in the feed/transport layer and exposes a clean API surface for notebooks, dashboards, services, and internal tools.
+`IBKRRestApp` is a thin async HTTP bridge over the Pydantic DTOs in `src/feeds`. It keeps business logic in the feed/transport layer and exposes a clean API surface for notebooks, dashboards, services, and internal tools. It does not open QuestDB/MySQL connections; durable market-data persistence and historical store reads belong to the scheduler/snapshotter side.
 
 Main route groups:
 
@@ -434,11 +435,11 @@ curl -X POST http://localhost:8000/api/v1/market-data/ohlcv/bond \
   -d '{"sec_id_type":"CUSIP","sec_id":"91282CJN2"}'
 ```
 
-The asset-specific OHLCV wrappers are the business-friendly OHLCV API: callers pass minimal identifiers and the service presets `asset_class` plus common IBKR defaults. They accept the same optional controls as the generic OHLCV endpoint: `duration`, `bar_size`, `start_datetime`, `end_datetime`, `what_to_show`, `use_rth`, `persist`, `cache_latest`, `use_ttl_cache`, `cache_ttl_seconds`, and `metadata`.
+The asset-specific OHLCV wrappers are the business-friendly OHLCV API: callers pass minimal identifiers and the service presets `asset_class` plus common IBKR defaults. They accept the same optional controls as the generic OHLCV endpoint: `duration`, `bar_size`, `start_datetime`, `end_datetime`, `what_to_show`, `use_rth`, `persist`, `cache_latest`, `use_ttl_cache`, `cache_ttl_seconds`, and `metadata`. `persist` is accepted for backward-compatible payloads but API-side persistence is disabled; the scheduler/snapshotter owns durable writes.
 
 Commodity routes are futures-first. Commodity futures remain `asset_class="future"` and commodity futures options remain `asset_class="option"` with IBKR `secType="FOP"`. The commodity OHLCV wrapper presets common roots (`CL`/`NG` to `NYMEX`, `GC`/`SI`/`HG` to `COMEX`, and grain/oilseed roots such as `ZC`/`ZS`/`ZW`/`ZL`/`ZM` to `CBOT`) while allowing explicit exchange and currency overrides. Related IBKR-native commodity endpoints expose futures-option analytics, contract metadata, historical ticks, and historical news without adding external COT, weather, inventory, or shipping providers.
 
-FX option routes use pair-style inputs. For example, `EURUSD` maps to `option_sec_type="OPT"`, `underlying_symbol="EUR"`, and `currency="USD"` unless `currency`, `local_symbol`, or `con_id` is supplied to disambiguate an IBKR contract. Historical FX option bars return `OptionOHLCVBar`. Live FX option collection uses short-lived market-data subscriptions, stores latest snapshots in Redis, and can persist snapshots to a dedicated QuestDB `fx_option_snapshot` table.
+FX option routes use pair-style inputs. For example, `EURUSD` maps to `option_sec_type="OPT"`, `underlying_symbol="EUR"`, and `currency="USD"` unless `currency`, `local_symbol`, or `con_id` is supplied to disambiguate an IBKR contract. Historical FX option bars return `OptionOHLCVBar`. Live FX option collection uses short-lived market-data subscriptions and stores latest snapshots in Redis. Durable FX option snapshot persistence belongs to the scheduler/snapshotter layer, not the API process.
 
 Example FX option live snapshot:
 
@@ -461,7 +462,7 @@ When `start_datetime` is supplied, the API uses the paginated historical range l
 
 OHLCV DTOs are layered for extension: `BaseOHLCVBar` carries `symbol`, `timestamp`, and OHLCV prices; `OHLCVBar` adds market metadata; `FutureOHLCVBar` adds `contract_month` and `is_continuous`; `FXOHLCVBar` adds `base_currency` and `quote_currency`; `OptionOHLCVBar` adds option contract identity such as underlying, expiry, strike, right, multiplier, trading class, contract month, and `con_id`. The futures and FX wrappers document their specific response schemas in OpenAPI.
 
-OHLCV persistence is backend-neutral. `OHLCVLoader` writes to the configured `MarketOHLCVStore`, implemented by QuestDB and MySQL:
+OHLCV persistence is backend-neutral. The scheduler/snapshotter writes through the configured `MarketOHLCVStore`, implemented by QuestDB and MySQL:
 
 ```bash
 MARKET_DATA_DB_BACKEND=questdb  # default main time-series store
@@ -661,9 +662,43 @@ The target may be a provider instance, a provider class, or a zero-argument fact
 
 If `INDEX_COMPOSITION_PROVIDER` is blank, `configured_provider`, `placeholder`, or `todo`, the scheduler will not register the index reload handler and Redis index reload jobs will be skipped with a clear warning.
 
-OHLCV snapshot jobs use `job_type="ohlcv_snapshot"` and support either `interval_seconds` or a five-field `cron` expression. The scheduler calls `POST /api/v1/market-data/ohlcv` on `IBKR_REST_BASE_URL`, letting FastAPI own IBKR loading, cache writes, and persistence into QuestDB `EquityOHLCV`. The OHLCV job still evaluates its market window before loading data, so a cron trigger outside `start_time`/`end_time` is logged and skipped.
+OHLCV snapshot jobs use `job_type="ohlcv_snapshot"` and support either `interval_seconds` or a five-field `cron` expression. The scheduler calls `POST /api/v1/market-data/ohlcv` on `IBKR_REST_BASE_URL` with API persistence/cache disabled, then persists and caches the returned bars itself. The OHLCV job still evaluates its market window before loading data, so a cron trigger outside `start_time`/`end_time` is logged and skipped.
 
 If both `cron` and `interval_seconds` are present, `cron` controls trigger timing. `interval_seconds` remains operational metadata and must match `params.snap_interval_seconds` for OHLCV jobs.
+
+For bounded historical backfills, use `backfiller.py`. It calls the same OHLCV API with `persist=false`, `cache_latest=false`, and `use_ttl_cache=false`, then persists returned bars from the backfiller process and optionally caches the latest bar in Redis.
+
+Example symbol-control JSON:
+
+```json
+{
+  "defaults": {
+    "asset_class": "future",
+    "exchange": "HKFE",
+    "currency": "HKD",
+    "bar_size": "1 min",
+    "what_to_show": "TRADES",
+    "use_rth": true
+  },
+  "symbols": [
+    {"symbol": "HSI", "last_trade_date_or_contract_month": "202606"},
+    {"symbol": "HTI", "last_trade_date_or_contract_month": "202606"}
+  ]
+}
+```
+
+Run a date-bounded backfill:
+
+```bash
+python backfiller.py \
+  --start 2026-05-01 \
+  --end 2026-05-28 \
+  --timezone Asia/Hong_Kong \
+  --symbols-file backfill_symbols.json \
+  --max-concurrency 1
+```
+
+Date-only `--end` includes the full calendar date in the selected timezone. Datetime `--end` values are treated as exclusive.
 
 Example local jobs:
 

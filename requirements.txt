@@ -3,6 +3,7 @@ pydantic-settings>=2.6
 redis>=5.0
 psycopg[binary]>=3.2
 psycopg-pool>=3.2
+questdb>=4.1
 aiomysql>=0.2.0
 ib-insync>=0.9.86
 nest-asyncio>=1.5

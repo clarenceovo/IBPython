@@ -35,13 +35,13 @@ src/
     redis_client.py         # Latest bar, index composition, scheduler job storage
     ibkr_rate_limit.py      # Redis-backed distributed IBKR pacing bookmarks
     market_data_store.py    # Base OHLCV persistence interface
-    questdb_client.py       # QuestDB PostgreSQL wire client and SQL builders
+    questdb_client.py       # QuestDB PostgreSQL query client plus ILP/TCP writer
     mysql_client.py         # MySQL OHLCV store implementation
     scheduler.py            # Generic async scheduler, Redis leases/run ledger, snapshot job handlers
     scheduler_calendar.py   # Cron parsing and next-run calculation helpers
   webapp/
     app.py                  # IBKRRestApp FastAPI application factory
-    dependencies.py         # Shared async clients, loader, and cache state
+    dependencies.py         # API-owned IBKR, Redis, loader, and cache state
     cache.py                # Async TTL cache with per-key single-flight protection
     routers/
       account.py            # Account summary, live positions, portfolio, PnL snapshots
@@ -57,6 +57,28 @@ docker-compose.yml
 tests/
 notebooks/
 ```
+
+## Runtime Ownership Graph
+
+```mermaid
+flowchart LR
+    Client["HTTP clients / notebooks / dashboards"] --> API["IBKRRestApp FastAPI\nIBKR reads + Redis latest cache"]
+    API --> IBKR["IBKR TWS / Gateway"]
+    API --> Redis["Redis\nlatest bars, watchlists, scheduler state, pacing"]
+
+    Scheduler["ibkr-scheduler / snapshotter\njob timing, bookmarks, persistence"] --> API
+    Scheduler --> Redis
+    Scheduler --> Store{"MarketOHLCVStore"}
+    Backfiller["backfiller.py\nbounded historical ranges"] --> API
+    Backfiller --> Redis
+    Backfiller --> Store
+    Store --> QuestDB["QuestDB\nSQL reads: 8812\nILP writes: 9009"]
+    Store --> MySQL["MySQL optional OHLCV backend"]
+
+    MCP["MCP / research query tools"] --> QuestDB
+```
+
+FastAPI does not open QuestDB or MySQL connections. It serves live/requested IBKR data and Redis-backed latest-cache operations. Durable OHLCV persistence is owned by scheduler/snapshotter workers and `backfiller.py` through `MarketOHLCVStore`; historical QuestDB reads stay outside the REST API process.
 
 ## Quick Start
 
@@ -183,13 +205,14 @@ Blank or missing `.env` values are treated as null and skipped, so the correspon
 | `IBKR_CLIENT_ID` | `1` | IBKR client ID; must be unique across API clients |
 | `IBKR_MARKET_DATA_LINES` | `100` | Entitlement baseline used for pacing analysis |
 | `IBKR_REST_APP_NAME` | `IBKRRestApp` | FastAPI application title |
-| `IBKR_REST_CONNECT_ON_STARTUP` | `false` | Connect to IBKR, Redis, QuestDB, and the configured OHLCV store during API startup instead of first request |
+| `IBKR_REST_CONNECT_ON_STARTUP` | `false` | Connect to IBKR and Redis during API startup instead of first request |
 | `IBKR_REST_MARKET_DATA_TTL_SECONDS` | `5` | Default in-process TTL for REST market data snapshots |
 | `IBKR_REST_MARKET_DATA_CACHE_MAXSIZE` | `512` | Maximum in-process REST market data cache entries |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
 | `REDIS_PASSWORD` | empty | Optional Redis AUTH password; blank keeps unauthenticated local Redis |
 | `QUESTDB_HOST` | `127.0.0.1` | QuestDB PostgreSQL wire host |
 | `QUESTDB_PORT` | `8812` | QuestDB PostgreSQL wire port |
+| `QUESTDB_WRITE_PORT` | `9009` | QuestDB ILP/TCP write port used by the scheduler/snapshotter |
 | `QUESTDB_USER` | `admin` | QuestDB user |
 | `QUESTDB_PASSWORD` | `quest` | QuestDB password |
 | `QUESTDB_DATABASE` | `qdb` | QuestDB database |
@@ -205,7 +228,7 @@ Blank or missing `.env` values are treated as null and skipped, so the correspon
 
 ## IBKRRestApp FastAPI Bridge
 
-`IBKRRestApp` is a thin async HTTP bridge over the domain DTOs in `src/feeds`. It does not duplicate trading logic; it validates request bodies with the same Pydantic models used by notebooks, schedulers, and batch workers.
+`IBKRRestApp` is a thin async HTTP bridge over the domain DTOs in `src/feeds`. It does not duplicate trading logic; it validates request bodies with the same Pydantic models used by notebooks, schedulers, and batch workers. It intentionally does not own QuestDB/MySQL connections; durable market-data storage is a scheduler/snapshotter responsibility.
 
 Run locally:
 
@@ -413,7 +436,7 @@ SchedulerJob::<job_name>
 
 Scheduler jobs are JSON payloads stored in Redis. Python code registers handlers for known `job_type` values; Redis stores job configuration, not executable code.
 
-The worker loads local `schedulejob/*.json` files first and Redis `SchedulerJob::*` keys second. Redis wins on duplicate job names, so local files are deployable defaults and Redis is the live operational override. Unknown job types or index reload jobs without a configured provider are logged and skipped, so one inactive operational job does not prevent unrelated market snapshot jobs from running. Runtime dependencies are opened only when needed: IBKR for market/OHLCV snapshots, the configured market OHLCV store only when at least one runnable snapshot persists bars, and Redis for all scheduler state.
+The worker loads local `schedulejob/*.json` files first and Redis `SchedulerJob::*` keys second. Redis wins on duplicate job names, so local files are deployable defaults and Redis is the live operational override. Unknown job types or index reload jobs without a configured provider are logged and skipped, so one inactive operational job does not prevent unrelated market snapshot jobs from running. Runtime dependencies are opened only when needed: IBKR/API access for market/OHLCV snapshots, the configured market OHLCV store only when at least one runnable snapshot persists bars, and Redis for all scheduler state.
 
 The scheduler periodically reconciles local and Redis job sources while running. It starts new jobs, removes disabled jobs, and restarts changed jobs by stable payload hash. Every run tries to acquire a Redis lease before execution, which prevents duplicate capture when more than one worker process is active.
 
@@ -489,7 +512,7 @@ python scripts/validate_scheduler_jobs.py --schedule-dir schedulejob --include-r
 
 ## OHLCV Persistence Backends
 
-OHLCV snapshots are requested by the scheduler through the FastAPI OHLCV endpoint configured with `IBKR_REST_BASE_URL`. The API process owns IBKR access, normalization, latest-bar cache updates, and persistence through `MarketOHLCVStore`, a base interface implemented by both `QuestDBClient` and `MySQLClient`. The scheduler keeps job timing, symbol expansion, bookmarks, and status state; it no longer needs a direct QuestDB writer for `ohlcv_snapshot` jobs.
+OHLCV snapshots are requested by the scheduler through the FastAPI OHLCV endpoint configured with `IBKR_REST_BASE_URL`. The API process owns live IBKR access and response normalization only. The scheduler/snapshotter owns latest-bar cache updates, persistence through `MarketOHLCVStore`, job timing, symbol expansion, bookmarks, and status state. `MarketOHLCVStore` is implemented by both `QuestDBClient` and `MySQLClient`.
 
 Backend selection:
 
@@ -505,11 +528,43 @@ Both backends expose the same operational surface:
 - `query_historical_bars(...)`
 - `query_latest_bars(...)`
 
-QuestDB should remain the default for high-volume time-series capture because `EquityOHLCV` is timestamped and day-partitioned. MySQL is useful when operators want bars beside relational portfolio, strategy, or reporting tables and keeps the `market_ohlcv` table name. Both stores persist a deterministic `contract_key` plus nullable IBKR contract identity fields (`con_id`, `local_symbol`, `contract_month`, `expiry`, `strike`, `right`, `trading_class`, `what_to_show`, and `use_rth`). MySQL keys bars by `(contract_key, bar_size, timestamp)` with `ON DUPLICATE KEY UPDATE`, so same-root futures or options at the same timestamp stay distinct and repeated snapshots remain idempotent.
+QuestDB should remain the default for high-volume time-series capture because `EquityOHLCV` is timestamped and day-partitioned. The scheduler uses QuestDB PostgreSQL wire on `QUESTDB_PORT=8812` for SQL/DDL and ILP/TCP on `QUESTDB_WRITE_PORT=9009` for OHLCV writes. MySQL is useful when operators want bars beside relational portfolio, strategy, or reporting tables and keeps the `market_ohlcv` table name. Both stores persist a deterministic `contract_key` plus nullable IBKR contract identity fields (`con_id`, `local_symbol`, `contract_month`, `expiry`, `strike`, `right`, `trading_class`, `what_to_show`, and `use_rth`). MySQL keys bars by `(contract_key, bar_size, timestamp)` with `ON DUPLICATE KEY UPDATE`, so same-root futures or options at the same timestamp stay distinct and repeated snapshots remain idempotent.
 
 ## OHLCV Snapshot Jobs
 
-`job_type="ohlcv_snapshot"` is the production scheduler path for multi-market OHLCV capture. For each runnable symbol, it posts to `POST /api/v1/market-data/ohlcv` on `IBKR_REST_BASE_URL` with `persist`, `cache_latest`, and `use_ttl_cache=false`, then updates Redis bookmarks from the API response timestamps. It supports either interval scheduling or five-field cron expressions. Cron fields support `*`, ranges, lists, steps, and weekday names such as `mon-fri`.
+`job_type="ohlcv_snapshot"` is the production scheduler path for multi-market OHLCV capture. For each runnable symbol, it posts to `POST /api/v1/market-data/ohlcv` on `IBKR_REST_BASE_URL` with `persist=false`, `cache_latest=false`, and `use_ttl_cache=false`, then persists and caches the returned bars inside the scheduler/snapshotter before updating Redis bookmarks. It supports either interval scheduling or five-field cron expressions. Cron fields support `*`, ranges, lists, steps, and weekday names such as `mon-fri`.
+
+For bounded historical ranges, run `backfiller.py` instead of creating high-frequency one-off scheduler jobs. It uses the same ownership boundary as the scheduler: API calls are made with persistence/cache disabled, then the backfiller writes returned bars through `MarketOHLCVStore` and optionally caches the latest bar in Redis.
+
+Example symbol-control JSON:
+
+```json
+{
+  "defaults": {
+    "asset_class": "future",
+    "exchange": "HKFE",
+    "currency": "HKD",
+    "bar_size": "1 min",
+    "what_to_show": "TRADES",
+    "use_rth": true
+  },
+  "symbols": [
+    {"symbol": "HSI", "last_trade_date_or_contract_month": "202606"},
+    {"symbol": "HTI", "last_trade_date_or_contract_month": "202606"}
+  ]
+}
+```
+
+Example run:
+
+```bash
+python backfiller.py \
+  --start 2026-05-01 \
+  --end 2026-05-28 \
+  --timezone Asia/Hong_Kong \
+  --symbols-file backfill_symbols.json \
+  --max-concurrency 1
+```
 
 If both `cron` and `interval_seconds` are present, cron controls trigger timing. `interval_seconds` remains operational metadata and must match `params.snap_interval_seconds` for OHLCV jobs.
 
@@ -835,7 +890,7 @@ Operational recommendations:
 - Prefer `bar_size="1 min"` or larger for regular snapshot jobs.
 - Stagger job intervals or use different start times when scaling beyond a handful of symbols.
 - Keep TWS watchlists small during API runs, because watchlists consume market data lines too.
-- For large historical backfills, add a dedicated chunked backfill worker with durable progress state instead of using high-frequency scheduler jobs.
+- For large historical backfills, use `backfiller.py` or extend it with durable progress state instead of using high-frequency scheduler jobs.
 - If your strategy needs broad real-time streaming, use a proper market data vendor or explicitly budget IBKR market data lines and subscriptions before relying on TWS API.
 
 ## Market OHLCV Schema

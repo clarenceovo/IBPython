@@ -47,10 +47,13 @@ class FakeStore:
 
 
 class FakeRedis:
-    def __init__(self) -> None:
+    def __init__(self, *, fail: bool = False) -> None:
         self.latest: list[OHLCVBar] = []
+        self.fail = fail
 
     async def set_latest_bar(self, bar: OHLCVBar) -> None:
+        if self.fail:
+            raise RuntimeError("redis unavailable")
         self.latest.append(bar)
 
 
@@ -138,6 +141,21 @@ def test_ohlcv_loader_suppresses_cache_after_persistence_failure() -> None:
         request = OHLCVRequest(symbol="SPY", asset_class=AssetClass.EQUITY)
 
         bars = await loader.load(request, persist=True, cache_latest=True)
+
+        assert bars == [bar]
+        assert redis.latest == []
+
+    asyncio.run(run())
+
+
+def test_ohlcv_loader_treats_latest_cache_failure_as_nonfatal() -> None:
+    async def run() -> None:
+        redis = FakeRedis(fail=True)
+        bar = _bar(datetime(2026, 1, 1, tzinfo=timezone.utc))
+        loader = OHLCVLoader(FakeFeed([bar]), redis=redis)
+        request = OHLCVRequest(symbol="SPY", asset_class=AssetClass.EQUITY)
+
+        bars = await loader.load(request, persist=False, cache_latest=True)
 
         assert bars == [bar]
         assert redis.latest == []

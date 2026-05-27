@@ -24,6 +24,7 @@ class Settings(BaseModel):
 
     questdb_host: str = Field(default=constants.DEFAULT_QUESTDB_HOST, alias=constants.QUESTDB_HOST_ENV)
     questdb_port: int = Field(default=constants.DEFAULT_QUESTDB_PORT, alias=constants.QUESTDB_PORT_ENV)
+    questdb_write_port: int = Field(default=constants.DEFAULT_QUESTDB_WRITE_PORT, alias=constants.QUESTDB_WRITE_PORT_ENV)
     questdb_user: str = Field(default=constants.DEFAULT_QUESTDB_USER, alias=constants.QUESTDB_USER_ENV)
     questdb_password: str = Field(default=constants.DEFAULT_QUESTDB_PASSWORD, alias=constants.QUESTDB_PASSWORD_ENV)
     questdb_database: str = Field(default=constants.DEFAULT_QUESTDB_DATABASE, alias=constants.QUESTDB_DATABASE_ENV)

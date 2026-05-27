@@ -5,7 +5,7 @@ import json
 import logging
 import time as monotonic_time
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from src.config import config_constant as constants
@@ -20,7 +20,7 @@ from src.transport.questdb_queries import (
     CREATE_MARKET_OHLCV_TABLE_SQL,
     INSERT_EQUITY_SNAPSHOT_SQL,
     INSERT_FX_OPTION_SNAPSHOT_SQL,
-    INSERT_MARKET_OHLCV_SQL,
+    INSERT_MARKET_OHLCV_SQL,  # noqa: F401 - re-exported for tests/backward-compatible imports
     MARKET_OHLCV_IDENTITY_ALTER_SQL,
     bar_to_row,
     build_historical_query,
@@ -33,11 +33,72 @@ from src.transport.questdb_queries import (
 logger = logging.getLogger(__name__)
 
 
-class QuestDBClient(MarketOHLCVStore):
-    """Async QuestDB client over the PostgreSQL wire protocol.
+def _without_none(values: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in values.items() if value is not None}
 
-    Uses a connection pool (``psycopg_pool.AsyncConnectionPool``) for queries
-    and retains a serialising lock for DDL / table-creation operations.
+
+def market_ohlcv_row_to_ilp_payload(row: Sequence[Any]) -> tuple[dict[str, Any], dict[str, Any], datetime]:
+    """Convert a market OHLCV SQL row tuple into QuestDB ILP fields."""
+    timestamp = row[4]
+    if isinstance(timestamp, str):
+        timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    if not isinstance(timestamp, datetime):
+        raise TypeError(f"OHLCV row timestamp must be datetime, got {type(timestamp).__name__}")
+    timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None) if timestamp.tzinfo is not None else timestamp
+
+    symbols = _without_none(
+        {
+            "symbol": row[0],
+            "asset_class": row[1],
+            "exchange": row[2],
+            "currency": row[3],
+            "bar_size": row[10],
+            "source": row[11],
+            "contract_key": row[12],
+            "local_symbol": row[14],
+            "contract_month": row[15],
+            "expiry": row[16],
+            "right": row[18],
+            "trading_class": row[19],
+            "what_to_show": row[20],
+        }
+    )
+    columns = _without_none(
+        {
+            "open": row[5],
+            "high": row[6],
+            "low": row[7],
+            "close": row[8],
+            "volume": row[9],
+            "con_id": row[13],
+            "strike": row[17],
+            "use_rth": row[21],
+            "metadata": row[22],
+        }
+    )
+    return symbols, columns, timestamp
+
+
+def _json_safe_row(row: Sequence[Any]) -> list[Any]:
+    serialized: list[Any] = []
+    for value in row:
+        if isinstance(value, datetime):
+            serialized.append(value.astimezone(timezone.utc).isoformat() if value.tzinfo else value.isoformat())
+        else:
+            serialized.append(value)
+    return serialized
+
+
+def _is_already_applied_migration_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "already exists" in message or "duplicate column" in message
+
+
+class QuestDBClient(MarketOHLCVStore):
+    """Async QuestDB client for SQL queries plus ILP OHLCV ingestion.
+
+    Uses a PostgreSQL wire connection pool for queries and DDL, and QuestDB's
+    ILP/TCP port for market OHLCV writes.
     """
 
     def __init__(
@@ -45,6 +106,7 @@ class QuestDBClient(MarketOHLCVStore):
         *,
         host: str = constants.DEFAULT_QUESTDB_HOST,
         port: int = constants.DEFAULT_QUESTDB_PORT,
+        write_port: int = constants.DEFAULT_QUESTDB_WRITE_PORT,
         user: str = constants.DEFAULT_QUESTDB_USER,
         password: str = constants.DEFAULT_QUESTDB_PASSWORD,
         database: str = constants.DEFAULT_QUESTDB_DATABASE,
@@ -54,8 +116,19 @@ class QuestDBClient(MarketOHLCVStore):
         buffer_max_age_seconds: float = 86400.0,
         buffer_drain_interval_seconds: float = 30.0,
     ) -> None:
+        if port == write_port:
+            raise ValueError(
+                "QuestDB PostgreSQL wire port and ILP write port must be different "
+                f"(got {port}). Set QUESTDB_PORT=8812 and QUESTDB_WRITE_PORT=9009."
+            )
+        if port == constants.DEFAULT_QUESTDB_WRITE_PORT:
+            raise ValueError(
+                f"QuestDB PostgreSQL wire port is set to {port}, which is the default ILP/TCP write port. "
+                "Set QUESTDB_PORT=8812 and QUESTDB_WRITE_PORT=9009."
+            )
         self.host = host
         self.port = port
+        self.write_port = write_port
         self.user = user
         self.password = password
         self.database = database
@@ -174,8 +247,8 @@ class QuestDBClient(MarketOHLCVStore):
                             for sql in alter_sqls:
                                 try:
                                     await cur.execute(sql)
-                                except Exception:
-                                    logger.warning("QuestDB identity column migration skipped/already applied: %s", sql, exc_info=True)
+                                except Exception as exc:
+                                    self._log_identity_migration_error(sql, exc)
                     await conn.commit()
             else:
                 async with self._connection.cursor() as cur:
@@ -184,11 +257,18 @@ class QuestDBClient(MarketOHLCVStore):
                         for sql in alter_sqls:
                             try:
                                 await cur.execute(sql)
-                            except Exception:
-                                logger.warning("QuestDB identity column migration skipped/already applied: %s", sql, exc_info=True)
+                            except Exception as exc:
+                                self._log_identity_migration_error(sql, exc)
                 await self._connection.commit()
             self._created_tables.add(table_key)
             logger.debug("QuestDB table created: %s", table_key)
+
+    @staticmethod
+    def _log_identity_migration_error(sql: str, exc: Exception) -> None:
+        if _is_already_applied_migration_error(exc):
+            logger.debug("QuestDB identity column migration already applied: %s (%s)", sql, exc)
+            return
+        logger.warning("QuestDB identity column migration failed: %s", sql, exc_info=True)
 
     async def create_market_ohlcv_table(self) -> None:
         await self._ensure_connection()
@@ -338,26 +418,34 @@ class QuestDBClient(MarketOHLCVStore):
         try:
             await self._ensure_connection()
             await self._ensure_table("market_ohlcv", CREATE_MARKET_OHLCV_TABLE_SQL, alter_sqls=MARKET_OHLCV_IDENTITY_ALTER_SQL)
-            rows = [bar_to_row(bar) for bar in bars]
-            if self._pool is not None:
-                async with self._pool.connection() as conn:
-                    async with conn.cursor() as cur:
-                        await cur.executemany(INSERT_MARKET_OHLCV_SQL, rows)
-                    await conn.commit()
-            else:
-                async with self._connection.cursor() as cur:
-                    await cur.executemany(INSERT_MARKET_OHLCV_SQL, rows)
-                await self._connection.commit()
+            await self._send_market_ohlcv_rows_ilp([bar_to_row(bar) for bar in bars])
             elapsed = monotonic_time.monotonic() - t0
             metrics.questdb_insert_duration.observe(elapsed, {"table": "market_ohlcv"})
             return len(bars)
-        except Exception:
+        except Exception as exc:
             elapsed = monotonic_time.monotonic() - t0
             metrics.questdb_insert_duration.observe(elapsed, {"table": "market_ohlcv"})
             metrics.questdb_insert_failures.inc({"table": "market_ohlcv"})
             logger.error("insert_bars failed, buffering %d rows", len(bars), exc_info=True)
             await self._buffer_failed_rows("market_ohlcv", rows=None, bars=bars)
-            raise QuestDBWriteError(f"Failed to insert {len(bars)} OHLCV bars") from None
+            raise QuestDBWriteError(f"Failed to insert {len(bars)} OHLCV bars: {exc}") from exc
+
+    async def _send_market_ohlcv_rows_ilp(self, rows: Sequence[Sequence[Any]]) -> None:
+        await asyncio.to_thread(self._send_market_ohlcv_rows_ilp_sync, rows)
+
+    def _send_market_ohlcv_rows_ilp_sync(self, rows: Sequence[Sequence[Any]]) -> None:
+        try:
+            from questdb.ingress import Protocol, Sender
+        except ImportError as exc:
+            raise QuestDBWriteError(
+                "questdb Python client is required for ILP writes; install requirements.txt"
+            ) from exc
+
+        with Sender(Protocol.Tcp, self.host, self.write_port) as sender:
+            for row in rows:
+                symbols, columns, timestamp = market_ohlcv_row_to_ilp_payload(row)
+                sender.row(constants.QUESTDB_MARKET_OHLCV_TABLE, symbols=symbols, columns=columns, at=timestamp)
+            sender.flush()
 
     async def query_historical_bars(
         self,
@@ -508,15 +596,7 @@ class QuestDBClient(MarketOHLCVStore):
             if not rows:
                 return
             await self._ensure_table("market_ohlcv", CREATE_MARKET_OHLCV_TABLE_SQL, alter_sqls=MARKET_OHLCV_IDENTITY_ALTER_SQL)
-            if self._pool is not None:
-                async with self._pool.connection() as conn:
-                    async with conn.cursor() as cur:
-                        await cur.executemany(INSERT_MARKET_OHLCV_SQL, rows)
-                    await conn.commit()
-            else:
-                async with self._connection.cursor() as cur:
-                    await cur.executemany(INSERT_MARKET_OHLCV_SQL, rows)
-                await self._connection.commit()
+            await self._send_market_ohlcv_rows_ilp(rows)
         elif table == "fx_option_snapshots":
             rows = entry.get("rows", [])
             if not rows:
@@ -553,8 +633,7 @@ class QuestDBClient(MarketOHLCVStore):
                 else:
                     return
 
-            # Serialize rows (convert tuples to lists for JSON)
-            serialized_rows = [list(r) if isinstance(r, tuple) else r for r in rows]
+            serialized_rows = [_json_safe_row(r) for r in rows]
             entry = {
                 "table": table,
                 "rows": serialized_rows,

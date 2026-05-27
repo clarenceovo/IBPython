@@ -287,6 +287,26 @@ def test_ibkr_fx_bar_normalization_returns_fx_ohlcv_dto() -> None:
     assert bars[0].quote_currency == "USD"
 
 
+def test_ibkr_fx_bar_normalization_clamps_unavailable_negative_volume() -> None:
+    class RawFXMidpointBar(RawBar):
+        volume = -1.0
+
+    request = OHLCVRequest(
+        symbol="USDSEK",
+        asset_class="fx",
+        exchange="IDEALPRO",
+        currency="SEK",
+        bar_size="1 min",
+        what_to_show="MIDPOINT",
+        use_rth=False,
+    )
+
+    bars = normalize_ibkr_bars([RawFXMidpointBar()], request)
+
+    assert isinstance(bars[0], FXOHLCVBar)
+    assert bars[0].volume == 0
+
+
 def test_ohlcv_request_normalizes_end_datetime() -> None:
     request = OHLCVRequest(
         symbol="aapl",

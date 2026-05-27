@@ -30,6 +30,8 @@ class FakeLoader:
 class FakeOHLCVLoader:
     def __init__(self, *, fail: bool = False, quality_summary: dict | None = None) -> None:
         self.calls = []
+        self.persisted_batches = []
+        self.cached_bars = []
         self.fail = fail
         self.last_quality_report = _FakeQualityReport(quality_summary) if quality_summary is not None else None
 
@@ -52,6 +54,12 @@ class FakeOHLCVLoader:
                 bar_size=request.bar_size,
             )
         ]
+
+    async def persist_bars(self, bars):
+        self.persisted_batches.append(list(bars))
+
+    async def cache_latest_bar(self, bar):
+        self.cached_bars.append(bar)
 
 
 class _FakeQualityReport:
@@ -398,10 +406,12 @@ def test_ohlcv_snapshot_handler_can_capture_through_fastapi() -> None:
         assert feed.calls == []
         url, payload = FakeAsyncClient.calls[0]
         assert url == "http://localhost:8000/api/v1/market-data/ohlcv"
-        assert payload["persist"] is True
-        assert payload["cache_latest"] is True
+        assert payload["persist"] is False
+        assert payload["cache_latest"] is False
         assert payload["use_ttl_cache"] is False
         assert payload["request"]["symbol"] == "SPY"
+        assert loader.persisted_batches[0][0].symbol == "SPY"
+        assert loader.cached_bars[0].symbol == "SPY"
         assert redis.last_ts[("ohlcv_test", "SPY", "1 min")] == datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc)
         assert redis.status[("ohlcv_test", "SPY", "1 min")]["status"] == "success"
 

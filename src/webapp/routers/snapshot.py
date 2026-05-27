@@ -44,7 +44,7 @@ class CaptureSnapshotsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     symbols: list[str] = Field(min_length=1, description="List of equity symbols to snapshot")
-    persist: bool = Field(default=True, description="Persist snapshots to QuestDB")
+    persist: bool = Field(default=False, description="Deprecated: API snapshot persistence is disabled; use the scheduler snapshotter")
     cache_latest: bool = Field(default=True, description="Cache latest snapshots in Redis")
 
     @classmethod
@@ -70,7 +70,7 @@ class WatchlistCaptureRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1)
-    persist: bool = True
+    persist: bool = False
     cache_latest: bool = True
 
 
@@ -213,7 +213,7 @@ FX_OPTION_CAPTURE_EXAMPLES = {
     description=(
         "Captures point-in-time market data snapshots for a list of equity symbols. "
         "Resolves exchange/currency automatically from symbol suffixes (.HK, .T, .L, etc.). "
-        "Persists to QuestDB and caches latest in Redis."
+        "Caches latest snapshots in Redis. Durable persistence is owned by the scheduler snapshotter."
     ),
 )
 async def capture_snapshots(
@@ -276,12 +276,8 @@ async def capture_snapshots(
             if resolved.symbol not in captured_symbols and resolved.symbol not in failed:
                 failed.append(resolved.symbol)
 
-        # Persist to QuestDB
-        if payload.persist and snapshots and state.questdb is not None:
-            try:
-                await state.questdb.insert_snapshots(snapshots)
-            except Exception:
-                logger.exception("failed to persist snapshots to QuestDB")
+        if payload.persist:
+            logger.info("FastAPI snapshot persist requested, but API persistence is disabled; scheduler owns QuestDB writes")
 
         # Cache latest in Redis
         if payload.cache_latest and snapshots and state.redis is not None:
@@ -341,10 +337,8 @@ async def capture_fx_option_snapshots(
     )
 
     persisted = 0
-    if payload.persist and snapshots and state.questdb is not None:
-        if hasattr(state.questdb, "create_fx_option_snapshot_table"):
-            await state.questdb.create_fx_option_snapshot_table()
-        persisted = await state.questdb.insert_fx_option_snapshots(snapshots)
+    if payload.persist:
+        logger.info("FastAPI FX option snapshot persist requested, but API persistence is disabled; scheduler owns QuestDB writes")
 
     cached = 0
     if payload.cache_latest and snapshots and state.redis is not None:
@@ -396,17 +390,8 @@ async def query_fx_option_snapshots(
     query: FXOptionSnapshotQuery,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[dict[str, Any]]:
-    if state.questdb is None:
-        raise HTTPException(status_code=503, detail="QuestDB not configured")
-    return await state.questdb.query_fx_option_snapshots(
-        symbol=query.symbol,
-        expiry=query.expiry,
-        strike=query.strike,
-        right=query.right,
-        start=query.start,
-        end=query.end,
-        limit=query.limit,
-    )
+    _ = (query, state)
+    raise HTTPException(status_code=410, detail="QuestDB historical snapshot queries are owned by the scheduler/snapshotter layer")
 
 
 @router.get(
@@ -442,14 +427,8 @@ async def query_historical_snapshots(
     query: SnapshotQuery,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[dict[str, Any]]:
-    if state.questdb is None:
-        raise HTTPException(status_code=503, detail="QuestDB not configured")
-    return await state.questdb.query_snapshots(
-        symbol=query.symbol,
-        start=query.start,
-        end=query.end,
-        limit=query.limit,
-    )
+    _ = (query, state)
+    raise HTTPException(status_code=410, detail="QuestDB historical snapshot queries are owned by the scheduler/snapshotter layer")
 
 
 @router.get(
@@ -462,9 +441,8 @@ async def get_all_latest_snapshots(
     limit: int = Query(default=100, ge=1, le=1000),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[dict[str, Any]]:
-    if state.questdb is None:
-        raise HTTPException(status_code=503, detail="QuestDB not configured")
-    return await state.questdb.query_latest_snapshots(limit=limit)
+    _ = (limit, state)
+    raise HTTPException(status_code=410, detail="QuestDB latest-all snapshot queries are owned by the scheduler/snapshotter layer")
 
 
 # ---------------------------------------------------------------------------

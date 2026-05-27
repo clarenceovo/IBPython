@@ -161,7 +161,7 @@ async def load_ohlcv_with_controls(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         if persist:
-            await state.loader.persist_bars(bars)
+            logger.info("FastAPI OHLCV persist requested for %s but API persistence is disabled; scheduler owns storage", request.symbol)
         if cache_latest and bars:
             await state.loader.cache_latest_bar(bars[-1])
 
@@ -171,9 +171,11 @@ async def load_ohlcv_with_controls(
 
     # Single-chunk fetch (original behavior).
     async def load() -> list[OHLCVBar]:
+        if persist:
+            logger.info("FastAPI OHLCV persist requested for %s but API persistence is disabled; scheduler owns storage", request.symbol)
         return await state.loader.load(
             request,
-            persist=persist,
+            persist=False,
             cache_latest=cache_latest,
         )
 

@@ -304,6 +304,11 @@ def _fx_base_currency(symbol: str) -> str | None:
     return None
 
 
+def _normalized_ibkr_volume(value: Any) -> float:
+    volume = float(value or 0)
+    return max(volume, 0.0)
+
+
 def normalize_ibkr_bars(bars: Sequence[Any], request: OHLCVRequest) -> list[OHLCVBar]:
     normalized: list[OHLCVBar] = []
     bar_model = _ohlcv_bar_model_for_request(request)
@@ -319,7 +324,7 @@ def normalize_ibkr_bars(bars: Sequence[Any], request: OHLCVRequest) -> list[OHLC
                 high=float(getattr(bar, "high")),
                 low=float(getattr(bar, "low")),
                 close=float(getattr(bar, "close")),
-                volume=float(getattr(bar, "volume", 0) or 0),
+                volume=_normalized_ibkr_volume(getattr(bar, "volume", 0)),
                 bar_size=request.bar_size,
                 source=request.source,
                 **(

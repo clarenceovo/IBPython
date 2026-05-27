@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from src.feeds.models import OHLCVRequest
+from src.feeds.models import OHLCVBar, OHLCVRequest
 from src.feeds.ohlcv_loader import estimate_expected_bars
 from src.feeds.snapshotter import SnapshotWatchlist
 from src.transport.metrics import metrics
@@ -308,8 +308,8 @@ class OHLCVSnapshotJobHandler:
         url = f"{self.api_base_url}/api/v1/market-data/ohlcv"
         payload = {
             "request": request.model_dump(mode="json", exclude_none=True),
-            "persist": persist,
-            "cache_latest": cache_latest,
+            "persist": False,
+            "cache_latest": False,
             "use_ttl_cache": False,
         }
         async with httpx.AsyncClient(timeout=self.api_timeout_seconds) as client:
@@ -322,7 +322,12 @@ class OHLCVSnapshotJobHandler:
         bars_payload = response.json()
         if not isinstance(bars_payload, list):
             raise RuntimeError(f"OHLCV API returned unexpected payload type: {type(bars_payload).__name__}")
-        latest_timestamp = max((_bar_timestamp(bar) for bar in bars_payload), default=None)
+        bars = [_ohlcv_bar_from_api_payload(bar, request) for bar in bars_payload]
+        if persist and bars:
+            await self.loader.persist_bars(bars)
+        if cache_latest and bars:
+            await self.loader.cache_latest_bar(bars[-1])
+        latest_timestamp = max((bar.timestamp for bar in bars), default=None)
         return {"bars_captured": len(bars_payload), "latest_timestamp": latest_timestamp}
 
     async def _read_bookmark(self, job: SchedulerJobDefinition, request: OHLCVRequest) -> datetime | None:
@@ -488,6 +493,42 @@ def _bar_timestamp(bar: Any) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _ohlcv_bar_from_api_payload(payload: dict[str, Any], request: OHLCVRequest) -> OHLCVBar:
+    data = dict(payload)
+    metadata = dict(request.metadata or {})
+    raw_metadata = data.get("metadata")
+    if isinstance(raw_metadata, dict):
+        metadata.update(raw_metadata)
+
+    for key in (
+        "con_id",
+        "local_symbol",
+        "contract_month",
+        "last_trade_date_or_contract_month",
+        "expiry",
+        "strike",
+        "right",
+        "trading_class",
+        "what_to_show",
+        "use_rth",
+        "underlying_symbol",
+        "multiplier",
+    ):
+        value = getattr(request, key, None)
+        if value is not None:
+            metadata.setdefault(key, value)
+
+    data["metadata"] = metadata
+    data.setdefault("asset_class", request.asset_class)
+    data.setdefault("exchange", request.exchange)
+    data.setdefault("currency", request.currency)
+    data.setdefault("bar_size", request.bar_size)
+    data.setdefault("source", request.source)
+
+    allowed_fields = set(OHLCVBar.model_fields)
+    return OHLCVBar.model_validate({key: value for key, value in data.items() if key in allowed_fields})
 
 
 def _is_runnable_window(params: OHLCVSnapshotParams, now_local: datetime) -> bool:

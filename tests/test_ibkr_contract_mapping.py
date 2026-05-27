@@ -70,6 +70,25 @@ def test_future_contract_mapping() -> None:
     }
 
 
+def test_hkfe_future_contract_mapping_derives_local_symbol() -> None:
+    spec = ContractSpec(
+        symbol="HTI",
+        asset_class="future",
+        exchange="HKFE",
+        currency="HKD",
+        last_trade_date_or_contract_month="202606",
+    )
+
+    assert ibkr_contract_kwargs(spec) == {
+        "secType": "FUT",
+        "symbol": "HTI",
+        "exchange": "HKFE",
+        "currency": "HKD",
+        "lastTradeDateOrContractMonth": "202606",
+        "localSymbol": "HTIM6",
+    }
+
+
 def test_future_contract_mapping_supports_local_symbol_without_expiry() -> None:
     spec = ContractSpec(
         symbol="ES",
