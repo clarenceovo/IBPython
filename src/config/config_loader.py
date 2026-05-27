@@ -135,6 +135,16 @@ CONFIG_VALUE_SPECS: tuple[ConfigValueSpec, ...] = (
         constants.DEFAULT_IBKR_API_BEARER_TOKEN,
         parse_str,
     ),
+    ConfigValueSpec("ibkr_web_api_base_url", constants.IBKR_WEB_API_BASE_URL_ENV, constants.DEFAULT_IBKR_WEB_API_BASE_URL, parse_str),
+    ConfigValueSpec("ibkr_web_api_bearer_token", constants.IBKR_WEB_API_BEARER_TOKEN_ENV, constants.DEFAULT_IBKR_WEB_API_BEARER_TOKEN, parse_str),
+    ConfigValueSpec("ibkr_web_api_cookie", constants.IBKR_WEB_API_COOKIE_ENV, constants.DEFAULT_IBKR_WEB_API_COOKIE, parse_str),
+    ConfigValueSpec("ibkr_web_api_verify_ssl", constants.IBKR_WEB_API_VERIFY_SSL_ENV, constants.DEFAULT_IBKR_WEB_API_VERIFY_SSL, parse_bool),
+    ConfigValueSpec(
+        "ibkr_event_contracts_live_orders_enabled",
+        constants.IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED_ENV,
+        constants.DEFAULT_IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED,
+        parse_bool,
+    ),
 )
 
 _SPECS_BY_FIELD_NAME = {spec.field_name: spec for spec in CONFIG_VALUE_SPECS}
@@ -170,6 +180,11 @@ _CANONICAL_FIELD_NAME_BY_ENV_NAME = {
     "IBKR_HISTORICAL_MAX_CHUNKS": "ibkr_historical_max_chunks",
     "IBPYTHON_LIVE_SMOKE": "ibpython_live_smoke",
     "IBKR_API_BEARER_TOKEN": "ibkr_api_bearer_token",
+    "IBKR_WEB_API_BASE_URL": "ibkr_web_api_base_url",
+    "IBKR_WEB_API_BEARER_TOKEN": "ibkr_web_api_bearer_token",
+    "IBKR_WEB_API_COOKIE": "ibkr_web_api_cookie",
+    "IBKR_WEB_API_VERIFY_SSL": "ibkr_web_api_verify_ssl",
+    "IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED": "ibkr_event_contracts_live_orders_enabled",
 }
 
 

@@ -175,6 +175,59 @@ June 2026 as front and August 2026 as the first forward.
 }
 ```
 
+## Event Contracts
+
+### ForecastEx product search
+Find the artificial underlier record for a ForecastEx market such as Fed Funds.
+
+```json
+{
+  "symbol": "FF"
+}
+```
+
+### ForecastEx tradable contracts
+Resolve YES/NO contracts for one underlier, month, and strike.
+
+```json
+{
+  "underlying_con_id": 658663572,
+  "exchange": "FORECASTX",
+  "sec_type": "OPT",
+  "month": "JUN26",
+  "strike": 4.875
+}
+```
+
+### Event Contract snapshot
+Load top-of-book fields after the IBKR Web API market-data preflight.
+
+```json
+{
+  "con_ids": [713921696, 713921701],
+  "fields": ["31", "84", "85", "86", "88", "7059"]
+}
+```
+
+### Guarded Event Contract order ticket
+Build or submit a ForecastEx order. Live submission additionally requires the
+order bearer token, `confirm_live_order=true`, and
+`IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED=true`.
+
+```json
+{
+  "account_id": "DU123456",
+  "con_id": 713921696,
+  "side": "BUY",
+  "order_type": "LMT",
+  "quantity": 1,
+  "price": 0.81,
+  "tif": "DAY",
+  "exchange": "FORECASTX",
+  "confirm_live_order": true
+}
+```
+
 <!-- openapi-example: business.getMarketPanel fx_panel -->
 ### FX midpoint panel
 Use FX-friendly defaults for intraday currency-pair research.

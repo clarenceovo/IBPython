@@ -50,6 +50,19 @@ from src.feeds.fundamental_data import (
     WSHEventDataRequest,
     WSHMetadataReport,
 )
+from src.feeds.event_contracts import (
+    EventContractHistoryRequest,
+    EventContractHistoryResponse,
+    EventContractInfoRequest,
+    EventContractInstrument,
+    EventContractMarketData,
+    EventContractOrderRequest,
+    EventContractSearchRequest,
+    EventContractSearchResult,
+    EventContractSnapshotRequest,
+    EventContractStrikesRequest,
+    EventContractStrikesResponse,
+)
 from src.feeds.models import AssetClass, BaseOHLCVBar, FXOHLCVBar, FutureOHLCVBar, OHLCVBar, OHLCVRequest, OptionOHLCVBar
 from src.feeds.news import (
     HistoricalNewsHeadline,
@@ -94,6 +107,17 @@ __all__ = [
     "CTDFutureDefinition",
     "DEFAULT_CTD_FUTURE_DEFINITIONS",
     "DEFAULT_OPTION_ANALYTICS_GENERIC_TICKS",
+    "EventContractHistoryRequest",
+    "EventContractHistoryResponse",
+    "EventContractInfoRequest",
+    "EventContractInstrument",
+    "EventContractMarketData",
+    "EventContractOrderRequest",
+    "EventContractSearchRequest",
+    "EventContractSearchResult",
+    "EventContractSnapshotRequest",
+    "EventContractStrikesRequest",
+    "EventContractStrikesResponse",
     "FXOHLCVBar",
     "ForecastEventContractCategory",
     "FundamentalDataReport",

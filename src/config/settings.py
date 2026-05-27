@@ -124,6 +124,27 @@ class Settings(BaseModel):
         default=constants.DEFAULT_IBKR_API_BEARER_TOKEN,
         alias=constants.IBKR_API_BEARER_TOKEN_ENV,
     )
+    ibkr_web_api_base_url: str = Field(
+        default=constants.DEFAULT_IBKR_WEB_API_BASE_URL,
+        alias=constants.IBKR_WEB_API_BASE_URL_ENV,
+        min_length=1,
+    )
+    ibkr_web_api_bearer_token: str = Field(
+        default=constants.DEFAULT_IBKR_WEB_API_BEARER_TOKEN,
+        alias=constants.IBKR_WEB_API_BEARER_TOKEN_ENV,
+    )
+    ibkr_web_api_cookie: str = Field(
+        default=constants.DEFAULT_IBKR_WEB_API_COOKIE,
+        alias=constants.IBKR_WEB_API_COOKIE_ENV,
+    )
+    ibkr_web_api_verify_ssl: bool = Field(
+        default=constants.DEFAULT_IBKR_WEB_API_VERIFY_SSL,
+        alias=constants.IBKR_WEB_API_VERIFY_SSL_ENV,
+    )
+    ibkr_event_contracts_live_orders_enabled: bool = Field(
+        default=constants.DEFAULT_IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED,
+        alias=constants.IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED_ENV,
+    )
 
     # Telegram alerting
     telegram_bot_token: str = Field(

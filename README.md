@@ -109,6 +109,11 @@ Core variables:
 | `IBKR_RATE_LIMIT_GLOBAL_MESSAGES_PER_SECOND` | `50` | Outgoing IBKR socket messages per second; IBKR's documented default cap is 50 |
 | `IBKR_RATE_LIMIT_MARKET_DATA_RESERVE` | unset | Market-data-line reserve; unset means `max(5, ceil(IBKR_MARKET_DATA_LINES * 0.10))` |
 | `IBKR_RATE_LIMIT_MARKET_DATA_LEASE_TTL_SECONDS` | `3600` | TTL safety net for active market-data-line leases |
+| `IBKR_WEB_API_BASE_URL` | `https://localhost:5000/v1/api` | IBKR Web API base URL for Client Portal Gateway or OAuth routing |
+| `IBKR_WEB_API_BEARER_TOKEN` | empty | Optional OAuth bearer token for IBKR Web API calls |
+| `IBKR_WEB_API_COOKIE` | empty | Optional raw Cookie header for an authenticated Client Portal Gateway session |
+| `IBKR_WEB_API_VERIFY_SSL` | `false` | Verify TLS certificates for IBKR Web API calls; local CPGW commonly uses a self-signed cert |
+| `IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED` | `false` | Safety switch for live Event Contract Web API order submission |
 
 ## Local Commands
 
@@ -209,6 +214,7 @@ QuestDB remains the default market-data store. To route OHLCV snapshot persisten
 Main route groups:
 
 - `/api/v1/business/*`: research-friendly wrappers for curves, news, market panels, returns, option skew, and commodity futures
+- `/api/v1/business/event-contracts/*`: ForecastEx/CME Event Contract discovery, snapshots, history, websocket message helpers, and guarded Web API order tickets
 - `/api/v1/business/fixed-income/*`: bond futures quotes, CTD analytics, futures-implied curves, and cash/futures curve comparison
 - `/api/v1/system/*`: health, rate-limit diagnostics, and TTL cache controls
 - `/api/v1/market-data/*`: OHLCV, latest Redis bars, option analytics, commodity futures/options, bond yield history

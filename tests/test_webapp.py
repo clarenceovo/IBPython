@@ -9,6 +9,15 @@ from fastapi.testclient import TestClient
 from src.config.settings import Settings
 from src.feeds.account import LivePositionDTO
 from src.feeds.bonds import BondInstrument
+from src.feeds.event_contracts import (
+    EventContractHistoryBar,
+    EventContractHistoryResponse,
+    EventContractInstrument,
+    EventContractMarketData,
+    EventContractOrderResponse,
+    EventContractSearchResult,
+    EventContractStrikesResponse,
+)
 from src.feeds.fixed_income import DeliverableBasketRequest, DeliverableBondInput
 from src.feeds.index_composition import IndexCompositionPayload
 from src.feeds.models import AssetClass, OHLCVBar, OptionOHLCVBar
@@ -79,6 +88,7 @@ class FakeRedis:
         self.compositions: dict[str, IndexCompositionPayload] = {}
         self.equity_snapshots: dict[str, EquitySnapshot] = {}
         self.fx_option_snapshots: dict[tuple[str, str, float, str], FXOptionSnapshot] = {}
+        self.values: dict[str, str] = {"OrderAuth::bearer_token": "test-order-token"}
 
     async def health_check(self) -> bool:
         return True
@@ -102,6 +112,9 @@ class FakeRedis:
 
     async def get_index_composition(self, index_symbol: str) -> IndexCompositionPayload | None:
         return self.compositions.get(index_symbol.upper())
+
+    async def get_raw(self, key: str) -> str | None:
+        return self.values.get(key)
 
     async def set_latest_fx_option_snapshot(self, snapshot: FXOptionSnapshot) -> str:
         self.fx_option_snapshots[(snapshot.symbol, snapshot.expiry, snapshot.strike, snapshot.right)] = snapshot
@@ -411,6 +424,62 @@ class FakeFixedIncomeProvider:
         )
 
 
+class FakeEventContractsClient:
+    def __init__(self) -> None:
+        self.order_requests: list[object] = []
+
+    async def load_category_tree(self) -> list:
+        return []
+
+    async def search(self, request: object) -> list[EventContractSearchResult]:
+        return [
+            EventContractSearchResult(
+                con_id=658663572,
+                symbol=getattr(request, "symbol"),
+                description="FORECASTX",
+                company_name="US Fed Funds Target Rate",
+                company_header="US Fed Funds Target Rate - FORECASTX",
+                opt_expirations=("20260616",),
+            )
+        ]
+
+    async def strikes(self, request: object) -> EventContractStrikesResponse:
+        return EventContractStrikesResponse(call=(4.875, 5.125), put=(4.875, 5.125), all_strikes=(4.875, 5.125))
+
+    async def info(self, request: object) -> list[EventContractInstrument]:
+        return [
+            EventContractInstrument(
+                con_id=713921696,
+                symbol="FF",
+                sec_type="OPT",
+                exchange="FORECASTX",
+                right="C",
+                yes_no="YES",
+                strike=4.875,
+                trading_class="FF",
+            )
+        ]
+
+    async def snapshot(self, request: object) -> list[EventContractMarketData]:
+        return [EventContractMarketData(con_id=getattr(request, "con_ids")[0], last=0.81, bid=0.79, ask=0.82)]
+
+    async def history(self, request: object) -> EventContractHistoryResponse:
+        return EventContractHistoryResponse(
+            con_id=getattr(request, "con_id"),
+            symbol="FF",
+            period=getattr(request, "period"),
+            bars=(EventContractHistoryBar(timestamp=datetime(2026, 6, 1, tzinfo=timezone.utc), open=0.2, high=0.2, low=0.19, close=0.2),),
+        )
+
+    async def place_order(self, request: object) -> EventContractOrderResponse:
+        self.order_requests.append(request)
+        return EventContractOrderResponse(
+            account_id=getattr(request, "account_id"),
+            submitted=True,
+            response={"order_id": "987654", "order_status": "Submitted"},
+        )
+
+
 class FakeState:
     def __init__(self) -> None:
         self.settings = Settings(
@@ -423,6 +492,7 @@ class FakeState:
         self.redis = FakeRedis()
         self.questdb = FakeQuestDB()
         self.market_data_cache = AsyncTTLCache(ttl_seconds=60, max_size=16)
+        self.event_contracts = FakeEventContractsClient()
         self.fixed_income_reference_provider = FakeFixedIncomeProvider()
         self.closed = False
 
@@ -463,12 +533,122 @@ def test_webapp_registers_domain_routers() -> None:
     assert "/api/v1/business/fixed-income/getFuturesImpliedCurve" in paths
     assert "/api/v1/business/fixed-income/getCashBondCurve" in paths
     assert "/api/v1/business/fixed-income/getCurveComparison" in paths
+    assert "/api/v1/business/event-contracts/discover/search" in paths
+    assert "/api/v1/business/event-contracts/market-data/snapshot" in paths
+    assert "/api/v1/business/event-contracts/orders/place" in paths
     assert "/api/v1/reference-data/options/chains" in paths
     assert "/api/v1/market-data/options/skew" in paths
     assert "/api/v1/snapshot/fx-options/capture" in paths
     assert "/api/v1/snapshot/fx-options/latest" in paths
     assert "/api/v1/snapshot/fx-options/query" in paths
     assert "/api/v1/account/positions" in paths
+
+
+def test_event_contract_search_endpoint_uses_web_api_client() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/business/event-contracts/discover/search",
+            json={"symbol": "FF"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()[0]["con_id"] == 658663572
+    assert response.json()[0]["opt_expirations"] == ["20260616"]
+
+
+def test_event_contract_snapshot_endpoint_normalizes_market_fields() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/business/event-contracts/market-data/snapshot",
+            json={"con_ids": [713921696]},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()[0]
+    assert payload["con_id"] == 713921696
+    assert payload["last"] == 0.81
+
+
+def test_event_contract_streaming_messages_match_ibkr_websocket_protocol() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/business/event-contracts/market-data/streaming-messages",
+            json={"con_id": 721095500, "fields": ["31", "84"]},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "subscribe": 'smd+721095500+{"fields":["31","84"]}',
+        "unsubscribe": "umd+721095500+{}",
+    }
+
+
+def test_event_contract_live_order_is_disabled_by_default() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/business/event-contracts/orders/place",
+            headers={"Authorization": "Bearer test-order-token"},
+            json={
+                "account_id": "DU123",
+                "con_id": 713921696,
+                "quantity": 1,
+                "price": 0.81,
+                "confirm_live_order": True,
+            },
+        )
+
+    assert response.status_code == 403
+    assert state.event_contracts.order_requests == []
+
+
+def test_event_contract_live_order_requires_explicit_confirmation_when_enabled() -> None:
+    state = FakeState()
+    state.settings.ibkr_event_contracts_live_orders_enabled = True
+    app = create_app(settings=state.settings, state=state)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/business/event-contracts/orders/place",
+            headers={"Authorization": "Bearer test-order-token"},
+            json={
+                "account_id": "DU123",
+                "con_id": 713921696,
+                "quantity": 1,
+                "price": 0.81,
+            },
+        )
+
+    assert response.status_code == 422
+    assert state.event_contracts.order_requests == []
+
+
+def test_event_contract_live_order_submits_when_enabled_confirmed_and_authorized() -> None:
+    state = FakeState()
+    state.settings.ibkr_event_contracts_live_orders_enabled = True
+    app = create_app(settings=state.settings, state=state)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/business/event-contracts/orders/place",
+            headers={"Authorization": "Bearer test-order-token"},
+            json={
+                "account_id": "DU123",
+                "con_id": 713921696,
+                "quantity": 1,
+                "price": 0.81,
+                "confirm_live_order": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["response"]["order_status"] == "Submitted"
+    assert len(state.event_contracts.order_requests) == 1
 
 
 def test_option_chain_swagger_examples_include_primary_exchange() -> None:

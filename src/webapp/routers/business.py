@@ -6,6 +6,7 @@ All endpoints are now split into domain-focused sub-modules:
 - business_returns.py  — market panel, universe bars, returns
 - business_skew.py     — option skew surface
 - business_futures.py  — commodity futures
+- business_event_contracts.py — ForecastEx / CME Event Contracts
 - business_shared.py   — shared models, helpers, presets, Easter calculation
 """
 
@@ -46,6 +47,7 @@ from src.webapp.routers.business_futures import (  # noqa: F401
     CommodityFuturesResponse,
     get_commodity_futures,
 )
+from src.webapp.routers.business_event_contracts import router as event_contracts_router  # noqa: F401
 from src.webapp.routers.business_shared import (  # noqa: F401
     BusinessCacheControls,
     BusinessDateRangeControls,
@@ -71,3 +73,4 @@ router.include_router(news_router)
 router.include_router(returns_router)
 router.include_router(skew_router)
 router.include_router(futures_router)
+router.include_router(event_contracts_router)

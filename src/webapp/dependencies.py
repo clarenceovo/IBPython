@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import Request
 
 from src.config.settings import Settings
+from src.feeds.event_contracts import IBKRWebAPIClient
 from src.feeds.fixed_income import FixedIncomeReferenceProvider
 from src.feeds.ibkr_feed import IBKRFeedClient
 from src.feeds.ohlcv_loader import OHLCVLoader
@@ -31,6 +32,7 @@ class IBKRRestAppState:
     feed: IBKRFeedClient
     loader: OHLCVLoader
     market_data_cache: AsyncTTLCache
+    event_contracts: IBKRWebAPIClient
     fixed_income_reference_provider: FixedIncomeReferenceProvider | None = None
 
     async def connect(self) -> None:
@@ -117,6 +119,12 @@ def build_rest_app_state(settings: Settings) -> IBKRRestAppState:
         ttl_seconds=settings.ibkr_rest_market_data_ttl_seconds,
         max_size=settings.ibkr_rest_market_data_cache_maxsize,
     )
+    event_contracts = IBKRWebAPIClient(
+        base_url=settings.ibkr_web_api_base_url,
+        bearer_token=settings.ibkr_web_api_bearer_token,
+        cookie=settings.ibkr_web_api_cookie,
+        verify_ssl=settings.ibkr_web_api_verify_ssl,
+    )
     fixed_income_reference_provider = build_fixed_income_reference_provider(settings.fixed_income_reference_provider)
     return IBKRRestAppState(
         settings=settings,
@@ -126,6 +134,7 @@ def build_rest_app_state(settings: Settings) -> IBKRRestAppState:
         feed=feed,
         loader=loader,
         market_data_cache=market_data_cache,
+        event_contracts=event_contracts,
         fixed_income_reference_provider=fixed_income_reference_provider,
     )
 
