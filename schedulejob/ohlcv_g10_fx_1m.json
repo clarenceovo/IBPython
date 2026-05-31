@@ -1,14 +1,14 @@
 {
   "name": "ohlcv_g10_fx_1m",
   "job_type": "ohlcv_snapshot",
-  "interval_seconds": 60,
+  "interval_seconds": 3600,
   "enabled": true,
-  "run_immediately": false,
+  "run_immediately": true,
   "params": {
     "start_time": "00:00",
     "end_time": "23:59",
     "timezone": "UTC",
-    "snap_interval_seconds": 60,
+    "snap_interval_seconds": 3600,
     "snap_days": ["mon", "tue", "wed", "thu", "fri"],
     "detect_holiday": false,
     "capture_rth": false,

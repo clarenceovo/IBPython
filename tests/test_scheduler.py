@@ -2,6 +2,8 @@ import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import httpx
+
 from src.feeds.models import AssetClass, OHLCVBar
 from src.feeds.snapshotter import EquitySnapshotCaptureResult, SnapshotWatchlist
 from src.transport.scheduler import (
@@ -333,7 +335,8 @@ def test_ohlcv_snapshot_handler_runs_inside_window_and_merges_symbols() -> None:
         assert request.primary_exchange == "ARCA"
         assert request.use_rth is True
         assert persist is True
-        assert cache_latest is True
+        assert cache_latest is False
+        assert loader.cached_bars[0].symbol == "SPY"
         assert redis.last_ts[("ohlcv_test", "SPY", "1 min")] == datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc)
         assert redis.status[("ohlcv_test", "SPY", "1 min")]["status"] == "success"
 
@@ -414,6 +417,344 @@ def test_ohlcv_snapshot_handler_can_capture_through_fastapi() -> None:
         assert loader.cached_bars[0].symbol == "SPY"
         assert redis.last_ts[("ohlcv_test", "SPY", "1 min")] == datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc)
         assert redis.status[("ohlcv_test", "SPY", "1 min")]["status"] == "success"
+
+    asyncio.run(run())
+
+
+def test_ohlcv_snapshot_handler_retries_fastapi_rate_limit_after_one_minute() -> None:
+    class FakeRateLimitedResponse:
+        status_code = 429
+        text = '{"detail":"rate limited"}'
+
+        def raise_for_status(self) -> None:
+            raise AssertionError("final response should be the retry response")
+
+    class FakeSuccessResponse:
+        status_code = 200
+        text = "ok"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict]:
+            return [
+                {
+                    "symbol": "SPY",
+                    "asset_class": "equity",
+                    "exchange": "SMART",
+                    "currency": "USD",
+                    "timestamp": "2026-01-05T15:00:00Z",
+                    "open": 100,
+                    "high": 101,
+                    "low": 99,
+                    "close": 100.5,
+                    "volume": 1000,
+                    "bar_size": "1 min",
+                    "source": "ibkr",
+                    "metadata": {},
+                }
+            ]
+
+    class FakeAsyncClient:
+        calls: list[tuple[str, dict]] = []
+
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, url: str, *, json: dict):
+            self.calls.append((url, json))
+            return FakeRateLimitedResponse() if len(self.calls) == 1 else FakeSuccessResponse()
+
+    async def run() -> None:
+        loader = FakeOHLCVLoader()
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        original_client = scheduler_module.httpx.AsyncClient
+        scheduler_module.httpx.AsyncClient = FakeAsyncClient
+        try:
+            handler = OHLCVSnapshotJobHandler(
+                loader,
+                api_base_url="http://localhost:8000/",
+                api_rate_limit_sleep=fake_sleep,
+                clock=lambda: datetime(2026, 1, 5, 10, 0, tzinfo=timezone.utc),
+            )
+
+            result = await handler(_ohlcv_job())
+        finally:
+            scheduler_module.httpx.AsyncClient = original_client
+
+        assert result.status == "success"
+        assert len(FakeAsyncClient.calls) == 2
+        assert sleeps == [60.0]
+        assert loader.persisted_batches[0][0].symbol == "SPY"
+
+    asyncio.run(run())
+
+
+def test_ohlcv_snapshot_handler_uses_configurable_rate_limit_retry_count() -> None:
+    class FakeRateLimitedResponse:
+        status_code = 429
+        text = '{"detail":"rate limited"}'
+
+        def raise_for_status(self) -> None:
+            request = httpx.Request("POST", "http://localhost:8000/api/v1/market-data/ohlcv")
+            response = httpx.Response(self.status_code, text=self.text, request=request)
+            response.raise_for_status()
+
+    class FakeSuccessResponse:
+        status_code = 200
+        text = "ok"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict]:
+            return [
+                {
+                    "symbol": "SPY",
+                    "asset_class": "equity",
+                    "exchange": "SMART",
+                    "currency": "USD",
+                    "timestamp": "2026-01-05T15:00:00Z",
+                    "open": 100,
+                    "high": 101,
+                    "low": 99,
+                    "close": 100.5,
+                    "volume": 1000,
+                    "bar_size": "1 min",
+                    "source": "ibkr",
+                    "metadata": {},
+                }
+            ]
+
+    class FakeAsyncClient:
+        calls: list[tuple[str, dict]] = []
+
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, url: str, *, json: dict):
+            self.calls.append((url, json))
+            return FakeSuccessResponse() if len(self.calls) == 3 else FakeRateLimitedResponse()
+
+    async def run() -> None:
+        loader = FakeOHLCVLoader()
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        original_client = scheduler_module.httpx.AsyncClient
+        scheduler_module.httpx.AsyncClient = FakeAsyncClient
+        try:
+            handler = OHLCVSnapshotJobHandler(
+                loader,
+                api_base_url="http://localhost:8000/",
+                api_rate_limit_retry_delay_seconds=7,
+                api_rate_limit_retry_count=2,
+                api_rate_limit_sleep=fake_sleep,
+                clock=lambda: datetime(2026, 1, 5, 10, 0, tzinfo=timezone.utc),
+            )
+
+            result = await handler(_ohlcv_job())
+        finally:
+            scheduler_module.httpx.AsyncClient = original_client
+
+        assert result.status == "success"
+        assert len(FakeAsyncClient.calls) == 3
+        assert sleeps == [7.0, 7.0]
+
+    asyncio.run(run())
+
+
+def test_ohlcv_snapshot_handler_classifies_repeated_rate_limit_failure() -> None:
+    class FakeRateLimitedResponse:
+        status_code = 429
+        text = '{"detail":"rate limited"}'
+
+        def raise_for_status(self) -> None:
+            request = httpx.Request("POST", "http://localhost:8000/api/v1/market-data/ohlcv")
+            response = httpx.Response(self.status_code, text=self.text, request=request)
+            response.raise_for_status()
+
+    class FakeAsyncClient:
+        calls: list[tuple[str, dict]] = []
+
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, url: str, *, json: dict) -> FakeRateLimitedResponse:
+            self.calls.append((url, json))
+            return FakeRateLimitedResponse()
+
+    async def run() -> None:
+        loader = FakeOHLCVLoader()
+        redis = FakeRedis()
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        original_client = scheduler_module.httpx.AsyncClient
+        scheduler_module.httpx.AsyncClient = FakeAsyncClient
+        try:
+            handler = OHLCVSnapshotJobHandler(
+                loader,
+                redis=redis,
+                api_base_url="http://localhost:8000/",
+                api_rate_limit_retry_delay_seconds=0,
+                api_rate_limit_sleep=fake_sleep,
+                clock=lambda: datetime(2026, 1, 5, 10, 0, tzinfo=timezone.utc),
+            )
+
+            result = await handler(_ohlcv_job())
+        finally:
+            scheduler_module.httpx.AsyncClient = original_client
+
+        assert result.status == "failed"
+        assert result.metrics["failure_categories"] == {"rate_limited": 1}
+        assert redis.status[("ohlcv_test", "SPY", "1 min")]["failure_category"] == "rate_limited"
+        assert redis.last_ts == {}
+        assert len(FakeAsyncClient.calls) == 2
+
+    asyncio.run(run())
+
+
+def test_ohlcv_snapshot_handler_classifies_api_unavailable_failure() -> None:
+    class FakeUnavailableResponse:
+        status_code = 503
+        text = '{"detail":"unavailable"}'
+
+        def raise_for_status(self) -> None:
+            request = httpx.Request("POST", "http://localhost:8000/api/v1/market-data/ohlcv")
+            response = httpx.Response(self.status_code, text=self.text, request=request)
+            response.raise_for_status()
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, url: str, *, json: dict) -> FakeUnavailableResponse:
+            return FakeUnavailableResponse()
+
+    async def run() -> None:
+        loader = FakeOHLCVLoader()
+        redis = FakeRedis()
+        original_client = scheduler_module.httpx.AsyncClient
+        scheduler_module.httpx.AsyncClient = FakeAsyncClient
+        try:
+            handler = OHLCVSnapshotJobHandler(
+                loader,
+                redis=redis,
+                api_base_url="http://localhost:8000/",
+                clock=lambda: datetime(2026, 1, 5, 10, 0, tzinfo=timezone.utc),
+            )
+
+            result = await handler(_ohlcv_job())
+        finally:
+            scheduler_module.httpx.AsyncClient = original_client
+
+        assert result.status == "failed"
+        assert result.metrics["failure_categories"] == {"api_unavailable": 1}
+        assert redis.status[("ohlcv_test", "SPY", "1 min")]["failure_category"] == "api_unavailable"
+        assert redis.last_ts == {}
+
+    asyncio.run(run())
+
+
+def test_ohlcv_snapshot_handler_succeeds_when_latest_cache_fails_after_persist() -> None:
+    class FakeSuccessResponse:
+        status_code = 200
+        text = "ok"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict]:
+            return [
+                {
+                    "symbol": "SPY",
+                    "asset_class": "equity",
+                    "exchange": "SMART",
+                    "currency": "USD",
+                    "timestamp": "2026-01-05T15:00:00Z",
+                    "open": 100,
+                    "high": 101,
+                    "low": 99,
+                    "close": 100.5,
+                    "volume": 1000,
+                    "bar_size": "1 min",
+                    "source": "ibkr",
+                    "metadata": {},
+                }
+            ]
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, url: str, *, json: dict) -> FakeSuccessResponse:
+            return FakeSuccessResponse()
+
+    class CacheFailingLoader(FakeOHLCVLoader):
+        async def cache_latest_bar(self, bar):
+            raise RuntimeError("redis unavailable")
+
+    async def run() -> None:
+        loader = CacheFailingLoader()
+        redis = FakeRedis()
+        handler = OHLCVSnapshotJobHandler(
+            loader,
+            redis=redis,
+            api_base_url="http://localhost:8000/",
+            clock=lambda: datetime(2026, 1, 5, 10, 0, tzinfo=timezone.utc),
+        )
+
+        original_client = scheduler_module.httpx.AsyncClient
+        scheduler_module.httpx.AsyncClient = FakeAsyncClient
+        try:
+            result = await handler(_ohlcv_job())
+        finally:
+            scheduler_module.httpx.AsyncClient = original_client
+
+        assert result.status == "success"
+        assert result.metrics["cache_warning_symbols"] == 1
+        assert loader.persisted_batches[0][0].symbol == "SPY"
+        assert redis.last_ts[("ohlcv_test", "SPY", "1 min")] == datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc)
+        assert "redis unavailable" in redis.status[("ohlcv_test", "SPY", "1 min")]["cache_warning"]
 
     asyncio.run(run())
 

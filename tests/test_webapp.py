@@ -29,6 +29,7 @@ import src.webapp.app as app_module
 import src.webapp.routers.business as business_router
 from src.webapp.app import create_app
 from src.webapp.cache import AsyncTTLCache
+from src.webapp.dependencies import IBKRRestAppState
 
 
 class FakeLoader:
@@ -486,6 +487,7 @@ def test_webapp_registers_domain_routers() -> None:
     paths = {route.path for route in app.routes}
 
     assert "/api/v1/system/health" in paths
+    assert "/api/v1/system/readiness" in paths
     assert "/api/v1/system/rate-limits" in paths
     assert "/api/v1/market-data/ohlcv" in paths
     assert "/api/v1/market-data/ohlcv/equity" in paths
@@ -1068,6 +1070,34 @@ def test_webapp_builds_runtime_state_inside_lifespan(monkeypatch) -> None:
     assert state.closed is True
 
 
+def test_rest_app_state_shutdown_disconnects_ibkr_feed_before_redis() -> None:
+    events: list[str] = []
+
+    class DisconnectableFeed:
+        async def disconnect(self) -> None:
+            events.append("feed.disconnect")
+
+    class CloseableRedis:
+        async def close(self) -> None:
+            events.append("redis.close")
+
+    async def run() -> None:
+        state = IBKRRestAppState(
+            settings=Settings(),
+            redis=CloseableRedis(),
+            feed=DisconnectableFeed(),
+            loader=object(),
+            market_data_cache=AsyncTTLCache(ttl_seconds=60, max_size=16),
+            event_contracts=object(),
+        )
+
+        await state.close()
+
+    asyncio.run(run())
+
+    assert events == ["feed.disconnect", "redis.close"]
+
+
 def test_system_rate_limits_endpoint_returns_not_configured_for_fake_state() -> None:
     state = FakeState()
     app = create_app(settings=state.settings, state=state)
@@ -1076,6 +1106,60 @@ def test_system_rate_limits_endpoint_returns_not_configured_for_fake_state() -> 
 
     assert response.status_code == 200
     assert response.json()["enabled"] is False
+
+
+def test_system_readiness_reports_ready_when_ibkr_and_redis_are_connected() -> None:
+    class ReadyFeed(FakeFeed):
+        def connection_status(self) -> str:
+            return "connected"
+
+    state = FakeState()
+    state.feed = ReadyFeed()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/system/readiness")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
+    assert response.json()["ibkr_connection"] == "connected"
+    assert response.json()["redis_connection"] == "connected"
+
+
+def test_system_readiness_reports_unavailable_when_ibkr_is_disconnected() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/system/readiness")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "unavailable"
+    assert response.json()["ibkr_connection"] == "disconnected"
+    assert response.json()["redis_connection"] == "connected"
+
+
+def test_system_readiness_reports_unavailable_when_redis_is_down() -> None:
+    class ReadyFeed(FakeFeed):
+        def connection_status(self) -> str:
+            return "connected"
+
+    class DownRedis(FakeRedis):
+        async def health_check(self) -> bool:
+            return False
+
+    state = FakeState()
+    state.feed = ReadyFeed()
+    state.redis = DownRedis()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/system/readiness")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "unavailable"
+    assert response.json()["ibkr_connection"] == "connected"
+    assert response.json()["redis_connection"] == "down"
 
 
 def test_generic_ohlcv_endpoint_supports_start_and_end_datetime_range() -> None:

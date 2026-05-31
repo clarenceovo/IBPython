@@ -119,6 +119,8 @@ async def main() -> None:
         loader,
         redis=redis,
         api_base_url=settings.ibkr_rest_base_url,
+        api_rate_limit_retry_delay_seconds=settings.ibkr_rest_ohlcv_rate_limit_retry_delay_seconds,
+        api_rate_limit_retry_count=settings.ibkr_rest_ohlcv_rate_limit_retry_count,
     )
     scheduler.register_handler(ohlcv_snapshot_handler.job_type, ohlcv_snapshot_handler)
 

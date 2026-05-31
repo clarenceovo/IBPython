@@ -46,13 +46,17 @@ class IBKRRestAppState:
 
     async def close(self) -> None:
         errors: list[BaseException] = []
-        closers = [self.feed.disconnect, self.redis.close]
-        for closer in closers:
+        closers = [
+            ("IBKR feed", self.feed.disconnect),
+            ("Redis transport", self.redis.close),
+        ]
+        for name, closer in closers:
             try:
+                logger.info("REST app shutdown: closing %s", name)
                 await closer()
             except Exception as exc:
                 errors.append(exc)
-                logger.warning("error during shutdown: %s", exc)
+                logger.warning("error closing %s during shutdown: %s", name, exc)
         if errors:
             logger.warning("%d error(s) during shutdown", len(errors))
 

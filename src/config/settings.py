@@ -77,6 +77,16 @@ class Settings(BaseModel):
         alias=constants.IBKR_REST_MARKET_DATA_CACHE_MAXSIZE_ENV,
         gt=0,
     )
+    ibkr_rest_ohlcv_rate_limit_retry_delay_seconds: float = Field(
+        default=constants.DEFAULT_IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS,
+        alias=constants.IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS_ENV,
+        ge=0,
+    )
+    ibkr_rest_ohlcv_rate_limit_retry_count: int = Field(
+        default=constants.DEFAULT_IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT,
+        alias=constants.IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT_ENV,
+        ge=0,
+    )
     ibkr_equity_snapshot_wait_seconds: float = Field(
         default=constants.DEFAULT_IBKR_EQUITY_SNAPSHOT_WAIT_SECONDS,
         alias=constants.IBKR_EQUITY_SNAPSHOT_WAIT_SECONDS_ENV,

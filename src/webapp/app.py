@@ -101,6 +101,7 @@ def create_app(
         try:
             yield
         finally:
+            logger.info("IBKRRestApp shutdown requested; closing IBKR and Redis transports")
             await app_state.close()
 
     fastapi_app = FastAPI(

@@ -34,6 +34,15 @@ logger = logging.getLogger(__name__)
 execution_logger = logging.getLogger(f"{__name__}.execution")
 
 
+class SnapshotAPIError(RuntimeError):
+    """API-mode snapshot failure annotated for scheduler status records."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, failure_category: str = "unexpected") -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.failure_category = failure_category
+
+
 class MarketSnapshotJobHandler:
     """Handler for Redis job_type='market_snapshot' jobs."""
 
@@ -82,6 +91,9 @@ class OHLCVSnapshotJobHandler:
         max_concurrency: int = 8,
         api_base_url: str | None = None,
         api_timeout_seconds: float = 60.0,
+        api_rate_limit_retry_delay_seconds: float = 60.0,
+        api_rate_limit_retry_count: int = 1,
+        api_rate_limit_sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self.loader = loader
         self.redis = redis
@@ -90,6 +102,9 @@ class OHLCVSnapshotJobHandler:
         self.max_concurrency = max(1, max_concurrency)
         self.api_base_url = api_base_url.rstrip("/") if api_base_url else None
         self.api_timeout_seconds = api_timeout_seconds
+        self.api_rate_limit_retry_delay_seconds = max(0.0, api_rate_limit_retry_delay_seconds)
+        self.api_rate_limit_retry_count = max(0, api_rate_limit_retry_count)
+        self.api_rate_limit_sleep = api_rate_limit_sleep or asyncio.sleep
 
     async def __call__(self, job: SchedulerJobDefinition) -> SchedulerRunResult:
         params = OHLCVSnapshotParams.model_validate(job.params)
@@ -146,6 +161,12 @@ class OHLCVSnapshotJobHandler:
         bars_captured = sum(int(result.get("bars_captured", 0)) for result in results)
         bars_expected = sum(int(result.get("bars_expected", 0)) for result in results)
         quality_reports = [result["data_quality"] for result in results if result.get("data_quality") is not None]
+        cache_warning_count = sum(1 for result in results if result.get("cache_warning"))
+        failure_categories: dict[str, int] = {}
+        for result in results:
+            category = result.get("failure_category")
+            if isinstance(category, str) and category:
+                failure_categories[category] = failure_categories.get(category, 0) + 1
         if failed_count == len(results):
             status = "failed"
         elif failed_count > 0:
@@ -168,6 +189,8 @@ class OHLCVSnapshotJobHandler:
                 "max_concurrency": self.max_concurrency,
                 "data_quality_reports": quality_reports,
                 "data_quality_issue_symbols": sum(1 for report in quality_reports if report.get("issue_codes")),
+                "cache_warning_symbols": cache_warning_count,
+                "failure_categories": failure_categories,
             },
         )
 
@@ -241,6 +264,7 @@ class OHLCVSnapshotJobHandler:
             quality_summary = _loader_quality_summary(self.loader)
             bars_captured = int(capture["bars_captured"])
             latest_timestamp = capture.get("latest_timestamp")
+            cache_warning = capture.get("cache_warning")
             if latest_timestamp is not None:
                 await self._write_bookmark(job, request, latest_timestamp)
                 execution_logger.info(
@@ -260,6 +284,7 @@ class OHLCVSnapshotJobHandler:
                     "latest_bar_timestamp": latest_timestamp,
                     "duration_ms": (monotonic_time.monotonic() - started) * 1000.0,
                     "data_quality": quality_summary,
+                    "cache_warning": cache_warning,
                 },
             )
             execution_logger.info(
@@ -277,13 +302,16 @@ class OHLCVSnapshotJobHandler:
                 "bars_captured": bars_captured,
                 "bars_expected": bars_expected,
                 "data_quality": quality_summary,
+                "cache_warning": cache_warning,
             }
         except Exception as exc:
+            failure_category = _snapshot_failure_category(exc)
             execution_logger.exception(
-                "job_state=failed job=%s run_id=%s symbol=%s error=%s",
+                "job_state=failed job=%s run_id=%s symbol=%s failure_category=%s error=%s",
                 job.name,
                 run_context.run_id if run_context else None,
                 symbol.symbol,
+                failure_category,
                 exc,
             )
             await self._safe_write_status(
@@ -294,16 +322,18 @@ class OHLCVSnapshotJobHandler:
                     "bars_captured": 0,
                     "last_run_at": self.clock().astimezone(timezone.utc).isoformat(),
                     "error": str(exc),
+                    "failure_category": failure_category,
                     "duration_ms": (monotonic_time.monotonic() - started) * 1000.0,
                 },
             )
-            return {"status": "failed", "symbol": symbol.symbol, "bars_captured": 0, "error": str(exc)}
+            return {"status": "failed", "symbol": symbol.symbol, "bars_captured": 0, "error": str(exc), "failure_category": failure_category}
 
     async def _capture_ohlcv(self, request: OHLCVRequest, *, persist: bool, cache_latest: bool) -> dict[str, Any]:
         if self.api_base_url is None:
-            bars = await self.loader.load(request, persist=persist, cache_latest=cache_latest)
+            bars = await self.loader.load(request, persist=persist, cache_latest=False)
             latest_timestamp = max((bar.timestamp for bar in bars), default=None)
-            return {"bars_captured": len(bars), "latest_timestamp": latest_timestamp}
+            cache_warning = await self._cache_latest_bar(request, bars[-1]) if cache_latest and bars else None
+            return {"bars_captured": len(bars), "latest_timestamp": latest_timestamp, "cache_warning": cache_warning}
 
         url = f"{self.api_base_url}/api/v1/market-data/ohlcv"
         payload = {
@@ -313,22 +343,71 @@ class OHLCVSnapshotJobHandler:
             "use_ttl_cache": False,
         }
         async with httpx.AsyncClient(timeout=self.api_timeout_seconds) as client:
-            response = await client.post(url, json=payload)
+            response = await self._post_ohlcv_with_rate_limit_retry(client, url, payload, request)
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise RuntimeError(f"OHLCV API returned {response.status_code}: {response.text[:500]}") from exc
+            raise SnapshotAPIError(
+                f"OHLCV API returned {response.status_code}: {response.text[:500]}",
+                status_code=response.status_code,
+                failure_category=_api_failure_category(response.status_code, response.text),
+            ) from exc
 
         bars_payload = response.json()
         if not isinstance(bars_payload, list):
-            raise RuntimeError(f"OHLCV API returned unexpected payload type: {type(bars_payload).__name__}")
+            raise SnapshotAPIError(
+                f"OHLCV API returned unexpected payload type: {type(bars_payload).__name__}",
+                failure_category="unexpected",
+            )
         bars = [_ohlcv_bar_from_api_payload(bar, request) for bar in bars_payload]
         if persist and bars:
             await self.loader.persist_bars(bars)
-        if cache_latest and bars:
-            await self.loader.cache_latest_bar(bars[-1])
+        cache_warning = await self._cache_latest_bar(request, bars[-1]) if cache_latest and bars else None
         latest_timestamp = max((bar.timestamp for bar in bars), default=None)
-        return {"bars_captured": len(bars_payload), "latest_timestamp": latest_timestamp}
+        return {"bars_captured": len(bars_payload), "latest_timestamp": latest_timestamp, "cache_warning": cache_warning}
+
+    async def _post_ohlcv_with_rate_limit_retry(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        payload: dict[str, Any],
+        request: OHLCVRequest,
+    ) -> httpx.Response:
+        attempts = self.api_rate_limit_retry_count + 1
+        response: httpx.Response | None = None
+        for attempt in range(1, attempts + 1):
+            response = await client.post(url, json=payload)
+            if response.status_code != httpx.codes.TOO_MANY_REQUESTS or attempt >= attempts:
+                return response
+            execution_logger.warning(
+                "job_state=api_rate_limited symbol=%s bar_size=%s attempt=%d retry_count=%d retry_in_seconds=%.3f",
+                request.symbol,
+                request.bar_size,
+                attempt,
+                self.api_rate_limit_retry_count,
+                self.api_rate_limit_retry_delay_seconds,
+            )
+            if self.api_rate_limit_retry_delay_seconds > 0:
+                await self.api_rate_limit_sleep(self.api_rate_limit_retry_delay_seconds)
+        if response is None:
+            raise SnapshotAPIError("OHLCV API was not called", failure_category="unexpected")
+        return response
+
+    async def _cache_latest_bar(self, request: OHLCVRequest, bar: OHLCVBar) -> str | None:
+        try:
+            await self.loader.cache_latest_bar(bar)
+            return None
+        except Exception as exc:
+            warning = f"latest-bar cache write failed: {exc}"
+            execution_logger.warning(
+                "job_state=cache_warning job=%s symbol=%s bar_size=%s error=%s",
+                self.job_type,
+                request.symbol,
+                request.bar_size,
+                exc,
+                exc_info=True,
+            )
+            return warning
 
     async def _read_bookmark(self, job: SchedulerJobDefinition, request: OHLCVRequest) -> datetime | None:
         if self.redis is None or not hasattr(self.redis, "get_ohlcv_snapshot_last_ts"):
@@ -475,6 +554,31 @@ def _coerce_bool(value: Any, *, default: bool) -> bool:
         if normalized in {"0", "false", "f", "no", "n", "off"}:
             return False
     return bool(value)
+
+
+def _api_failure_category(status_code: int, response_text: str) -> str:
+    if status_code == httpx.codes.TOO_MANY_REQUESTS:
+        return "rate_limited"
+    if status_code in {httpx.codes.BAD_GATEWAY, httpx.codes.SERVICE_UNAVAILABLE, httpx.codes.GATEWAY_TIMEOUT}:
+        return "api_unavailable"
+    normalized_text = response_text.lower()
+    if status_code == httpx.codes.UNPROCESSABLE_ENTITY and (
+        "qualify contract" in normalized_text
+        or "contract resolution" in normalized_text
+        or "could not qualify" in normalized_text
+    ):
+        return "contract_resolution"
+    if status_code in {httpx.codes.BAD_REQUEST, httpx.codes.UNPROCESSABLE_ENTITY}:
+        return "validation"
+    return "unexpected"
+
+
+def _snapshot_failure_category(exc: Exception) -> str:
+    if isinstance(exc, SnapshotAPIError):
+        return exc.failure_category
+    if type(exc).__name__ == "ValidationError":
+        return "validation"
+    return "unexpected"
 
 
 def _bar_timestamp(bar: Any) -> datetime:

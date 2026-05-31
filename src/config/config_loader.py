@@ -107,6 +107,18 @@ CONFIG_VALUE_SPECS: tuple[ConfigValueSpec, ...] = (
         int,
     ),
     ConfigValueSpec(
+        "ibkr_rest_ohlcv_rate_limit_retry_delay_seconds",
+        constants.IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS_ENV,
+        constants.DEFAULT_IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS,
+        float,
+    ),
+    ConfigValueSpec(
+        "ibkr_rest_ohlcv_rate_limit_retry_count",
+        constants.IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT_ENV,
+        constants.DEFAULT_IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT,
+        int,
+    ),
+    ConfigValueSpec(
         "ibkr_equity_snapshot_wait_seconds",
         constants.IBKR_EQUITY_SNAPSHOT_WAIT_SECONDS_ENV,
         constants.DEFAULT_IBKR_EQUITY_SNAPSHOT_WAIT_SECONDS,
@@ -177,6 +189,8 @@ _CANONICAL_FIELD_NAME_BY_ENV_NAME = {
     "IBKR_REST_CONNECT_ON_STARTUP": "ibkr_rest_connect_on_startup",
     "IBKR_REST_MARKET_DATA_TTL_SECONDS": "ibkr_rest_market_data_ttl_seconds",
     "IBKR_REST_MARKET_DATA_CACHE_MAXSIZE": "ibkr_rest_market_data_cache_maxsize",
+    "IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS": "ibkr_rest_ohlcv_rate_limit_retry_delay_seconds",
+    "IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT": "ibkr_rest_ohlcv_rate_limit_retry_count",
     "IBKR_EQUITY_SNAPSHOT_WAIT_SECONDS": "ibkr_equity_snapshot_wait_seconds",
     "IBKR_EQUITY_SNAPSHOT_LEASE_TTL_SECONDS": "ibkr_equity_snapshot_lease_ttl_seconds",
     "IBKR_HISTORICAL_MAX_CHUNKS": "ibkr_historical_max_chunks",

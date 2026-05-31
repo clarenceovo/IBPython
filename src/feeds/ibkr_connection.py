@@ -242,6 +242,13 @@ class IBKRConnectionManager:
 
     async def disconnect(self) -> None:
         self._shutting_down = True
+        current_task = asyncio.current_task()
+        reconnect_tasks = [task for task in self._background_tasks if task is not current_task and not task.done()]
+        for task in reconnect_tasks:
+            task.cancel()
+        if reconnect_tasks:
+            await asyncio.gather(*reconnect_tasks, return_exceptions=True)
+            self._background_tasks.difference_update(reconnect_tasks)
         if self._ib is not None and self._ib.isConnected():
             logger.info("disconnecting from IBKR %s:%d clientId=%d", self.host, self.port, self.client_id)
             self._ib.disconnect()

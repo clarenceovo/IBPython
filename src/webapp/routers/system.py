@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, ConfigDict
 
 from src.webapp.cache import CacheStats
@@ -18,26 +18,19 @@ class HealthResponse(BaseModel):
     redis_connection: str | None = None
 
 
+class ReadinessResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    status: str  # "ready" or "unavailable"
+    app_name: str
+    ibkr_connection: str | None = None
+    redis_connection: str | None = None
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health(state: IBKRRestAppState = Depends(get_rest_state)) -> HealthResponse:
-    # IBKR status
-    ibkr_status = None
-    feed = getattr(state, "feed", None)
-    if feed is not None:
-        if hasattr(feed, "connection_status"):
-            ibkr_status = feed.connection_status()
-        elif getattr(feed, "_connection_dead", False):
-            ibkr_status = "down"
-        elif hasattr(feed, "_ib") and feed._ib is not None and feed._ib.isConnected():
-            ibkr_status = "connected"
-        else:
-            ibkr_status = "disconnected"
-
-    # Redis status
-    redis_status = None
-    if state.redis is not None:
-        redis_ok = await state.redis.health_check()
-        redis_status = "connected" if redis_ok else "down"
+    ibkr_status = _ibkr_connection_status(state)
+    redis_status = await _redis_connection_status(state)
 
     # Aggregate status
     statuses = [s for s in [ibkr_status, redis_status] if s is not None]
@@ -50,6 +43,21 @@ async def health(state: IBKRRestAppState = Depends(get_rest_state)) -> HealthRes
 
     return HealthResponse(
         status=overall,
+        app_name=state.settings.ibkr_rest_app_name,
+        ibkr_connection=ibkr_status,
+        redis_connection=redis_status,
+    )
+
+
+@router.get("/readiness", response_model=ReadinessResponse)
+async def readiness(response: Response, state: IBKRRestAppState = Depends(get_rest_state)) -> ReadinessResponse:
+    ibkr_status = _ibkr_connection_status(state)
+    redis_status = await _redis_connection_status(state)
+    ready = ibkr_status == "connected" and redis_status == "connected"
+    if not ready:
+        response.status_code = 503
+    return ReadinessResponse(
+        status="ready" if ready else "unavailable",
         app_name=state.settings.ibkr_rest_app_name,
         ibkr_connection=ibkr_status,
         redis_connection=redis_status,
@@ -91,3 +99,23 @@ async def scheduler_health(state: IBKRRestAppState = Depends(get_rest_state)) ->
         return {"status": "not_configured", "jobs": {}}
     report = scheduler._health_monitor.get_health_status()
     return report.model_dump(mode="json")
+
+
+def _ibkr_connection_status(state: IBKRRestAppState) -> str | None:
+    feed = getattr(state, "feed", None)
+    if feed is None:
+        return None
+    if hasattr(feed, "connection_status"):
+        return feed.connection_status()
+    if getattr(feed, "_connection_dead", False):
+        return "down"
+    if hasattr(feed, "_ib") and feed._ib is not None and feed._ib.isConnected():
+        return "connected"
+    return "disconnected"
+
+
+async def _redis_connection_status(state: IBKRRestAppState) -> str | None:
+    if state.redis is None:
+        return None
+    redis_ok = await state.redis.health_check()
+    return "connected" if redis_ok else "down"

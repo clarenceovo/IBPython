@@ -105,6 +105,8 @@ Core variables:
 | `IBKR_REST_CONNECT_ON_STARTUP` | `false` | Connect IBKR and Redis during API startup |
 | `IBKR_REST_MARKET_DATA_TTL_SECONDS` | `5` | REST market-data TTL cache default |
 | `IBKR_REST_MARKET_DATA_CACHE_MAXSIZE` | `512` | REST TTL cache max entries |
+| `IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS` | `60` | Snapshotter wait before retrying a FastAPI OHLCV request that returns HTTP 429 |
+| `IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT` | `1` | Number of HTTP 429 retries per snapshotter OHLCV API call |
 | `IBKR_ORDER_AUTH_REDIS_KEY` | `OrderAuth::bearer_token` | Redis key containing the bearer token payload required by `/api/v1/orders/*` |
 | `IBKR_RATE_LIMIT_ENABLED` | `true` | Enable the internal app-wide IBKR pacing controller |
 | `IBKR_RATE_LIMIT_GLOBAL_MESSAGES_PER_SECOND` | `50` | Outgoing IBKR socket messages per second; IBKR's documented default cap is 50 |
@@ -241,6 +243,7 @@ POST /api/v1/business/fixed-income/getFuturesImpliedCurve
 POST /api/v1/business/fixed-income/getCashBondCurve
 POST /api/v1/business/fixed-income/getCurveComparison
 GET  /api/v1/system/health
+GET  /api/v1/system/readiness
 GET  /api/v1/system/rate-limits
 GET  /api/v1/system/cache/market-data
 POST /api/v1/market-data/ohlcv
@@ -662,9 +665,9 @@ The target may be a provider instance, a provider class, or a zero-argument fact
 
 If `INDEX_COMPOSITION_PROVIDER` is blank, `configured_provider`, `placeholder`, or `todo`, the scheduler will not register the index reload handler and Redis index reload jobs will be skipped with a clear warning.
 
-OHLCV snapshot jobs use `job_type="ohlcv_snapshot"` and support either `interval_seconds` or a five-field `cron` expression. The scheduler calls `POST /api/v1/market-data/ohlcv` on `IBKR_REST_BASE_URL` with API persistence/cache disabled, then persists and caches the returned bars itself. The OHLCV job still evaluates its market window before loading data, so a cron trigger outside `start_time`/`end_time` is logged and skipped.
+OHLCV snapshot jobs use `job_type="ohlcv_snapshot"` and support either `interval_seconds` or a five-field `cron` expression. The scheduler calls `POST /api/v1/market-data/ohlcv` on `IBKR_REST_BASE_URL` with API persistence/cache disabled, then persists and caches the returned bars itself. If the API returns HTTP 429 for an IBKR pacing/rate-limit response, the snapshotter waits `IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS` and retries up to `IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT` times before failing the symbol. If latest Redis cache writes fail after durable persistence, the symbol stays successful with a `cache_warning`; bookmarks update only after the durable write has succeeded. The OHLCV job still evaluates its market window before loading data, so a cron trigger outside `start_time`/`end_time` is logged and skipped.
 
-If both `cron` and `interval_seconds` are present, `cron` controls trigger timing. `interval_seconds` remains operational metadata and must match `params.snap_interval_seconds` for OHLCV jobs.
+If both `cron` and `interval_seconds` are present, `cron` controls trigger timing. `interval_seconds` remains operational metadata and must match `params.snap_interval_seconds` for OHLCV jobs. If a job sets `timeout_seconds`, include enough wall-clock time for API timeout plus configured rate-limit retry sleeps.
 
 For bounded historical backfills, use `backfiller.py`. It calls the same OHLCV API with `persist=false`, `cache_latest=false`, and `use_ttl_cache=false`, then persists returned bars from the backfiller process and optionally caches the latest bar in Redis.
 
@@ -707,6 +710,8 @@ Example local jobs:
 - `schedulejob/ohlcv_major_indices_5m.json`
 
 Execution state is logged through `src.transport.scheduler.execution` with states such as `running`, `lease_skipped`, `skipped_window`, `skipped_holiday`, `success`, `partial_success`, `failed`, `timeout`, `cancelled`, and `bookmark_updated`.
+
+Snapshot bookmarks are inclusive: the next request starts at the previous successful latest timestamp. Keep OHLCV persistence idempotent by contract identity, bar size, and timestamp so replayed boundary bars do not duplicate durable rows.
 
 ## Redis Keys
 

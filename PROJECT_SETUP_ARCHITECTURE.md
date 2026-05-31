@@ -208,6 +208,8 @@ Blank or missing `.env` values are treated as null and skipped, so the correspon
 | `IBKR_REST_CONNECT_ON_STARTUP` | `false` | Connect to IBKR and Redis during API startup instead of first request |
 | `IBKR_REST_MARKET_DATA_TTL_SECONDS` | `5` | Default in-process TTL for REST market data snapshots |
 | `IBKR_REST_MARKET_DATA_CACHE_MAXSIZE` | `512` | Maximum in-process REST market data cache entries |
+| `IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS` | `60` | Scheduler/snapshotter wait before retrying a FastAPI OHLCV request that returns HTTP 429 |
+| `IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT` | `1` | Number of HTTP 429 retries per scheduler/snapshotter OHLCV API call |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
 | `REDIS_PASSWORD` | empty | Optional Redis AUTH password; blank keeps unauthenticated local Redis |
 | `QUESTDB_HOST` | `127.0.0.1` | QuestDB PostgreSQL wire host |
@@ -254,6 +256,7 @@ Router split:
 - `POST /api/v1/business/fixed-income/getCashBondCurve`
 - `POST /api/v1/business/fixed-income/getCurveComparison`
 - `GET /api/v1/system/health`
+- `GET /api/v1/system/readiness`
 - `GET /api/v1/system/cache/market-data`
 - `DELETE /api/v1/system/cache/market-data`
 - `POST /api/v1/market-data/ohlcv`
@@ -442,7 +445,7 @@ The scheduler periodically reconciles local and Redis job sources while running.
 
 Operational job fields:
 
-- `timeout_seconds`: optional wall-clock timeout for one handler attempt.
+- `timeout_seconds`: optional wall-clock timeout for one handler attempt; include enough time for API timeout plus configured OHLCV rate-limit retry sleeps.
 - `max_attempts`: retry attempts for failed or timed-out runs.
 - `retry_backoff_seconds`: linear backoff multiplier between attempts.
 - `jitter_seconds`: optional random start delay to avoid thundering-herd starts.
@@ -532,7 +535,7 @@ QuestDB should remain the default for high-volume time-series capture because `E
 
 ## OHLCV Snapshot Jobs
 
-`job_type="ohlcv_snapshot"` is the production scheduler path for multi-market OHLCV capture. For each runnable symbol, it posts to `POST /api/v1/market-data/ohlcv` on `IBKR_REST_BASE_URL` with `persist=false`, `cache_latest=false`, and `use_ttl_cache=false`, then persists and caches the returned bars inside the scheduler/snapshotter before updating Redis bookmarks. It supports either interval scheduling or five-field cron expressions. Cron fields support `*`, ranges, lists, steps, and weekday names such as `mon-fri`.
+`job_type="ohlcv_snapshot"` is the production scheduler path for multi-market OHLCV capture. For each runnable symbol, it posts to `POST /api/v1/market-data/ohlcv` on `IBKR_REST_BASE_URL` with `persist=false`, `cache_latest=false`, and `use_ttl_cache=false`, then persists and caches the returned bars inside the scheduler/snapshotter before updating Redis bookmarks. If the API returns HTTP 429 for an IBKR pacing/rate-limit response, the snapshotter waits `IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS` and retries up to `IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT` times before failing the symbol. If latest Redis cache writes fail after durable persistence, the symbol stays successful with a `cache_warning`; bookmarks update only after durable persistence has succeeded. Bookmarks remain inclusive, so OHLCV persistence must stay idempotent by contract identity, bar size, and timestamp. It supports either interval scheduling or five-field cron expressions. Cron fields support `*`, ranges, lists, steps, and weekday names such as `mon-fri`.
 
 For bounded historical ranges, run `backfiller.py` instead of creating high-frequency one-off scheduler jobs. It uses the same ownership boundary as the scheduler: API calls are made with persistence/cache disabled, then the backfiller writes returned bars through `MarketOHLCVStore` and optionally caches the latest bar in Redis.
 
