@@ -21,4 +21,7 @@ COPY schedulejob ./schedulejob
 COPY PROJECT_SETUP_ARCHITECTURE.md .
 COPY README.md .
 
+RUN adduser --disabled-password --gecos "" appuser
+USER appuser
+
 CMD ["python", "main.py"]

@@ -212,18 +212,25 @@ class IBKRReferenceFeedClient:
         """Load historical IBKR news headlines for a contract id."""
         await self._connection.ensure_connected()
         logger.info("load_historical_news: con_id=%s provider=%s", request.con_id, request.provider_codes_param)
+        # IBKR accepts a start or end boundary for historical news. When callers
+        # provide a bounded range, request from the start and filter locally.
+        end_datetime = None if request.start_datetime and request.end_datetime else request.end_datetime
         headlines = await self._connection.with_retry(
             lambda: self._ib.reqHistoricalNewsAsync(
                 request.con_id,
                 request.provider_codes_param,
                 format_historical_news_datetime(request.start_datetime),
-                format_historical_news_datetime(request.end_datetime),
+                format_historical_news_datetime(end_datetime),
                 request.total_results,
                 [],
             ),
             operation=f"historical_news:{request.con_id}:{request.provider_codes_param}",
         )
         result = normalize_historical_news(headlines)
+        if request.start_datetime is not None:
+            result = [headline for headline in result if headline.timestamp >= request.start_datetime]
+        if request.end_datetime is not None:
+            result = [headline for headline in result if headline.timestamp <= request.end_datetime]
         logger.info("load_historical_news: %d headlines for con_id=%s", len(result), request.con_id)
         return result
 

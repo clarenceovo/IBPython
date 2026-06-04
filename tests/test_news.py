@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from src.feeds.ibkr_reference_feed import IBKRReferenceFeedClient
 from src.feeds.news import (
     HistoricalNewsRequest,
     NewsProvider,
@@ -95,3 +96,56 @@ def test_news_tick_converts_epoch_milliseconds() -> None:
 
     assert tick.timestamp == datetime(2025, 12, 31, 22, 50, tzinfo=timezone.utc)
     assert tick.provider_code == "BRFG"
+
+
+def test_reference_feed_sends_one_sided_historical_news_window_and_filters() -> None:
+    class FakeIB:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def reqHistoricalNewsAsync(self, con_id, provider_codes, start_datetime, end_datetime, total_results, options):
+            self.calls.append((con_id, provider_codes, start_datetime, end_datetime, total_results, options))
+            return [
+                SimpleNamespace(
+                    time="2026-01-01 12:30:00.0",
+                    providerCode="BZ",
+                    articleId="BZ$inside",
+                    headline="Inside window",
+                ),
+                SimpleNamespace(
+                    time="2026-01-03 12:30:00.0",
+                    providerCode="BZ",
+                    articleId="BZ$outside",
+                    headline="Outside window",
+                ),
+            ]
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.ib = FakeIB()
+
+        async def ensure_connected(self) -> None:
+            return None
+
+        async def with_retry(self, call, *, operation: str):
+            return await call()
+
+    async def run() -> None:
+        connection = FakeConnection()
+        client = IBKRReferenceFeedClient(connection, historical_client=object())  # type: ignore[arg-type]
+        headlines = await client.load_historical_news(
+            HistoricalNewsRequest(
+                con_id=8314,
+                provider_codes=["BZ"],
+                start_datetime="2026-01-01T00:00:00Z",
+                end_datetime="2026-01-02T00:00:00Z",
+                total_results=25,
+            )
+        )
+
+        assert connection.ib.calls == [(8314, "BZ", "2026-01-01 00:00:00.0", "", 25, [])]
+        assert [headline.article_id for headline in headlines] == ["BZ$inside"]
+
+    import asyncio
+
+    asyncio.run(run())

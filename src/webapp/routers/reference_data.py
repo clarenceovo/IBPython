@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.feeds.contracts import OptionChain, OptionChainRequest
@@ -128,6 +128,7 @@ async def load_historical_news(
     request: HistoricalNewsRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[HistoricalNewsHeadline]:
+    await _ensure_entitled_news_provider_codes(request.provider_codes, state)
     return await state.feed.load_historical_news(request)
 
 
@@ -137,3 +138,20 @@ async def load_news_article(
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> NewsArticle:
     return await state.feed.load_news_article(request)
+
+
+async def _ensure_entitled_news_provider_codes(provider_codes: tuple[str, ...], state: IBKRRestAppState) -> None:
+    providers = await state.feed.load_news_providers()
+    entitled_provider_codes = tuple(provider.provider_code for provider in providers)
+    if not entitled_provider_codes:
+        raise HTTPException(status_code=503, detail="IBKR news providers are not available for this account")
+    entitled_set = set(entitled_provider_codes)
+    unsupported = tuple(code for code in provider_codes if code not in entitled_set)
+    if unsupported:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "IBKR news provider code(s) not entitled for this account: "
+                f"{', '.join(unsupported)}. Entitled provider codes: {', '.join(entitled_provider_codes)}"
+            ),
+        )

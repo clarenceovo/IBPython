@@ -725,3 +725,85 @@ class TestTickDataRouter:
         assert "/api/v1/tick-data/calculate/iv" in paths
         assert "/api/v1/tick-data/calculate/option-price" in paths
         assert "/api/v1/tick-data/symbol-search" in paths
+
+    def test_option_calc_routes_use_feed_qualification_facade(self) -> None:
+        from fastapi.testclient import TestClient
+        from src.config.settings import Settings
+        from src.webapp.app import create_app
+        from src.webapp.cache import AsyncTTLCache
+
+        class _FakeFeed:
+            def __init__(self) -> None:
+                self.qualified_specs: list[Any] = []
+                self.iv_contracts: list[Any] = []
+                self.price_contracts: list[Any] = []
+
+            async def qualify_contract(self, spec: Any) -> Any:
+                self.qualified_specs.append(spec)
+                return SimpleNamespace(conId=123, symbol=spec.symbol, secType=spec.option_sec_type)
+
+            async def calculate_iv(self, contract: Any, option_price: float, under_price: float) -> float:
+                self.iv_contracts.append(contract)
+                assert option_price == pytest.approx(5.5)
+                assert under_price == pytest.approx(195.0)
+                return 0.25
+
+            async def calculate_option_price(self, contract: Any, volatility: float, under_price: float) -> float:
+                self.price_contracts.append(contract)
+                assert volatility == pytest.approx(0.25)
+                assert under_price == pytest.approx(195.0)
+                return 5.5
+
+        class _FakeState:
+            def __init__(self) -> None:
+                self.settings = Settings(
+                    ibkr_rest_app_name="Test",
+                    ibkr_rest_market_data_ttl_seconds=60,
+                    ibkr_rest_market_data_cache_maxsize=16,
+                )
+                self.feed = _FakeFeed()
+                self.redis = SimpleNamespace(health_check=lambda: True)
+                self.market_data_cache = AsyncTTLCache(ttl_seconds=60, max_size=16)
+
+            async def connect(self) -> None:
+                pass
+
+            async def close(self) -> None:
+                pass
+
+        state = _FakeState()
+        app = create_app(settings=state.settings, state=state)
+        with TestClient(app) as client:
+            iv_response = client.post(
+                "/api/v1/tick-data/calculate/iv",
+                json={
+                    "symbol": "AAPL",
+                    "expiry": "20260619",
+                    "strike": 195.0,
+                    "right": "C",
+                    "option_price": 5.5,
+                    "under_price": 195.0,
+                },
+            )
+            assert iv_response.status_code == 200
+            assert iv_response.json()["implied_volatility"] == pytest.approx(0.25)
+
+            price_response = client.post(
+                "/api/v1/tick-data/calculate/option-price",
+                json={
+                    "symbol": "AAPL",
+                    "expiry": "20260619",
+                    "strike": 195.0,
+                    "right": "C",
+                    "volatility": 0.25,
+                    "under_price": 195.0,
+                },
+            )
+            assert price_response.status_code == 200
+            assert price_response.json()["option_price"] == pytest.approx(5.5)
+
+        assert len(state.feed.qualified_specs) == 2
+        assert state.feed.qualified_specs[0].symbol == "AAPL"
+        assert state.feed.qualified_specs[0].option_sec_type == "OPT"
+        assert state.feed.iv_contracts[0].conId == 123
+        assert state.feed.price_contracts[0].conId == 123

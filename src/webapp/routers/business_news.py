@@ -162,16 +162,29 @@ async def get_news_article(
 
 
 async def _load_symbol_news(payload: SymbolNewsRequest, state: IBKRRestAppState) -> SymbolNewsResponse:
+    providers = await get_news_providers(
+        use_ttl_cache=payload.use_ttl_cache,
+        cache_ttl_seconds=payload.cache_ttl_seconds,
+        state=state,
+    )
+    entitled_provider_codes = tuple(provider.provider_code for provider in providers)
+    if not entitled_provider_codes:
+        raise HTTPException(status_code=503, detail="IBKR news providers are not available for this account")
+
     provider_codes = payload.provider_codes
     if provider_codes is None:
-        providers = await get_news_providers(
-            use_ttl_cache=payload.use_ttl_cache,
-            cache_ttl_seconds=payload.cache_ttl_seconds,
-            state=state,
-        )
-        provider_codes = tuple(provider.provider_code for provider in providers)
-    if not provider_codes:
-        raise HTTPException(status_code=503, detail="IBKR news providers are not available for this account")
+        provider_codes = entitled_provider_codes
+    else:
+        entitled_set = set(entitled_provider_codes)
+        unsupported = tuple(code for code in provider_codes if code not in entitled_set)
+        if unsupported:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "IBKR news provider code(s) not entitled for this account: "
+                    f"{', '.join(unsupported)}. Entitled provider codes: {', '.join(entitled_provider_codes)}"
+                ),
+            )
 
     con_id = payload.con_id or await _qualify_symbol_con_id(payload, state)
     request = HistoricalNewsRequest(

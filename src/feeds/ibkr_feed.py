@@ -401,10 +401,14 @@ class IBKRFeedClient:
         except Exception as exc:
             raise IBKRContractResolutionError(
                 f"IBKR could not qualify contract for {spec.symbol}.{_qualification_hint(spec)} "
-                f"contract_details_root_cause={_root_cause_message(exc)}"
+                f"contract_details_root_cause={_root_cause_message(exc)} "
+                f"{_last_ibkr_error_message(self._last_ibkr_error)}"
             ) from exc
         if selected is None:
-            raise IBKRContractResolutionError(f"IBKR could not qualify contract for {spec.symbol}.{_qualification_hint(spec)}")
+            raise IBKRContractResolutionError(
+                f"IBKR could not qualify contract for {spec.symbol}.{_qualification_hint(spec)} "
+                f"{_last_ibkr_error_message(self._last_ibkr_error)}"
+            )
         logger.info(
             "qualify_contract fallback selected %s con_id=%s exchange=%s primary_exchange=%s in %.2fs",
             spec.symbol,

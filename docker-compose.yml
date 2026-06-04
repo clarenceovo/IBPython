@@ -21,14 +21,16 @@ x-app-env: &app-env
   TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
   TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
   TELEGRAM_LOG_LEVEL: ${TELEGRAM_LOG_LEVEL:-WARNING}
+  IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS: ${IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS:-60}
+  IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT: ${IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT:-1}
 
 x-app-depends: &app-depends
   redis:
-    condition: service_started
+    condition: service_healthy
   questdb:
     condition: service_started
   mysql:
-    condition: service_started
+    condition: service_healthy
 
 services:
   ibkr-rest-app:
@@ -36,11 +38,12 @@ services:
       context: .
       dockerfile: Dockerfile.api
     image: ibpython-fastapi:latest
+    init: true
     ports:
       - "8000:8000"
     env_file:
       - path: .env
-        required: false
+        required: true
     environment:
       <<: *app-env
       IBKR_CLIENT_ID: ${IBKR_API_CLIENT_ID:-101}
@@ -49,6 +52,13 @@ services:
       IBKR_REST_MARKET_DATA_TTL_SECONDS: ${IBKR_REST_MARKET_DATA_TTL_SECONDS:-5}
       IBKR_REST_MARKET_DATA_CACHE_MAXSIZE: ${IBKR_REST_MARKET_DATA_CACHE_MAXSIZE:-512}
     depends_on: *app-depends
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/system/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 30s
     restart: unless-stopped
 
   ibkr-scheduler:
@@ -56,13 +66,19 @@ services:
       context: .
       dockerfile: Dockerfile.scheduler
     image: ibpython-scheduler:latest
+    init: true
     env_file:
       - path: .env
         required: false
     environment:
       <<: *app-env
       IBKR_CLIENT_ID: ${IBKR_SCHEDULER_CLIENT_ID:-201}
-    depends_on: *app-depends
+      IBKR_REST_BASE_URL: ${IBKR_DOCKER_REST_BASE_URL:-http://ibkr-rest-app:8000}
+    depends_on:
+      <<: *app-depends
+      ibkr-rest-app:
+        condition: service_healthy
+    stop_grace_period: 30s
     restart: unless-stopped
 
   redis:
@@ -82,6 +98,11 @@ services:
         fi
     volumes:
       - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "if [ -n \"$${REDIS_PASSWORD}\" ]; then redis-cli -a \"$${REDIS_PASSWORD}\" ping; else redis-cli ping; fi"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   questdb:
     image: questdb/questdb:latest
@@ -107,6 +128,12 @@ services:
       MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD:-trading}
     volumes:
       - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
 volumes:
   redis-data:

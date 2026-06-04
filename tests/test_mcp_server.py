@@ -176,6 +176,13 @@ def test_live_ohlcv_tool_uses_auto_chunking_helper():
     assert "load_historical_ohlcv_range" in function_source
 
 
+def test_mcp_news_default_uses_documented_analyst_actions_provider_code():
+    source = MCP_SERVER_PATH.read_text()
+    function_source = source[source.index("async def load_news") : source.index("async def query_equity_snapshots")]
+
+    assert '["BRFG", "BRFUPDN"]' in function_source
+
+
 def test_server_status_resource_content():
     """Verify the status resource returns valid JSON structure."""
     source = MCP_SERVER_PATH.read_text()

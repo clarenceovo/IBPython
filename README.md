@@ -201,12 +201,21 @@ Compose uses separate Dockerfiles:
 
 The Compose app services set `IBKR_HOST` from `IBKR_DOCKER_HOST`, defaulting to `host.docker.internal`, which lets containers reach TWS or IB Gateway running on the host machine through Docker Desktop. Override `IBKR_DOCKER_HOST` and `IBKR_DOCKER_PORT` if IB Gateway runs elsewhere.
 
+The scheduler uses `IBKR_DOCKER_REST_BASE_URL` inside Compose, defaulting to `http://ibkr-rest-app:8000`, so it calls the FastAPI service over the Docker network instead of container-local `localhost`.
+
 The API and scheduler use separate IBKR client IDs by default:
 
 - `IBKR_API_CLIENT_ID=101`
 - `IBKR_SCHEDULER_CLIENT_ID=201`
 
 Keep those distinct from notebooks and other API clients.
+
+Docker operational defaults:
+
+- FastAPI intentionally runs as one uvicorn worker because each worker would create its own IBKR session, in-process cache, and streaming state.
+- `ibkr-rest-app` has a Docker healthcheck against `/api/v1/system/health`; scheduler startup waits for that service health.
+- App containers use `init: true`, a 30-second `stop_grace_period`, and non-root `appuser` images so SIGTERM can drain lifespan shutdown and disconnect IBKR cleanly.
+- Redis and MySQL have Compose healthchecks; QuestDB is still treated as `service_started` because the upstream image does not guarantee a portable shell/curl healthcheck tool.
 
 QuestDB remains the default scheduler/snapshotter market-data store. To route OHLCV snapshot persistence to MySQL instead, set `MARKET_DATA_DB_BACKEND=mysql` and configure the `MYSQL_*` variables in `.env`.
 
@@ -219,7 +228,7 @@ Main route groups:
 - `/api/v1/business/*`: research-friendly wrappers for curves, news, market panels, returns, option skew, and commodity futures
 - `/api/v1/business/event-contracts/*`: ForecastEx/CME Event Contract discovery, snapshots, history, websocket message helpers, and guarded Web API order tickets
 - `/api/v1/business/fixed-income/*`: bond futures quotes, CTD analytics, futures-implied curves, and cash/futures curve comparison
-- `/api/v1/system/*`: health, rate-limit diagnostics, and TTL cache controls
+- `/api/v1/system/*`: health, readiness, rate-limit diagnostics, and TTL cache controls
 - `/api/v1/market-data/*`: OHLCV, latest Redis bars, option analytics, commodity futures/options, bond yield history
 - `/api/v1/reference-data/*`: option chains, fundamentals, WSH events, news
 - `/api/v1/account/*`: account summary, live positions, portfolio, PnL snapshots

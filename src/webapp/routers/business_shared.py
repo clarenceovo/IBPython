@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from src.config.reference_data import resolve_index
 from src.feeds.models import AssetClass, OHLCVBar, OHLCVRequest
 from src.feeds.exchange_resolver import resolve_equity
 
@@ -276,10 +277,11 @@ def resolve_business_symbol(
             primary_exchange=primary_exchange,
         )
     if asset_class is AssetClass.INDEX:
+        resolved = resolve_index(symbol)
         return BusinessOHLCVSymbol(
-            symbol=symbol.strip().upper(),
-            exchange=exchange or "CBOE",
-            currency=currency or "USD",
+            symbol=resolved["symbol"],
+            exchange=exchange or resolved["exchange"],
+            currency=currency or resolved["currency"],
             primary_exchange=primary_exchange,
         )
     return BusinessOHLCVSymbol(

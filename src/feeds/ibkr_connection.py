@@ -94,6 +94,10 @@ def _last_ibkr_error_message(value: tuple[int, str] | None) -> str:
     hint = ""
     if code == 326:
         hint = " Hint: choose a unique IBKR_CLIENT_ID for the API; notebooks and TWS API clients cannot share one."
+    elif code == 200:
+        hint = " Hint: contract not found; check symbol, secType, exchange, currency, and conId."
+    elif code in {162, 354, 10167}:
+        hint = " Hint: market data is not subscribed or unavailable; direct index Level 1 data may require an additional IBKR subscription."
     return f"last_ibkr_error={code}: {message}.{hint}"
 
 

@@ -16,6 +16,7 @@ from src.feeds.ibkr_connection import (
     IBKRConnectionManager,
     _contract_int,
     _contract_text,
+    _last_ibkr_error_message,
     _qualification_hint,
     _root_cause_message,
 )
@@ -444,10 +445,14 @@ class IBKRHistoricalClient:
         except Exception as exc:
             raise RuntimeError(
                 f"IBKR could not qualify contract for {spec.symbol}.{_qualification_hint(spec)} "
-                f"contract_details_root_cause={_root_cause_message(exc)}"
+                f"contract_details_root_cause={_root_cause_message(exc)} "
+                f"{_last_ibkr_error_message(self._connection.last_ibkr_error)}"
             ) from exc
         if selected is None:
-            raise RuntimeError(f"IBKR could not qualify contract for {spec.symbol}.{_qualification_hint(spec)}")
+            raise RuntimeError(
+                f"IBKR could not qualify contract for {spec.symbol}.{_qualification_hint(spec)} "
+                f"{_last_ibkr_error_message(self._connection.last_ibkr_error)}"
+            )
         logger.info(
             "qualify_contract fallback selected %s con_id=%s exchange=%s primary_exchange=%s in %.2fs",
             spec.symbol,

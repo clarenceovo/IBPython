@@ -45,6 +45,18 @@ def test_fx_contract_mapping_splits_pair() -> None:
     }
 
 
+def test_index_contract_mapping_supports_con_id_override() -> None:
+    spec = ContractSpec(symbol="SPX", asset_class="index", exchange="CBOE", currency="USD", con_id=123456)
+
+    assert ibkr_contract_kwargs(spec) == {
+        "secType": "IND",
+        "symbol": "SPX",
+        "exchange": "CBOE",
+        "currency": "USD",
+        "conId": 123456,
+    }
+
+
 def test_future_requires_expiry() -> None:
     with pytest.raises(ValueError):
         ContractSpec(symbol="ES", asset_class="future", exchange="CME", currency="USD")

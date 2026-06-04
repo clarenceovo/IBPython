@@ -460,11 +460,23 @@ async def _load_commodity_news(payload: CommodityNewsRequest, state: IBKRRestApp
         raise HTTPException(status_code=404, detail=f"IBKR could not qualify commodity contract for {payload.symbol}")
 
     provider_codes = payload.provider_codes
-    if provider_codes is None:
-        providers = await state.feed.load_news_providers()
-        provider_codes = tuple(provider.provider_code for provider in providers)
-    if not provider_codes:
+    providers = await state.feed.load_news_providers()
+    entitled_provider_codes = tuple(provider.provider_code for provider in providers)
+    if not entitled_provider_codes:
         raise HTTPException(status_code=503, detail="IBKR news providers are not available for this account")
+    if provider_codes is None:
+        provider_codes = entitled_provider_codes
+    else:
+        entitled_set = set(entitled_provider_codes)
+        unsupported = tuple(code for code in provider_codes if code not in entitled_set)
+        if unsupported:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "IBKR news provider code(s) not entitled for this account: "
+                    f"{', '.join(unsupported)}. Entitled provider codes: {', '.join(entitled_provider_codes)}"
+                ),
+            )
 
     request = HistoricalNewsRequest(
         con_id=con_id,

@@ -498,7 +498,7 @@ async def load_news(
 
     Args:
         symbol: Ticker symbol (e.g. 'AAPL', 'BTC')
-        provider_codes: News provider codes (default ['BRFG', 'BRFUP'])
+        provider_codes: News provider codes (default ['BRFG', 'BRFUPDN'])
         limit: Max articles to return (default 20, max 300)
     """
     state = _state(ctx)
@@ -514,7 +514,7 @@ async def load_news(
     except Exception:
         return {"error": f"Could not resolve contract for {symbol}"}
 
-    providers = tuple(provider_codes or ["BRFG", "BRFUP"])
+    providers = tuple(provider_codes or ["BRFG", "BRFUPDN"])
     request = HistoricalNewsRequest(
         con_id=con_id,
         provider_codes=providers,

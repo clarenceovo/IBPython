@@ -86,6 +86,11 @@ class IndexOHLCVLoadRequest(MinimalOHLCVLoadControls):
         min_length=1,
         description="Override auto-detected currency. Leave empty to auto-resolve.",
     )
+    con_id: int | None = Field(
+        default=None,
+        gt=0,
+        description="Optional IBKR index conId. Use this to bypass symbol/exchange ambiguity.",
+    )
 
     def to_request(self):
         resolved = _resolve_index(self.symbol)
@@ -94,6 +99,7 @@ class IndexOHLCVLoadRequest(MinimalOHLCVLoadControls):
             symbol=resolved["symbol"],
             exchange=self.exchange or resolved["exchange"],
             currency=self.currency or resolved["currency"],
+            con_id=self.con_id,
         )
 
 
@@ -171,7 +177,7 @@ INDEX_OHLCV_REQUEST_EXAMPLES = {
     "spx_us": {"summary": "S&P 500 (SPX)", "description": "Auto-resolves to CBOE/USD.", "value": {"symbol": "SPX"}},
     "ndx_us": {"summary": "Nasdaq-100 (NDX)", "description": "Auto-resolves to CBOE/USD.", "value": {"symbol": "NDX"}},
     "vix_us": {"summary": "CBOE Volatility Index (VIX)", "description": "Auto-resolves to CBOE/USD.", "value": {"symbol": "VIX"}},
-    "rut_us": {"summary": "Russell 2000 (RUT)", "description": "Auto-resolves to ICE/USD.", "value": {"symbol": "RUT"}},
+    "rut_us": {"summary": "Russell 2000 (RUT)", "description": "Auto-resolves to CBOE/USD.", "value": {"symbol": "RUT"}},
     "dji_us": {"summary": "Dow Jones Industrial Average (DJI)", "description": "Auto-resolves to CBOE/USD.", "value": {"symbol": "DJI"}},
     "hsi_hk": {"summary": "Hang Seng Index (HSI)", "description": "Auto-resolves to SEHK/HKD.", "value": {"symbol": "HSI"}},
     "dax_de": {"summary": "DAX (DAX)", "description": "Auto-resolves to EUREX/EUR.", "value": {"symbol": "DAX"}},

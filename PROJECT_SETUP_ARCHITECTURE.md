@@ -167,12 +167,21 @@ Compose exposes:
 
 Inside Docker, app services set `IBKR_HOST` from `IBKR_DOCKER_HOST`, defaulting to `host.docker.internal`, so containers can reach TWS or IB Gateway running on the host machine. If you run IB Gateway in another container or remote host, override `IBKR_DOCKER_HOST` and `IBKR_DOCKER_PORT` in `.env`.
 
+The scheduler uses `IBKR_DOCKER_REST_BASE_URL` inside Compose, defaulting to `http://ibkr-rest-app:8000`, so OHLCV snapshot jobs call FastAPI over the Docker network instead of container-local `localhost`.
+
 The two app services intentionally use different IBKR client IDs:
 
 - `IBKR_API_CLIENT_ID=101`
 - `IBKR_SCHEDULER_CLIENT_ID=201`
 
 Keep these distinct from notebooks and other IBKR API clients.
+
+Docker operational defaults:
+
+- FastAPI intentionally runs as one uvicorn worker because each worker would create a separate IBKR session, in-process cache, and streaming state.
+- `ibkr-rest-app` has a healthcheck against `/api/v1/system/health`; `ibkr-scheduler` waits for that healthcheck before starting.
+- App containers use `init: true`, a 30-second `stop_grace_period`, and non-root `appuser` images so SIGTERM can drain lifespan shutdown and disconnect IBKR cleanly.
+- Redis and MySQL use Compose healthchecks; QuestDB remains `service_started` because the upstream image does not guarantee a portable shell/curl healthcheck tool.
 
 Useful commands:
 

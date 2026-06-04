@@ -7,6 +7,8 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, Query
 
+from src.feeds.contracts import ContractSpec
+from src.feeds.models import AssetClass
 from src.feeds.tick_data import (
     HeadTimestampRequest,
     HistoricalTickRequest,
@@ -173,16 +175,8 @@ async def get_head_timestamp(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/calculate/iv", summary="Calculate implied volatility")
-async def calculate_iv(
-    payload: IVCalcRequest,
-    state: IBKRRestAppState = Depends(get_rest_state),
-) -> dict[str, Any]:
-    """Calculate implied volatility from the IBKR engine."""
-    from src.feeds.contracts import ContractSpec
-    from src.feeds.models import AssetClass
-
-    spec = ContractSpec(
+def _option_calc_contract_spec(payload: IVCalcRequest | OptionPriceCalcRequest) -> ContractSpec:
+    return ContractSpec(
         symbol=payload.symbol,
         asset_class=AssetClass.OPTION,
         exchange=payload.exchange,
@@ -195,12 +189,15 @@ async def calculate_iv(
         right=payload.right,
         multiplier=payload.multiplier,
     )
-    from src.feeds.contracts import build_ibkr_contract
-    contract = build_ibkr_contract(spec)
-    # Qualify first
-    qualified = await state.feed._ib.qualifyContractsAsync(contract)
-    if qualified:
-        contract = qualified[0]
+
+
+@router.post("/calculate/iv", summary="Calculate implied volatility")
+async def calculate_iv(
+    payload: IVCalcRequest,
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> dict[str, Any]:
+    """Calculate implied volatility from the IBKR engine."""
+    contract = await state.feed.qualify_contract(_option_calc_contract_spec(payload))
     iv = await state.feed.calculate_iv(contract, payload.option_price, payload.under_price)
     return {
         "symbol": payload.symbol,
@@ -219,27 +216,7 @@ async def calculate_option_price(
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> dict[str, Any]:
     """Calculate option price from the IBKR engine."""
-    from src.feeds.contracts import ContractSpec
-    from src.feeds.models import AssetClass
-    from src.feeds.contracts import build_ibkr_contract
-
-    spec = ContractSpec(
-        symbol=payload.symbol,
-        asset_class=AssetClass.OPTION,
-        exchange=payload.exchange,
-        currency=payload.currency,
-        option_sec_type=payload.sec_type,
-        underlying_symbol=payload.symbol,
-        expiry=payload.expiry,
-        last_trade_date_or_contract_month=payload.expiry,
-        strike=payload.strike,
-        right=payload.right,
-        multiplier=payload.multiplier,
-    )
-    contract = build_ibkr_contract(spec)
-    qualified = await state.feed._ib.qualifyContractsAsync(contract)
-    if qualified:
-        contract = qualified[0]
+    contract = await state.feed.qualify_contract(_option_calc_contract_spec(payload))
     price = await state.feed.calculate_option_price(contract, payload.volatility, payload.under_price)
     return {
         "symbol": payload.symbol,

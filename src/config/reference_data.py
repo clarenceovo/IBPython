@@ -29,7 +29,7 @@ _INDEX_EXCHANGE_MAP: dict[str, tuple[str, str]] = {
     "SPX": ("CBOE", "USD"),
     "NDX": ("CBOE", "USD"),
     "VIX": ("CBOE", "USD"),
-    "RUT": ("ICE", "USD"),
+    "RUT": ("CBOE", "USD"),
     "DJI": ("CBOE", "USD"),
     "OEX": ("CBOE", "USD"),
     "NDXP": ("CBOE", "USD"),

@@ -30,6 +30,8 @@ import src.webapp.routers.business as business_router
 from src.webapp.app import create_app
 from src.webapp.cache import AsyncTTLCache
 from src.webapp.dependencies import IBKRRestAppState
+from src.webapp.routers.business_shared import resolve_business_symbol
+from src.config.reference_data import resolve_index
 
 
 class FakeLoader:
@@ -652,6 +654,15 @@ def test_option_skew_swagger_examples_include_sampling_controls() -> None:
     assert examples["spx_bounded_skew"]["value"]["request"]["trading_class"] == "SPX"
 
 
+def test_index_resolution_uses_reference_map_for_business_symbols() -> None:
+    resolved = resolve_business_symbol(symbol="HSI", asset_class=AssetClass.INDEX)
+
+    assert resolved.symbol == "HSI"
+    assert resolved.exchange == "SEHK"
+    assert resolved.currency == "HKD"
+    assert resolve_index("RUT") == {"symbol": "RUT", "exchange": "CBOE", "currency": "USD"}
+
+
 def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None:
     state = FakeState()
     app = create_app(settings=state.settings, state=state)
@@ -955,6 +966,37 @@ def test_business_symbol_news_can_include_articles() -> None:
     assert response.json()["headlines"][0]["article"]["article_text"] == "Article body"
     assert state.feed.article_requests[0].provider_code == "BZ"
     assert state.feed.article_requests[0].article_id == "BZ$1"
+
+
+def test_business_symbol_news_rejects_unentitled_provider_codes() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/business/getSymbolNews",
+            json={"symbol": "TSLA", "provider_codes": ["FLY"], "use_ttl_cache": False},
+        )
+
+    assert response.status_code == 422
+    assert "not entitled" in response.json()["detail"]
+    assert "FLY" in response.json()["detail"]
+    assert state.feed.historical_news_requests == []
+
+
+def test_reference_historical_news_rejects_unentitled_provider_codes() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/reference-data/news/historical",
+            json={"con_id": 8314, "provider_codes": ["FLY"], "total_results": 5},
+        )
+
+    assert response.status_code == 422
+    assert "not entitled" in response.json()["detail"]
+    assert state.feed.historical_news_requests == []
 
 
 def test_business_symbol_news_rejects_missing_news_providers() -> None:
@@ -1277,6 +1319,7 @@ def test_asset_specific_ohlcv_wrappers_preset_asset_class_and_contract_fields() 
 
     with TestClient(app) as client:
         equity = client.post("/api/v1/market-data/ohlcv/equity", json={"symbol": "spy"})
+        index = client.post("/api/v1/market-data/ohlcv/index", json={"symbol": "rut", "con_id": 123456})
         future = client.post(
             "/api/v1/market-data/ohlcv/futures",
             json={"symbol": "ES", "last_trade_date_or_contract_month": "202606"},
@@ -1285,6 +1328,7 @@ def test_asset_specific_ohlcv_wrappers_preset_asset_class_and_contract_fields() 
         bond = client.post("/api/v1/market-data/ohlcv/bond", json={"sec_id_type": "CUSIP", "sec_id": "91282CJN2"})
 
     assert equity.status_code == 200
+    assert index.status_code == 200
     assert future.status_code == 200
     assert fx.status_code == 200
     assert bond.status_code == 200
@@ -1292,21 +1336,24 @@ def test_asset_specific_ohlcv_wrappers_preset_asset_class_and_contract_fields() 
     requests = state.loader.loaded_requests
     assert requests[0].asset_class is AssetClass.EQUITY
     assert requests[0].exchange == "SMART"
-    assert requests[1].asset_class is AssetClass.FUTURE
-    assert requests[1].exchange == "CME"
-    assert requests[1].last_trade_date_or_contract_month == "202606"
+    assert requests[1].asset_class is AssetClass.INDEX
+    assert requests[1].exchange == "CBOE"
+    assert requests[1].con_id == 123456
+    assert requests[2].asset_class is AssetClass.FUTURE
+    assert requests[2].exchange == "CME"
+    assert requests[2].last_trade_date_or_contract_month == "202606"
     assert future.json()[0]["contract_month"] is None
     assert future.json()[0]["is_continuous"] is False
-    assert requests[2].asset_class is AssetClass.FX
-    assert requests[2].exchange == "IDEALPRO"
-    assert requests[2].what_to_show == "MIDPOINT"
-    assert requests[2].use_rth is False
+    assert requests[3].asset_class is AssetClass.FX
+    assert requests[3].exchange == "IDEALPRO"
+    assert requests[3].what_to_show == "MIDPOINT"
+    assert requests[3].use_rth is False
     assert fx.json()[0]["base_currency"] == "EUR"
     assert fx.json()[0]["quote_currency"] == "USD"
-    assert requests[3].asset_class is AssetClass.BOND
-    assert requests[3].symbol == "91282CJN2"
-    assert requests[3].sec_id_type == "CUSIP"
-    assert requests[3].sec_id == "91282CJN2"
+    assert requests[4].asset_class is AssetClass.BOND
+    assert requests[4].symbol == "91282CJN2"
+    assert requests[4].sec_id_type == "CUSIP"
+    assert requests[4].sec_id == "91282CJN2"
 
 
 def test_commodity_ohlcv_and_option_wrappers_forward_fop_contract_fields() -> None:
