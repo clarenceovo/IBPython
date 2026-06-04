@@ -50,6 +50,21 @@ from src.feeds.orders import (
 
 logger = logging.getLogger(__name__)
 
+READ_ONLY_ORDER_API_MESSAGE = (
+    "IBKR order API request rejected because the TWS/IB Gateway API interface is in Read-Only mode. "
+    "Disable Read-Only API in TWS/Gateway API settings, reconnect this app, then retry order endpoints."
+)
+
+
+def _is_read_only_api_error(value: Any) -> bool:
+    if value is None:
+        return False
+    try:
+        code, message = value
+    except (TypeError, ValueError):
+        return False
+    return int(code) == 321 and "read-only mode" in str(message).lower()
+
 
 
 class IBKROrderClient:
@@ -201,6 +216,19 @@ class IBKROrderClient:
             order.outsideRth = True
 
         return order
+
+    def _raise_if_order_api_read_only(self) -> None:
+        if _is_read_only_api_error(getattr(self._connection, "last_ibkr_error", None)):
+            raise IBKROrderError(READ_ONLY_ORDER_API_MESSAGE)
+
+    async def _with_order_retry(self, call: Any, *, operation: str) -> Any:
+        self._raise_if_order_api_read_only()
+        try:
+            return await self._connection.with_retry(call, operation=operation)
+        except RuntimeError as exc:
+            if _is_read_only_api_error(getattr(self._connection, "last_ibkr_error", None)):
+                raise IBKROrderError(READ_ONLY_ORDER_API_MESSAGE) from exc
+            raise
 
     async def _preflight_order(self, request: PlaceOrderRequest, *, envelope: OrderEnvelope) -> WhatIfOrderResponse:
         """Run a what-if order before a live submission and reject obvious margin failures."""
@@ -630,7 +658,7 @@ class IBKROrderClient:
         await self._connection.ensure_connected()
         logger.info("load_open_orders: starting")
 
-        trades = await self._connection.with_retry(
+        trades = await self._with_order_retry(
             lambda: self._ib.reqOpenOrdersAsync(),
             operation="open_orders",
         )
@@ -664,7 +692,7 @@ class IBKROrderClient:
         if request.since:
             exec_filter.time = request.since.strftime("%Y%m%d %H:%M:%S")
 
-        fills = await self._connection.with_retry(
+        fills = await self._with_order_retry(
             lambda: self._ib.reqExecutionsAsync(exec_filter),
             operation="executions",
         )
@@ -682,7 +710,7 @@ class IBKROrderClient:
         await self._connection.ensure_connected()
         logger.info("load_completed_orders: starting")
 
-        trades = await self._connection.with_retry(
+        trades = await self._with_order_retry(
             lambda: self._ib.reqCompletedOrdersAsync(),
             operation="completed_orders",
         )

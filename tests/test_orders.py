@@ -235,6 +235,7 @@ class FakeConnection:
     def __init__(self, ib: FakeIB | None = None) -> None:
         self._ib_instance = ib or FakeIB()
         self.rate_limit_calls: list[tuple[str, int]] = []
+        self.last_ibkr_error: tuple[int, str] | None = None
 
     @property
     def ib(self) -> FakeIB:
@@ -802,6 +803,18 @@ class TestIBKROrderClientLoadOpenOrders:
         assert len(result) >= 1
         assert result[0].symbol == "AAPL"
 
+    def test_load_open_orders_rejects_read_only_api_mode(self) -> None:
+        fake_ib = FakeIB()
+        conn = FakeConnection(fake_ib)
+        conn.last_ibkr_error = (321, "Error validating request.-'cq' : cause - The API interface is currently in Read-Only mode.")
+        client = IBKROrderClient(conn)
+
+        async def run() -> None:
+            with pytest.raises(IBKROrderError, match="Read-Only mode"):
+                await client.load_open_orders()
+
+        asyncio.run(run())
+
 
 class TestIBKROrderClientLoadExecutions:
     def test_load_executions(self) -> None:
@@ -909,6 +922,18 @@ class TestIBKROrderClientLoadCompletedOrders:
         assert result[0].symbol == "AAPL"
         assert result[0].filled_quantity == pytest.approx(100)
         assert result[0].avg_fill_price == pytest.approx(150.0)
+
+    def test_load_completed_orders_rejects_read_only_api_mode(self) -> None:
+        fake_ib = FakeIB()
+        conn = FakeConnection(fake_ib)
+        conn.last_ibkr_error = (321, "Error validating request.-'b0' : cause - The API interface is currently in Read-Only mode.")
+        client = IBKROrderClient(conn)
+
+        async def run() -> None:
+            with pytest.raises(IBKROrderError, match="Read-Only mode"):
+                await client.load_completed_orders()
+
+        asyncio.run(run())
 
 
 # ---------------------------------------------------------------------------

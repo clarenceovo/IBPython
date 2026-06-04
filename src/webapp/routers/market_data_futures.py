@@ -33,7 +33,11 @@ router = APIRouter(prefix="/market-data", tags=["market-data"])
 # ---------------------------------------------------------------------------
 
 class FutureOHLCVLoadRequest(MinimalOHLCVLoadControls):
-    symbol: str = Field(min_length=1, examples=["ES"])
+    symbol: str = Field(
+        min_length=1,
+        examples=["ES", "MHI", "VX"],
+        description="Futures root symbol. Examples: ES, MHI, HSI, LE, VX.",
+    )
     exchange: str = Field(
         default="CME",
         min_length=1,
@@ -45,10 +49,26 @@ class FutureOHLCVLoadRequest(MinimalOHLCVLoadControls):
         ),
     )
     currency: str = Field(default="USD", min_length=1)
-    last_trade_date_or_contract_month: str | None = Field(default=None, examples=["202606"])
-    multiplier: str | None = Field(default=None, examples=["50"])
-    local_symbol: str | None = Field(default=None, examples=["ESM6"])
-    con_id: int | None = Field(default=None, gt=0)
+    last_trade_date_or_contract_month: str | None = Field(
+        default=None,
+        examples=["202606"],
+        description="IBKR futures contract month or last trade date. Use YYYYMM or YYYYMMDD.",
+    )
+    multiplier: str | None = Field(
+        default=None,
+        examples=["50"],
+        description="Optional IBKR contract multiplier for ambiguous futures.",
+    )
+    local_symbol: str | None = Field(
+        default=None,
+        examples=["ESM6"],
+        description="Optional IBKR local symbol. Can be used instead of contract month.",
+    )
+    con_id: int | None = Field(
+        default=None,
+        gt=0,
+        description="Optional IBKR contract id. Can be used instead of contract month.",
+    )
 
     @model_validator(mode="after")
     def validate_future_identifier(self) -> "FutureOHLCVLoadRequest":
@@ -74,13 +94,29 @@ class FutureOHLCVLoadRequest(MinimalOHLCVLoadControls):
 # ---------------------------------------------------------------------------
 
 class CommodityOHLCVLoadRequest(MinimalOHLCVLoadControls):
-    symbol: str = Field(min_length=1, examples=["CL", "GC", "NG"])
+    symbol: str = Field(
+        min_length=1,
+        examples=["CL", "GC", "NG", "LE"],
+        description="Commodity futures root. Auto-resolves common CME Group roots to NYMEX, COMEX, CBOT, or CME.",
+    )
     exchange: str | None = Field(default=None, min_length=1, description="Override the commodity preset exchange.")
     currency: str | None = Field(default=None, min_length=1, description="Override the commodity preset currency.")
-    last_trade_date_or_contract_month: str | None = Field(default=None, examples=["202606"])
-    multiplier: str | None = Field(default=None, examples=["1000"])
-    local_symbol: str | None = Field(default=None, examples=["CLM6"])
-    con_id: int | None = Field(default=None, gt=0)
+    last_trade_date_or_contract_month: str | None = Field(
+        default=None,
+        examples=["202606"],
+        description="IBKR futures contract month or last trade date. Use YYYYMM or YYYYMMDD.",
+    )
+    multiplier: str | None = Field(default=None, examples=["1000"], description="Optional IBKR contract multiplier.")
+    local_symbol: str | None = Field(
+        default=None,
+        examples=["CLM6"],
+        description="Optional IBKR local symbol. Can be used instead of contract month.",
+    )
+    con_id: int | None = Field(
+        default=None,
+        gt=0,
+        description="Optional IBKR contract id. Can be used instead of contract month.",
+    )
     use_rth: bool = False
 
     @model_validator(mode="after")
@@ -105,16 +141,31 @@ class CommodityOHLCVLoadRequest(MinimalOHLCVLoadControls):
 
 
 class CommodityOptionOHLCVLoadRequest(MinimalOHLCVLoadControls):
-    underlying_symbol: str = Field(min_length=1, examples=["CL"])
-    expiry: str = Field(min_length=6, examples=["20260617"])
-    strike: float = Field(gt=0, examples=[80.0])
-    right: str = Field(min_length=1, examples=["C"])
-    exchange: str | None = Field(default=None, min_length=1)
-    currency: str | None = Field(default=None, min_length=1)
-    multiplier: str | None = Field(default=None, examples=["1000"])
-    trading_class: str | None = Field(default=None, examples=["LO"])
-    local_symbol: str | None = Field(default=None)
-    con_id: int | None = Field(default=None, gt=0)
+    underlying_symbol: str = Field(min_length=1, examples=["CL"], description="Underlying futures root.")
+    expiry: str = Field(
+        min_length=6,
+        examples=["20260617"],
+        description="IBKR FOP expiry or last trade date. Use YYYYMM or YYYYMMDD.",
+    )
+    strike: float = Field(gt=0, examples=[80.0], description="Futures option strike.")
+    right: str = Field(min_length=1, examples=["C"], description="Option right: C/CALL or P/PUT.")
+    exchange: str | None = Field(default=None, min_length=1, description="Optional IBKR exchange override.")
+    currency: str | None = Field(default=None, min_length=1, description="Optional IBKR currency override.")
+    multiplier: str | None = Field(default=None, examples=["1000"], description="Optional IBKR option multiplier.")
+    trading_class: str | None = Field(
+        default=None,
+        examples=["LO"],
+        description="Optional IBKR trading class for futures options that need disambiguation.",
+    )
+    local_symbol: str | None = Field(
+        default=None,
+        description="Optional IBKR local symbol. Can be used for exact FOP disambiguation.",
+    )
+    con_id: int | None = Field(
+        default=None,
+        gt=0,
+        description="Optional IBKR contract id. Can be used for exact FOP disambiguation.",
+    )
     use_rth: bool = False
 
     @field_validator("right", mode="before")
@@ -511,6 +562,10 @@ async def _load_commodity_news(payload: CommodityNewsRequest, state: IBKRRestApp
     "/ohlcv/futures",
     response_model=list[FutureOHLCVBar],
     summary="Load futures OHLCV with preset asset_class",
+    description=(
+        "Asset-specific futures OHLCV endpoint. It builds an IBKR secType=FUT contract. Provide symbol, exchange, "
+        "currency, and one identifier: last_trade_date_or_contract_month, local_symbol, or con_id."
+    ),
 )
 async def load_futures_ohlcv(
     payload: Annotated[FutureOHLCVLoadRequest, Body(openapi_examples=FUTURES_OHLCV_REQUEST_EXAMPLES)],
@@ -532,6 +587,10 @@ async def load_futures_ohlcv(
     "/ohlcv/commodities",
     response_model=list[FutureOHLCVBar],
     summary="Load commodity futures OHLCV with commodity presets",
+    description=(
+        "Commodity futures OHLCV endpoint. It builds an IBKR secType=FUT contract and auto-resolves common CME "
+        "Group commodity roots to NYMEX, COMEX, CBOT, or CME unless exchange/currency are overridden."
+    ),
 )
 async def load_commodity_ohlcv(
     payload: Annotated[CommodityOHLCVLoadRequest, Body(openapi_examples=COMMODITY_OHLCV_REQUEST_EXAMPLES)],
@@ -553,6 +612,11 @@ async def load_commodity_ohlcv(
     "/ohlcv/commodity-options",
     response_model=list[OptionOHLCVBar],
     summary="Load commodity futures option OHLCV",
+    description=(
+        "Commodity futures option OHLCV endpoint. It builds an IBKR secType=FOP contract. IBKR requires the "
+        "underlying symbol, expiry or last trade date, strike, right, exchange, and currency; trading_class, "
+        "local_symbol, or con_id can be supplied for ambiguous contracts."
+    ),
 )
 async def load_commodity_option_ohlcv(
     payload: Annotated[CommodityOptionOHLCVLoadRequest, Body(openapi_examples=COMMODITY_OPTION_OHLCV_REQUEST_EXAMPLES)],

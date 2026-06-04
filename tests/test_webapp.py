@@ -31,7 +31,7 @@ from src.webapp.app import create_app
 from src.webapp.cache import AsyncTTLCache
 from src.webapp.dependencies import IBKRRestAppState
 from src.webapp.routers.business_shared import resolve_business_symbol
-from src.config.reference_data import resolve_index
+from src.config.reference_data import resolve_future, resolve_index
 
 
 class FakeLoader:
@@ -563,6 +563,7 @@ def test_webapp_registers_domain_routers() -> None:
     assert "/api/v1/system/readiness" in paths
     assert "/api/v1/system/rate-limits" in paths
     assert "/api/v1/market-data/ohlcv" in paths
+    assert "/api/v1/market-data/ohlcv/auto" in paths
     assert "/api/v1/market-data/ohlcv/equity" in paths
     assert "/api/v1/market-data/ohlcv/futures" in paths
     assert "/api/v1/market-data/ohlcv/commodities" in paths
@@ -733,6 +734,8 @@ def test_index_resolution_uses_reference_map_for_business_symbols() -> None:
     assert resolved.exchange == "HKFE"
     assert resolved.currency == "HKD"
     assert resolve_index("RUT") == {"symbol": "RUT", "exchange": "CBOE", "currency": "USD"}
+    assert resolve_future("LE") == {"symbol": "LE", "exchange": "CME", "currency": "USD"}
+    assert resolve_future("VX") == {"symbol": "VX", "exchange": "CFE", "currency": "USD"}
 
 
 def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None:
@@ -741,6 +744,7 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
     paths = app.openapi()["paths"]
 
     generic_examples = paths["/api/v1/market-data/ohlcv"]["post"]["requestBody"]["content"]["application/json"]["examples"]
+    auto_examples = paths["/api/v1/market-data/ohlcv/auto"]["post"]["requestBody"]["content"]["application/json"]["examples"]
     equity_examples = paths["/api/v1/market-data/ohlcv/equity"]["post"]["requestBody"]["content"]["application/json"]["examples"]
     futures_examples = paths["/api/v1/market-data/ohlcv/futures"]["post"]["requestBody"]["content"]["application/json"]["examples"]
     fx_examples = paths["/api/v1/market-data/ohlcv/fx"]["post"]["requestBody"]["content"]["application/json"]["examples"]
@@ -750,6 +754,12 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
     commodity_option_examples = paths["/api/v1/market-data/ohlcv/commodity-options"]["post"]["requestBody"]["content"]["application/json"]["examples"]
 
     assert generic_examples["spy_equity_full_request"]["value"]["request"]["asset_class"] == "equity"
+    assert auto_examples["tsla_equity_auto"]["value"]["interval"] == "5m"
+    assert auto_examples["hsi_future_auto"]["value"]["contract_month"] == "202606"
+    assert "contract_month" not in auto_examples["hsi_index_auto"]["value"]
+    assert auto_examples["mhi_future_auto"]["value"]["symbol"] == "MHI"
+    assert auto_examples["le_commodity_future_auto"]["value"]["symbol"] == "LE"
+    assert auto_examples["vx_cfe_future_auto"]["value"]["symbol"] == "VX"
     assert equity_examples["minimal_spy"]["value"] == {"symbol": "SPY"}
     assert equity_examples["tsla_nasdaq_auto"]["value"] == {"symbol": "TSLA"}
     assert equity_examples["hk_stock_0700"]["value"] == {"symbol": "0700.HK"}
@@ -776,6 +786,10 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
     schemas = app.openapi()["components"]["schemas"]
     assert "start_datetime" in schemas["OHLCVRequest"]["properties"]
     assert "end_datetime" in schemas["OHLCVRequest"]["properties"]
+    assert "starttime" in schemas["UnifiedOHLCVLoadRequest"]["properties"]
+    assert "contract_month" in schemas["UnifiedOHLCVLoadRequest"]["properties"]
+    assert "Options are intentionally excluded" in schemas["UnifiedOHLCVLoadRequest"]["description"]
+    assert "YYYYMM" in schemas["UnifiedOHLCVLoadRequest"]["properties"]["contract_month"]["description"]
     assert "start_datetime" in schemas["EquityOHLCVLoadRequest"]["properties"]
     assert "end_datetime" in schemas["EquityOHLCVLoadRequest"]["properties"]
     assert "contract_month" in schemas["FutureOHLCVBar"]["properties"]
@@ -786,8 +800,93 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
     assert "underlying_symbol" in schemas["OptionOHLCVBar"]["properties"]
     futures_response = paths["/api/v1/market-data/ohlcv/futures"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
     assert futures_response["items"]["$ref"] == "#/components/schemas/FutureOHLCVBar"
+    assert "secType=FUT" in paths["/api/v1/market-data/ohlcv/auto"]["post"]["description"]
+    assert "Options are not accepted" in paths["/api/v1/market-data/ohlcv/auto"]["post"]["description"]
+    assert "secType=FUT" in paths["/api/v1/market-data/ohlcv/futures"]["post"]["description"]
+    assert "secType=FUT" in paths["/api/v1/market-data/ohlcv/commodities"]["post"]["description"]
+    assert "secType=FOP" in paths["/api/v1/market-data/ohlcv/commodity-options"]["post"]["description"]
     fx_response = paths["/api/v1/market-data/ohlcv/fx"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
     assert fx_response["items"]["$ref"] == "#/components/schemas/FXOHLCVBar"
+
+
+def test_integrated_ohlcv_auto_endpoint_resolves_assets_and_contracts() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    start = "2026-06-01T01:15:00Z"
+    end = "2026-06-01T08:00:00Z"
+    with TestClient(app) as client:
+        equity = client.post(
+            "/api/v1/market-data/ohlcv/auto",
+            json={
+                "symbol": "tsla",
+                "starttime": "2026-06-01T13:30:00Z",
+                "endtime": "2026-06-01T20:00:00Z",
+                "interval": "5m",
+                "cache_latest": False,
+            },
+        )
+        future = client.post(
+            "/api/v1/market-data/ohlcv/auto",
+            json={"symbol": "mhi", "contract_month": "202606", "starttime": start, "endtime": end, "interval": "1m", "cache_latest": False},
+        )
+        commodity_future = client.post(
+            "/api/v1/market-data/ohlcv/auto",
+            json={"symbol": "LE", "contract_month": "202606", "starttime": start, "endtime": end, "interval": "1m", "cache_latest": False},
+        )
+        cfe_future = client.post(
+            "/api/v1/market-data/ohlcv/auto",
+            json={"symbol": "VX", "contract_month": "202606", "starttime": start, "endtime": end, "interval": "1m", "cache_latest": False},
+        )
+        fx = client.post(
+            "/api/v1/market-data/ohlcv/auto",
+            json={
+                "symbol": "EURUSD",
+                "starttime": "2026-06-01T00:00:00Z",
+                "endtime": "2026-06-02T00:00:00Z",
+                "interval": "1h",
+                "cache_latest": False,
+            },
+        )
+        index = client.post(
+            "/api/v1/market-data/ohlcv/auto",
+            json={"symbol": "HSI", "starttime": start, "endtime": end, "interval": "1m", "cache_latest": False},
+        )
+
+    assert equity.status_code == 200
+    assert future.status_code == 200
+    assert commodity_future.status_code == 200
+    assert cfe_future.status_code == 200
+    assert fx.status_code == 200
+    assert index.status_code == 200
+
+    requests = [call[0] for call in state.feed.range_calls]
+    assert requests[0].asset_class is AssetClass.EQUITY
+    assert requests[0].symbol == "TSLA"
+    assert requests[0].exchange == "SMART"
+    assert requests[0].primary_exchange == "NASDAQ"
+    assert requests[0].bar_size == "5 mins"
+    assert requests[1].asset_class is AssetClass.FUTURE
+    assert requests[1].symbol == "MHI"
+    assert requests[1].exchange == "HKFE"
+    assert requests[1].currency == "HKD"
+    assert requests[1].last_trade_date_or_contract_month == "202606"
+    assert requests[1].use_rth is False
+    assert requests[2].asset_class is AssetClass.FUTURE
+    assert requests[2].symbol == "LE"
+    assert requests[2].exchange == "CME"
+    assert requests[3].asset_class is AssetClass.FUTURE
+    assert requests[3].symbol == "VX"
+    assert requests[3].exchange == "CFE"
+    assert requests[4].asset_class is AssetClass.FX
+    assert requests[4].exchange == "IDEALPRO"
+    assert requests[4].currency == "USD"
+    assert requests[4].what_to_show == "MIDPOINT"
+    assert requests[4].bar_size == "1 hour"
+    assert requests[5].asset_class is AssetClass.INDEX
+    assert requests[5].symbol == "HSI"
+    assert requests[5].exchange == "HKFE"
+    assert requests[5].currency == "HKD"
 
 
 def test_latest_bar_endpoint_documents_and_forwards_query_params() -> None:

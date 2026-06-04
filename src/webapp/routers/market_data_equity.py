@@ -14,6 +14,7 @@ from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 from src.webapp.routers.market_data_shared import (
     HistoricalOHLCVLoadRequest,
     MinimalOHLCVLoadControls,
+    UnifiedOHLCVLoadRequest,
     load_ohlcv_with_controls,
 )
 
@@ -127,6 +128,83 @@ GENERIC_OHLCV_REQUEST_EXAMPLES = {
     }
 }
 
+UNIFIED_OHLCV_REQUEST_EXAMPLES = {
+    "tsla_equity_auto": {
+        "summary": "TSLA equity auto-resolved",
+        "description": "No contract month resolves TSLA as an equity on SMART/USD with primary_exchange=NASDAQ.",
+        "value": {
+            "symbol": "TSLA",
+            "starttime": "2026-06-01T13:30:00Z",
+            "endtime": "2026-06-01T20:00:00Z",
+            "interval": "5m",
+        },
+    },
+    "hsi_future_auto": {
+        "summary": "HSI future auto-resolved",
+        "description": "contract_month resolves HSI as a HKFE/HKD future.",
+        "value": {
+            "symbol": "HSI",
+            "contract_month": "202606",
+            "starttime": "2026-06-01T01:15:00Z",
+            "endtime": "2026-06-01T08:00:00Z",
+            "interval": "1m",
+        },
+    },
+    "hsi_index_auto": {
+        "summary": "HSI index auto-resolved",
+        "description": "Without contract_month, HSI resolves as an index on HKFE/HKD.",
+        "value": {
+            "symbol": "HSI",
+            "starttime": "2026-06-01T01:15:00Z",
+            "endtime": "2026-06-01T08:00:00Z",
+            "interval": "1m",
+        },
+    },
+    "mhi_future_auto": {
+        "summary": "MHI mini-HSI future auto-resolved",
+        "description": "contract_month resolves MHI as a HKFE/HKD future.",
+        "value": {
+            "symbol": "MHI",
+            "contract_month": "202606",
+            "starttime": "2026-06-01T01:15:00Z",
+            "endtime": "2026-06-01T08:00:00Z",
+            "interval": "1m",
+        },
+    },
+    "le_commodity_future_auto": {
+        "summary": "LE CME commodity future auto-resolved",
+        "description": "contract_month resolves LE as a CME/USD live cattle future.",
+        "value": {
+            "symbol": "LE",
+            "contract_month": "202606",
+            "starttime": "2026-06-01T13:30:00Z",
+            "endtime": "2026-06-01T20:00:00Z",
+            "interval": "1m",
+        },
+    },
+    "vx_cfe_future_auto": {
+        "summary": "VX CFE VIX future auto-resolved",
+        "description": "CBOE VIX futures route through CFE in IBKR. contract_month resolves VX as a CFE/USD future.",
+        "value": {
+            "symbol": "VX",
+            "contract_month": "202606",
+            "starttime": "2026-06-01T13:30:00Z",
+            "endtime": "2026-06-01T20:00:00Z",
+            "interval": "1m",
+        },
+    },
+    "eurusd_fx_auto": {
+        "summary": "EURUSD FX auto-resolved",
+        "description": "Six-letter currency pairs resolve as FX on IDEALPRO with MIDPOINT bars.",
+        "value": {
+            "symbol": "EURUSD",
+            "starttime": "2026-06-01T00:00:00Z",
+            "endtime": "2026-06-02T00:00:00Z",
+            "interval": "1h",
+        },
+    },
+}
+
 EQUITY_OHLCV_REQUEST_EXAMPLES = {
     "minimal_spy": {
         "summary": "Minimal SPY equity bars",
@@ -204,6 +282,36 @@ async def load_ohlcv(
         use_ttl_cache=payload.use_ttl_cache,
         cache_ttl_seconds=payload.cache_ttl_seconds,
         cache_namespace="ohlcv",
+        state=state,
+    )
+
+
+@router.post(
+    "/ohlcv/auto",
+    response_model=list[OHLCVBar],
+    summary="Load OHLCV with automatic asset and contract resolution",
+    description=(
+        "Integrated OHLCV endpoint for compact requests. It auto-detects equity, FX, index, or future, normalizes "
+        "compact intervals such as 1m and 1h, then forwards to the same IBKR historical loader used by the "
+        "asset-specific endpoints. Futures are built as IBKR secType=FUT contracts and must include contract_month, "
+        "local_symbol, or con_id. Options are not accepted here because IBKR OPT/FOP contracts also require strike "
+        "and right; use /market-data/ohlcv/"
+        "commodity-options, /market-data/ohlcv/fx-options, or the option analytics/skew endpoints instead."
+    ),
+)
+async def load_auto_ohlcv(
+    payload: Annotated[UnifiedOHLCVLoadRequest, Body(openapi_examples=UNIFIED_OHLCV_REQUEST_EXAMPLES)],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> list[OHLCVBar]:
+    request = payload.to_request()
+    return await load_ohlcv_with_controls(
+        request=request,
+        start_datetime=payload.starttime,
+        persist=payload.persist,
+        cache_latest=payload.cache_latest,
+        use_ttl_cache=payload.use_ttl_cache,
+        cache_ttl_seconds=payload.cache_ttl_seconds,
+        cache_namespace=f"ohlcv_auto_{request.asset_class.value}",
         state=state,
     )
 

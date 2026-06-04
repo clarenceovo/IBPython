@@ -68,16 +68,83 @@ _INDEX_EXCHANGE_MAP: dict[str, tuple[str, str]] = {
 }
 
 _COMMODITY_FUTURES_PRESETS: dict[str, tuple[str, str]] = {
+    # NYMEX energy
     "CL": ("NYMEX", "USD"),
+    "MCL": ("NYMEX", "USD"),
+    "QM": ("NYMEX", "USD"),
     "NG": ("NYMEX", "USD"),
+    "QG": ("NYMEX", "USD"),
+    "HO": ("NYMEX", "USD"),
+    "RB": ("NYMEX", "USD"),
+    # COMEX metals
     "GC": ("COMEX", "USD"),
+    "MGC": ("COMEX", "USD"),
+    "QO": ("COMEX", "USD"),
     "SI": ("COMEX", "USD"),
+    "SIL": ("COMEX", "USD"),
+    "QI": ("COMEX", "USD"),
     "HG": ("COMEX", "USD"),
+    "QC": ("COMEX", "USD"),
+    "PL": ("NYMEX", "USD"),
+    "PA": ("NYMEX", "USD"),
+    # CBOT grains, oilseeds, and rates
     "ZC": ("CBOT", "USD"),
     "ZS": ("CBOT", "USD"),
     "ZW": ("CBOT", "USD"),
+    "KE": ("CBOT", "USD"),
     "ZL": ("CBOT", "USD"),
     "ZM": ("CBOT", "USD"),
+    "ZO": ("CBOT", "USD"),
+    "ZR": ("CBOT", "USD"),
+    "ZB": ("CBOT", "USD"),
+    "UB": ("CBOT", "USD"),
+    "ZN": ("CBOT", "USD"),
+    "TN": ("CBOT", "USD"),
+    "ZF": ("CBOT", "USD"),
+    "ZT": ("CBOT", "USD"),
+    "ZQ": ("CBOT", "USD"),
+    "SR3": ("CME", "USD"),
+    # CME livestock and dairy
+    "LE": ("CME", "USD"),
+    "GF": ("CME", "USD"),
+    "HE": ("CME", "USD"),
+    "DC": ("CME", "USD"),
+    "CSC": ("CME", "USD"),
+    "DY": ("CME", "USD"),
+}
+
+_FUTURES_EXCHANGE_MAP: dict[str, tuple[str, str]] = {
+    # US equity index futures
+    "ES": ("CME", "USD"),
+    "MES": ("CME", "USD"),
+    "NQ": ("CME", "USD"),
+    "MNQ": ("CME", "USD"),
+    "RTY": ("CME", "USD"),
+    "M2K": ("CME", "USD"),
+    "YM": ("CBOT", "USD"),
+    "MYM": ("CBOT", "USD"),
+    "VX": ("CFE", "USD"),
+    "VXM": ("CFE", "USD"),
+    # Hong Kong index futures
+    "HSI": ("HKFE", "HKD"),
+    "MHI": ("HKFE", "HKD"),
+    "HTI": ("HKFE", "HKD"),
+    "MHT": ("HKFE", "HKD"),
+    "HHI": ("HKFE", "HKD"),
+    "MCH": ("HKFE", "HKD"),
+    # Regional / global index futures
+    "DAX": ("EUREX", "EUR"),
+    "FDAX": ("EUREX", "EUR"),
+    "ESTX50": ("EUREX", "EUR"),
+    "FESX": ("EUREX", "EUR"),
+    "N225": ("OSE.JPN", "JPY"),
+    "N225M": ("OSE.JPN", "JPY"),
+    "XINA": ("SGX", "USD"),
+    "K200": ("KSE", "KRW"),
+    "TX": ("TAIFEX", "TWD"),
+    "MTX": ("TAIFEX", "TWD"),
+    "FTSE100": ("ICEEU", "GBP"),
+    "FCE": ("MONEP", "EUR"),
 }
 
 
@@ -187,6 +254,22 @@ def resolve_index(symbol: str) -> dict[str, str]:
         exchange, currency = index_map[upper]
         return {"symbol": upper, "exchange": exchange, "currency": currency}
     return {"symbol": upper, "exchange": "CBOE", "currency": "USD"}
+
+
+def is_known_index(symbol: str) -> bool:
+    """Return True when a symbol is in the configured index map."""
+    return symbol.strip().upper() in _get_index_exchange_map()
+
+
+def resolve_future(symbol: str) -> dict[str, str]:
+    """Look up IBKR exchange and currency for a known futures root."""
+    upper = symbol.strip().upper()
+    commodity_presets = _get_commodity_futures_presets()
+    if upper in commodity_presets:
+        exchange, currency = commodity_presets[upper]
+        return {"symbol": upper, "exchange": exchange, "currency": currency}
+    exchange, currency = _FUTURES_EXCHANGE_MAP.get(upper, ("CME", "USD"))
+    return {"symbol": upper, "exchange": exchange, "currency": currency}
 
 
 def resolve_commodity_future(symbol: str) -> dict[str, str]:
