@@ -4,7 +4,16 @@ import pytest
 from pydantic import ValidationError
 
 from src.feeds.ibkr_feed import normalize_ibkr_bars
-from src.feeds.models import AssetClass, BaseOHLCVBar, FXOHLCVBar, FutureOHLCVBar, OHLCVBar, OHLCVRequest, OptionOHLCVBar
+from src.feeds.models import (
+    AssetClass,
+    BaseOHLCVBar,
+    FXOHLCVBar,
+    FutureOHLCVBar,
+    OHLCVBar,
+    OHLCVRequest,
+    OptionOHLCVBar,
+    ohlcv_contract_key,
+)
 from src.feeds.snapshotter import fx_pair_parts
 
 
@@ -218,6 +227,25 @@ def test_ibkr_future_bar_normalization_returns_future_ohlcv_dto() -> None:
     assert bars[0].is_continuous is False
 
 
+def test_ibkr_continuous_future_bar_normalization_marks_series_identity() -> None:
+    request = OHLCVRequest(
+        symbol="HSI",
+        asset_class="future",
+        exchange="HKFE",
+        currency="HKD",
+        continuous=True,
+        bar_size="1 min",
+    )
+
+    bars = normalize_ibkr_bars([RawBar()], request)
+
+    assert isinstance(bars[0], FutureOHLCVBar)
+    assert bars[0].contract_month is None
+    assert bars[0].is_continuous is True
+    assert bars[0].metadata["continuous"] is True
+    assert ohlcv_contract_key(bars[0]) == "FUTURE:CONTINUOUS:HSI:HKFE:HKD"
+
+
 def test_ibkr_option_bar_normalization_returns_option_ohlcv_dto_for_fop() -> None:
     request = OHLCVRequest(
         symbol="CL 20260617C80",
@@ -350,6 +378,30 @@ def test_ohlcv_request_accepts_contract_disambiguators() -> None:
 def test_future_ohlcv_request_requires_contract_identifier() -> None:
     with pytest.raises(ValidationError):
         OHLCVRequest(symbol="ES", asset_class="future", exchange="CME", currency="USD")
+
+
+def test_future_ohlcv_request_accepts_continuous_without_contract_identifier() -> None:
+    request = OHLCVRequest(symbol="HSI", asset_class="future", exchange="HKFE", currency="HKD", continuous=True)
+
+    assert request.continuous is True
+    assert request.last_trade_date_or_contract_month is None
+
+
+def test_future_ohlcv_request_rejects_continuous_with_contract_identifier() -> None:
+    with pytest.raises(ValidationError, match="continuous future OHLCV requests cannot include"):
+        OHLCVRequest(
+            symbol="HSI",
+            asset_class="future",
+            exchange="HKFE",
+            currency="HKD",
+            continuous=True,
+            last_trade_date_or_contract_month="202606",
+        )
+
+
+def test_non_future_ohlcv_request_rejects_continuous() -> None:
+    with pytest.raises(ValidationError, match="continuous OHLCV requests are only supported for futures"):
+        OHLCVRequest(symbol="SPY", asset_class="equity", exchange="SMART", currency="USD", continuous=True)
 
 
 def test_option_ohlcv_request_requires_option_identity() -> None:

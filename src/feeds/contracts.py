@@ -20,6 +20,10 @@ class ContractSpec(BaseModel):
     last_trade_date_or_contract_month: str | None = None
     multiplier: str | None = None
     local_symbol: str | None = None
+    continuous: bool = Field(
+        default=False,
+        description="Use IBKR secType=CONTFUT for historical continuous futures data.",
+    )
     option_sec_type: str | None = Field(
         default=None,
         description="IBKR option secType. OPT for stock/index options; FOP for futures options.",
@@ -71,10 +75,13 @@ class ContractSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_asset_specific_fields(self) -> "ContractSpec":
-        if self.asset_class is AssetClass.FUTURE and not (
-            self.last_trade_date_or_contract_month or self.local_symbol or self.con_id
-        ):
-            raise ValueError("futures require last_trade_date_or_contract_month, local_symbol, or con_id")
+        if self.continuous and self.asset_class is not AssetClass.FUTURE:
+            raise ValueError("continuous contracts are only supported for futures")
+        if self.asset_class is AssetClass.FUTURE:
+            if self.continuous and (self.last_trade_date_or_contract_month or self.local_symbol or self.con_id):
+                raise ValueError("continuous futures cannot include last_trade_date_or_contract_month, local_symbol, or con_id")
+            if not self.continuous and not (self.last_trade_date_or_contract_month or self.local_symbol or self.con_id):
+                raise ValueError("futures require last_trade_date_or_contract_month, local_symbol, or con_id")
         if self.asset_class is AssetClass.FX and len(self.symbol) not in {3, 6}:
             raise ValueError("fx symbols must be a base currency or a six-character pair")
         if self.asset_class is AssetClass.OPTION:
@@ -101,6 +108,7 @@ class ContractSpec(BaseModel):
             last_trade_date_or_contract_month=request.last_trade_date_or_contract_month,
             multiplier=request.multiplier,
             local_symbol=request.local_symbol,
+            continuous=request.continuous,
             option_sec_type=request.option_sec_type,
             underlying_symbol=request.underlying_symbol,
             expiry=request.expiry,
@@ -218,19 +226,27 @@ def ibkr_contract_kwargs(spec: ContractSpec) -> dict[str, Any]:
             "currency": quote,
         }
     elif spec.asset_class is AssetClass.FUTURE:
-        local_symbol = spec.local_symbol or _hkfe_local_symbol(symbol, exchange, spec.last_trade_date_or_contract_month)
-        kwargs = {
-            "secType": "FUT",
-            "symbol": symbol,
-            "exchange": exchange,
-            "currency": currency,
-        }
-        if spec.last_trade_date_or_contract_month:
-            kwargs["lastTradeDateOrContractMonth"] = spec.last_trade_date_or_contract_month
-        if spec.multiplier:
-            kwargs["multiplier"] = spec.multiplier
-        if local_symbol:
-            kwargs["localSymbol"] = local_symbol
+        if spec.continuous:
+            kwargs = {
+                "secType": "CONTFUT",
+                "symbol": symbol,
+                "exchange": exchange,
+                "currency": currency,
+            }
+        else:
+            local_symbol = spec.local_symbol or _hkfe_local_symbol(symbol, exchange, spec.last_trade_date_or_contract_month)
+            kwargs = {
+                "secType": "FUT",
+                "symbol": symbol,
+                "exchange": exchange,
+                "currency": currency,
+            }
+            if spec.last_trade_date_or_contract_month:
+                kwargs["lastTradeDateOrContractMonth"] = spec.last_trade_date_or_contract_month
+            if spec.multiplier:
+                kwargs["multiplier"] = spec.multiplier
+            if local_symbol:
+                kwargs["localSymbol"] = local_symbol
     elif spec.asset_class is AssetClass.INDEX:
         kwargs = {
             "secType": "IND",

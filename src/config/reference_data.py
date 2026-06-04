@@ -69,82 +69,93 @@ _INDEX_EXCHANGE_MAP: dict[str, tuple[str, str]] = {
 
 _COMMODITY_FUTURES_PRESETS: dict[str, tuple[str, str]] = {
     # NYMEX energy
-    "CL": ("NYMEX", "USD"),
-    "MCL": ("NYMEX", "USD"),
-    "QM": ("NYMEX", "USD"),
-    "NG": ("NYMEX", "USD"),
-    "QG": ("NYMEX", "USD"),
-    "HO": ("NYMEX", "USD"),
-    "RB": ("NYMEX", "USD"),
+    "CL": ("NYMEX", "USD"),  # WTI Crude Oil
+    "MCL": ("NYMEX", "USD"),  # Micro WTI Crude Oil
+    "QM": ("NYMEX", "USD"),  # E-mini Crude Oil
+    "NG": ("NYMEX", "USD"),  # Henry Hub Natural Gas
+    "QG": ("NYMEX", "USD"),  # E-mini Natural Gas
+    "HO": ("NYMEX", "USD"),  # NY Harbor ULSD
+    "RB": ("NYMEX", "USD"),  # RBOB Gasoline
     # COMEX metals
-    "GC": ("COMEX", "USD"),
-    "MGC": ("COMEX", "USD"),
-    "QO": ("COMEX", "USD"),
-    "SI": ("COMEX", "USD"),
-    "SIL": ("COMEX", "USD"),
-    "QI": ("COMEX", "USD"),
-    "HG": ("COMEX", "USD"),
-    "QC": ("COMEX", "USD"),
-    "PL": ("NYMEX", "USD"),
-    "PA": ("NYMEX", "USD"),
+    "GC": ("COMEX", "USD"),  # Gold
+    "MGC": ("COMEX", "USD"),  # Micro Gold
+    "QO": ("COMEX", "USD"),  # E-mini Gold
+    "SI": ("COMEX", "USD"),  # Silver
+    "SIL": ("COMEX", "USD"),  # Micro Silver
+    "QI": ("COMEX", "USD"),  # E-mini Silver
+    "HG": ("COMEX", "USD"),  # Copper
+    "QC": ("COMEX", "USD"),  # E-mini Copper
+    "PL": ("NYMEX", "USD"),  # Platinum
+    "PA": ("NYMEX", "USD"),  # Palladium
     # CBOT grains, oilseeds, and rates
-    "ZC": ("CBOT", "USD"),
-    "ZS": ("CBOT", "USD"),
-    "ZW": ("CBOT", "USD"),
-    "KE": ("CBOT", "USD"),
-    "ZL": ("CBOT", "USD"),
-    "ZM": ("CBOT", "USD"),
-    "ZO": ("CBOT", "USD"),
-    "ZR": ("CBOT", "USD"),
-    "ZB": ("CBOT", "USD"),
-    "UB": ("CBOT", "USD"),
-    "ZN": ("CBOT", "USD"),
-    "TN": ("CBOT", "USD"),
-    "ZF": ("CBOT", "USD"),
-    "ZT": ("CBOT", "USD"),
-    "ZQ": ("CBOT", "USD"),
-    "SR3": ("CME", "USD"),
+    "ZC": ("CBOT", "USD"),  # Corn
+    "ZS": ("CBOT", "USD"),  # Soybeans
+    "ZW": ("CBOT", "USD"),  # Chicago SRW Wheat
+    "KE": ("CBOT", "USD"),  # KC HRW Wheat
+    "ZL": ("CBOT", "USD"),  # Soybean Oil
+    "ZM": ("CBOT", "USD"),  # Soybean Meal
+    "ZO": ("CBOT", "USD"),  # Oats
+    "ZR": ("CBOT", "USD"),  # Rough Rice
+    "ZB": ("CBOT", "USD"),  # 30-Year Treasury Bond
+    "UB": ("CBOT", "USD"),  # Ultra Treasury Bond
+    "ZN": ("CBOT", "USD"),  # 10-Year Treasury Note
+    "TN": ("CBOT", "USD"),  # Ultra 10-Year Treasury Note
+    "ZF": ("CBOT", "USD"),  # 5-Year Treasury Note
+    "ZT": ("CBOT", "USD"),  # 2-Year Treasury Note
+    "ZQ": ("CBOT", "USD"),  # 30-Day Fed Funds
+    "SR3": ("CME", "USD"),  # 3-Month SOFR
     # CME livestock and dairy
-    "LE": ("CME", "USD"),
-    "GF": ("CME", "USD"),
-    "HE": ("CME", "USD"),
-    "DC": ("CME", "USD"),
-    "CSC": ("CME", "USD"),
-    "DY": ("CME", "USD"),
+    "LE": ("CME", "USD"),  # Live Cattle
+    "GF": ("CME", "USD"),  # Feeder Cattle
+    "HE": ("CME", "USD"),  # Lean Hogs
+    "DC": ("CME", "USD"),  # Class III Milk
+    "CSC": ("CME", "USD"),  # Cash-Settled Cheese
+    "DY": ("CME", "USD"),  # Dry Whey
 }
 
 _FUTURES_EXCHANGE_MAP: dict[str, tuple[str, str]] = {
     # US equity index futures
-    "ES": ("CME", "USD"),
-    "MES": ("CME", "USD"),
-    "NQ": ("CME", "USD"),
-    "MNQ": ("CME", "USD"),
-    "RTY": ("CME", "USD"),
-    "M2K": ("CME", "USD"),
-    "YM": ("CBOT", "USD"),
-    "MYM": ("CBOT", "USD"),
-    "VX": ("CFE", "USD"),
-    "VXM": ("CFE", "USD"),
+    "ES": ("CME", "USD"),  # E-mini S&P 500
+    "MES": ("CME", "USD"),  # Micro E-mini S&P 500
+    "NQ": ("CME", "USD"),  # E-mini Nasdaq-100
+    "MNQ": ("CME", "USD"),  # Micro E-mini Nasdaq-100
+    "EMD": ("CME", "USD"),  # E-mini S&P MidCap 400
+    "RTY": ("CME", "USD"),  # E-mini Russell 2000
+    "M2K": ("CME", "USD"),  # Micro E-mini Russell 2000
+    "YM": ("CBOT", "USD"),  # E-mini Dow Jones Industrial Average
+    "MYM": ("CBOT", "USD"),  # Micro E-mini Dow Jones Industrial Average
+    "VX": ("CFE", "USD"),  # Cboe VIX
+    "VXM": ("CFE", "USD"),  # Mini Cboe VIX
     # Hong Kong index futures
-    "HSI": ("HKFE", "HKD"),
-    "MHI": ("HKFE", "HKD"),
-    "HTI": ("HKFE", "HKD"),
-    "MHT": ("HKFE", "HKD"),
-    "HHI": ("HKFE", "HKD"),
-    "MCH": ("HKFE", "HKD"),
+    "HSI": ("HKFE", "HKD"),  # Hang Seng Index
+    "MHI": ("HKFE", "HKD"),  # Mini-Hang Seng Index
+    "HTI": ("HKFE", "HKD"),  # Hang Seng TECH Index
+    "MHT": ("HKFE", "HKD"),  # Mini-Hang Seng TECH Index
+    "HHI": ("HKFE", "HKD"),  # Hang Seng China Enterprises Index
+    "MCH": ("HKFE", "HKD"),  # Mini-Hang Seng China Enterprises Index
     # Regional / global index futures
-    "DAX": ("EUREX", "EUR"),
-    "FDAX": ("EUREX", "EUR"),
-    "ESTX50": ("EUREX", "EUR"),
-    "FESX": ("EUREX", "EUR"),
-    "N225": ("OSE.JPN", "JPY"),
-    "N225M": ("OSE.JPN", "JPY"),
-    "XINA": ("SGX", "USD"),
-    "K200": ("KSE", "KRW"),
-    "TX": ("TAIFEX", "TWD"),
-    "MTX": ("TAIFEX", "TWD"),
-    "FTSE100": ("ICEEU", "GBP"),
-    "FCE": ("MONEP", "EUR"),
+    "DAX": ("EUREX", "EUR"),  # DAX
+    "FDAX": ("EUREX", "EUR"),  # DAX
+    "ESTX50": ("EUREX", "EUR"),  # Euro Stoxx 50
+    "FESX": ("EUREX", "EUR"),  # Euro Stoxx 50
+    "N225": ("OSE.JPN", "JPY"),  # Nikkei 225
+    "N225M": ("OSE.JPN", "JPY"),  # Nikkei 225 Mini
+    "XINA": ("SGX", "USD"),  # FTSE China A50
+    "K200": ("KSE", "KRW"),  # KOSPI 200
+    "TX": ("TAIFEX", "TWD"),  # TAIEX
+    "MTX": ("TAIFEX", "TWD"),  # Mini-TAIEX
+    "FTSE100": ("ICEEU", "GBP"),  # FTSE 100
+    "FCE": ("MONEP", "EUR"),  # CAC 40
+}
+
+_FUTURES_SYMBOL_ALIASES: dict[str, str] = {
+    # Common shorthand; CME Globex product code for E-mini S&P MidCap 400 is EMD.
+    "EM": "EMD",
+    # Dow Jones Industrial Average futures trade as YM (E-mini) or MYM (micro), not DJI.
+    "DJI": "YM",
+    "DJIA": "YM",
+    "DOW": "YM",
+    "US30": "YM",
 }
 
 
@@ -264,6 +275,7 @@ def is_known_index(symbol: str) -> bool:
 def resolve_future(symbol: str) -> dict[str, str]:
     """Look up IBKR exchange and currency for a known futures root."""
     upper = symbol.strip().upper()
+    upper = _FUTURES_SYMBOL_ALIASES.get(upper, upper)
     commodity_presets = _get_commodity_futures_presets()
     if upper in commodity_presets:
         exchange, currency = commodity_presets[upper]

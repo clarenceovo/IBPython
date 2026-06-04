@@ -227,6 +227,10 @@ class OHLCVRequest(BaseModel):
     last_trade_date_or_contract_month: str | None = None
     multiplier: str | None = None
     local_symbol: str | None = None
+    continuous: bool = Field(
+        default=False,
+        description="Use an IBKR continuous futures contract (CONTFUT) for historical data only.",
+    )
     option_sec_type: str | None = Field(
         default=None,
         description="IBKR option secType. Use OPT for stock/index options and FOP for futures options.",
@@ -316,10 +320,13 @@ class OHLCVRequest(BaseModel):
     def validate_contract_identifiers(self) -> Self:
         if self.start_datetime is not None and self.end_datetime is not None and self.start_datetime >= self.end_datetime:
             raise ValueError("start_datetime must be before end_datetime")
-        if self.asset_class is AssetClass.FUTURE and not (
-            self.last_trade_date_or_contract_month or self.local_symbol or self.con_id
-        ):
-            raise ValueError("future OHLCV requests require last_trade_date_or_contract_month, local_symbol, or con_id")
+        if self.continuous and self.asset_class is not AssetClass.FUTURE:
+            raise ValueError("continuous OHLCV requests are only supported for futures")
+        if self.asset_class is AssetClass.FUTURE:
+            if self.continuous and (self.last_trade_date_or_contract_month or self.local_symbol or self.con_id):
+                raise ValueError("continuous future OHLCV requests cannot include contract_month, local_symbol, or con_id")
+            if not self.continuous and not (self.last_trade_date_or_contract_month or self.local_symbol or self.con_id):
+                raise ValueError("future OHLCV requests require last_trade_date_or_contract_month, local_symbol, or con_id")
         if self.asset_class is AssetClass.BOND and not (self.symbol or self.sec_id or self.con_id):
             raise ValueError("bond OHLCV requests require symbol, sec_id, or con_id")
         if self.asset_class is AssetClass.OPTION:
@@ -397,6 +404,9 @@ def ohlcv_contract_key(bar: Any) -> str:
         )
 
     if bar.asset_class is AssetClass.FUTURE:
+        is_continuous = bool(getattr(bar, "is_continuous", False) or metadata.get("is_continuous") or metadata.get("continuous"))
+        if is_continuous:
+            return _join_contract_key("future", "continuous", bar.symbol, bar.exchange, bar.currency)
         contract_month = (
             getattr(bar, "contract_month", None)
             or metadata.get("contract_month")

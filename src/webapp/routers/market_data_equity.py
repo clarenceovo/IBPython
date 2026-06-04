@@ -150,6 +150,17 @@ UNIFIED_OHLCV_REQUEST_EXAMPLES = {
             "interval": "1m",
         },
     },
+    "hsi_continuous_future_auto": {
+        "summary": "HSI continuous future auto-resolved",
+        "description": "continuous=true resolves HSI as an IBKR CONTFUT historical series on HKFE/HKD.",
+        "value": {
+            "symbol": "HSI",
+            "continuous": True,
+            "starttime": "2026-06-01T01:15:00Z",
+            "endtime": "2026-06-01T08:00:00Z",
+            "interval": "1m",
+        },
+    },
     "hsi_index_auto": {
         "summary": "HSI index auto-resolved",
         "description": "Without contract_month, HSI resolves as an index on HKFE/HKD.",
@@ -157,6 +168,61 @@ UNIFIED_OHLCV_REQUEST_EXAMPLES = {
             "symbol": "HSI",
             "starttime": "2026-06-01T01:15:00Z",
             "endtime": "2026-06-01T08:00:00Z",
+            "interval": "1m",
+        },
+    },
+    "es_future_auto": {
+        "summary": "ES E-mini S&P 500 future auto-resolved",
+        "description": "contract_month resolves ES as a CME/USD equity-index future.",
+        "value": {
+            "symbol": "ES",
+            "contract_month": "202606",
+            "starttime": "2026-06-01T13:30:00Z",
+            "endtime": "2026-06-01T20:00:00Z",
+            "interval": "1m",
+        },
+    },
+    "nq_future_auto": {
+        "summary": "NQ E-mini Nasdaq-100 future auto-resolved",
+        "description": "contract_month resolves NQ as a CME/USD equity-index future.",
+        "value": {
+            "symbol": "NQ",
+            "contract_month": "202606",
+            "starttime": "2026-06-01T13:30:00Z",
+            "endtime": "2026-06-01T20:00:00Z",
+            "interval": "1m",
+        },
+    },
+    "emd_future_auto": {
+        "summary": "EMD E-mini S&P MidCap 400 future auto-resolved",
+        "description": "Use EMD for the CME E-mini S&P MidCap 400 product. EM is accepted as a shorthand alias.",
+        "value": {
+            "symbol": "EMD",
+            "contract_month": "202606",
+            "starttime": "2026-06-01T13:30:00Z",
+            "endtime": "2026-06-01T20:00:00Z",
+            "interval": "1m",
+        },
+    },
+    "dji_future_auto": {
+        "summary": "DJI E-mini Dow future auto-resolved",
+        "description": "DJI is accepted as a shorthand alias and resolves to YM on CBOT/USD.",
+        "value": {
+            "symbol": "DJI",
+            "contract_month": "202606",
+            "starttime": "2026-06-01T13:30:00Z",
+            "endtime": "2026-06-01T20:00:00Z",
+            "interval": "1m",
+        },
+    },
+    "dji_continuous_future_auto": {
+        "summary": "DJI continuous Dow future auto-resolved",
+        "description": "DJI plus continuous=true resolves to the YM continuous historical futures series on CBOT/USD.",
+        "value": {
+            "symbol": "DJI",
+            "continuous": True,
+            "starttime": "2026-06-01T13:30:00Z",
+            "endtime": "2026-06-01T20:00:00Z",
             "interval": "1m",
         },
     },
@@ -293,8 +359,9 @@ async def load_ohlcv(
     description=(
         "Integrated OHLCV endpoint for compact requests. It auto-detects equity, FX, index, or future, normalizes "
         "compact intervals such as 1m and 1h, then forwards to the same IBKR historical loader used by the "
-        "asset-specific endpoints. Futures are built as IBKR secType=FUT contracts and must include contract_month, "
-        "local_symbol, or con_id. Options are not accepted here because IBKR OPT/FOP contracts also require strike "
+        "asset-specific endpoints. Dated futures are built as IBKR secType=FUT contracts and must include "
+        "contract_month, local_symbol, or con_id. continuous=true builds an IBKR secType=CONTFUT contract for "
+        "historical data only. Options are not accepted here because IBKR OPT/FOP contracts also require strike "
         "and right; use /market-data/ohlcv/"
         "commodity-options, /market-data/ohlcv/fx-options, or the option analytics/skew endpoints instead."
     ),

@@ -32,6 +32,7 @@ def test_contract_spec_from_ohlcv_request_preserves_identifiers() -> None:
     assert spec.last_trade_date_or_contract_month == "202606"
     assert spec.multiplier == "50"
     assert spec.local_symbol == "ESM6"
+    assert spec.continuous is False
 
 
 def test_fx_contract_mapping_splits_pair() -> None:
@@ -60,6 +61,29 @@ def test_index_contract_mapping_supports_con_id_override() -> None:
 def test_future_requires_expiry() -> None:
     with pytest.raises(ValueError):
         ContractSpec(symbol="ES", asset_class="future", exchange="CME", currency="USD")
+
+
+def test_continuous_future_contract_mapping_uses_contfut_sec_type() -> None:
+    spec = ContractSpec(symbol="HSI", asset_class="future", exchange="HKFE", currency="HKD", continuous=True)
+
+    assert ibkr_contract_kwargs(spec) == {
+        "secType": "CONTFUT",
+        "symbol": "HSI",
+        "exchange": "HKFE",
+        "currency": "HKD",
+    }
+
+
+def test_continuous_future_contract_mapping_rejects_dated_identifier() -> None:
+    with pytest.raises(ValueError, match="continuous futures cannot include"):
+        ContractSpec(
+            symbol="HSI",
+            asset_class="future",
+            exchange="HKFE",
+            currency="HKD",
+            continuous=True,
+            last_trade_date_or_contract_month="202606",
+        )
 
 
 def test_future_contract_mapping() -> None:

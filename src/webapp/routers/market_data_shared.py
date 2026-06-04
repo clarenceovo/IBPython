@@ -40,7 +40,8 @@ class UnifiedOHLCVLoadRequest(BaseModel):
         json_schema_extra={
             "description": (
                 "Compact OHLCV request that auto-resolves equity, FX, index, and futures contracts. "
-                "Futures are selected when contract_month, local_symbol, or con_id is provided. "
+                "Futures are selected when continuous, contract_month, local_symbol, or con_id is provided. "
+                "continuous=true uses IBKR secType=CONTFUT for historical data only. "
                 "Options are intentionally excluded because IBKR OPT/FOP contracts require expiry, strike, and right; "
                 "use the option-specific endpoints for those requests."
             )
@@ -79,6 +80,13 @@ class UnifiedOHLCVLoadRequest(BaseModel):
             "when IBKR needs an exact expiry. When present, the auto endpoint resolves the request as secType=FUT."
         ),
         examples=["202606"],
+    )
+    continuous: bool = Field(
+        default=False,
+        description=(
+            "Request IBKR continuous futures historical bars using secType=CONTFUT. "
+            "Use this instead of contract_month/local_symbol/con_id. It is historical-data only, not tradable."
+        ),
     )
     asset_class: AssetClass | None = Field(
         default=None,
@@ -165,15 +173,21 @@ class UnifiedOHLCVLoadRequest(BaseModel):
             AssetClass.FUTURE,
         }:
             raise ValueError("integrated OHLCV auto endpoint supports equity, fx, index, and future requests")
-        if self.resolved_asset_class is AssetClass.FUTURE and not (self.contract_month or self.local_symbol or self.con_id):
-            raise ValueError("future auto OHLCV requests require contract_month, local_symbol, or con_id")
+        if self.continuous and self.asset_class not in {None, AssetClass.FUTURE}:
+            raise ValueError("continuous auto OHLCV requests are only supported for futures")
+        if self.continuous and (self.contract_month or self.local_symbol or self.con_id):
+            raise ValueError("continuous future auto OHLCV requests cannot include contract_month, local_symbol, or con_id")
+        if self.resolved_asset_class is AssetClass.FUTURE and not (
+            self.continuous or self.contract_month or self.local_symbol or self.con_id
+        ):
+            raise ValueError("future auto OHLCV requests require continuous=true, contract_month, local_symbol, or con_id")
         return self
 
     @property
     def resolved_asset_class(self) -> AssetClass:
         if self.asset_class is not None:
             return self.asset_class
-        if self.contract_month or self.local_symbol:
+        if self.continuous or self.contract_month or self.local_symbol:
             return AssetClass.FUTURE
         if _looks_like_fx_pair(self.symbol):
             return AssetClass.FX
@@ -197,6 +211,7 @@ class UnifiedOHLCVLoadRequest(BaseModel):
                 multiplier=self.multiplier,
                 local_symbol=self.local_symbol,
                 con_id=self.con_id,
+                continuous=self.continuous,
             )
         if asset_class is AssetClass.FX:
             normalized_symbol = self.symbol.strip().upper()
@@ -426,6 +441,7 @@ def _unified_request(
     multiplier: str | None = None,
     local_symbol: str | None = None,
     con_id: int | None = None,
+    continuous: bool = False,
 ) -> OHLCVRequest:
     return OHLCVRequest(
         symbol=symbol,
@@ -442,6 +458,7 @@ def _unified_request(
         last_trade_date_or_contract_month=last_trade_date_or_contract_month,
         multiplier=multiplier,
         local_symbol=local_symbol,
+        continuous=continuous,
         con_id=con_id,
         metadata=payload.metadata,
     )

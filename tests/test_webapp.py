@@ -20,7 +20,7 @@ from src.feeds.event_contracts import (
 )
 from src.feeds.fixed_income import DeliverableBasketRequest, DeliverableBondInput
 from src.feeds.index_composition import IndexCompositionPayload
-from src.feeds.models import AssetClass, OHLCVBar, OptionOHLCVBar
+from src.feeds.models import AssetClass, FutureOHLCVBar, OHLCVBar, OptionOHLCVBar
 from src.feeds.news import HistoricalNewsHeadline, NewsArticle, NewsProvider
 from src.feeds.options import OptionAnalyticsSnapshot, OptionSkewSurfaceResponse
 from src.feeds.snapshotter import EquitySnapshot, EquitySnapshotCaptureResult, FXOptionSnapshot
@@ -65,6 +65,25 @@ class FakeLoader:
                     multiplier=getattr(request, "multiplier"),
                     trading_class=getattr(request, "trading_class"),
                     con_id=getattr(request, "con_id"),
+                )
+            ]
+        if getattr(request, "asset_class") is AssetClass.FUTURE:
+            return [
+                FutureOHLCVBar(
+                    symbol=symbol,
+                    asset_class=AssetClass.FUTURE,
+                    exchange=getattr(request, "exchange"),
+                    currency=getattr(request, "currency"),
+                    timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    open=100,
+                    high=101,
+                    low=99,
+                    close=100.5,
+                    volume=1000,
+                    bar_size=getattr(request, "bar_size"),
+                    source="test",
+                    contract_month=getattr(request, "last_trade_date_or_contract_month"),
+                    is_continuous=getattr(request, "continuous"),
                 )
             ]
         return [
@@ -736,6 +755,9 @@ def test_index_resolution_uses_reference_map_for_business_symbols() -> None:
     assert resolve_index("RUT") == {"symbol": "RUT", "exchange": "CBOE", "currency": "USD"}
     assert resolve_future("LE") == {"symbol": "LE", "exchange": "CME", "currency": "USD"}
     assert resolve_future("VX") == {"symbol": "VX", "exchange": "CFE", "currency": "USD"}
+    assert resolve_future("EM") == {"symbol": "EMD", "exchange": "CME", "currency": "USD"}
+    assert resolve_future("DJI") == {"symbol": "YM", "exchange": "CBOT", "currency": "USD"}
+    assert resolve_future("DJIA") == {"symbol": "YM", "exchange": "CBOT", "currency": "USD"}
 
 
 def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None:
@@ -756,6 +778,12 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
     assert generic_examples["spy_equity_full_request"]["value"]["request"]["asset_class"] == "equity"
     assert auto_examples["tsla_equity_auto"]["value"]["interval"] == "5m"
     assert auto_examples["hsi_future_auto"]["value"]["contract_month"] == "202606"
+    assert auto_examples["hsi_continuous_future_auto"]["value"]["continuous"] is True
+    assert auto_examples["es_future_auto"]["value"]["symbol"] == "ES"
+    assert auto_examples["nq_future_auto"]["value"]["symbol"] == "NQ"
+    assert auto_examples["emd_future_auto"]["value"]["symbol"] == "EMD"
+    assert auto_examples["dji_future_auto"]["value"]["symbol"] == "DJI"
+    assert auto_examples["dji_continuous_future_auto"]["value"]["continuous"] is True
     assert "contract_month" not in auto_examples["hsi_index_auto"]["value"]
     assert auto_examples["mhi_future_auto"]["value"]["symbol"] == "MHI"
     assert auto_examples["le_commodity_future_auto"]["value"]["symbol"] == "LE"
@@ -765,12 +793,21 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
     assert equity_examples["hk_stock_0700"]["value"] == {"symbol": "0700.HK"}
     assert equity_examples["nasdaq_equity_with_primaryExchange"]["value"]["primary_exchange"] == "NASDAQ"
     assert futures_examples["es_by_contract_month"]["value"]["last_trade_date_or_contract_month"] == "202606"
+    assert futures_examples["es_cme_continuous"]["value"]["continuous"] is True
     assert futures_examples["hsi_hkfe_by_contract_month"]["value"]["symbol"] == "HSI"
     assert futures_examples["hsi_hkfe_by_contract_month"]["value"]["exchange"] == "HKFE"
     assert futures_examples["hsi_hkfe_by_contract_month"]["value"]["currency"] == "HKD"
+    assert futures_examples["hsi_hkfe_continuous"]["value"]["continuous"] is True
     assert futures_examples["hstech_hkfe_by_contract_month"]["value"]["symbol"] == "HTI"
     assert futures_examples["hstech_hkfe_by_contract_month"]["value"]["exchange"] == "HKFE"
     assert futures_examples["hstech_hkfe_by_contract_month"]["value"]["currency"] == "HKD"
+    assert futures_examples["nq_cme_by_contract_month"]["value"]["symbol"] == "NQ"
+    assert futures_examples["nq_cme_continuous"]["value"]["continuous"] is True
+    assert futures_examples["emd_cme_by_contract_month"]["value"]["symbol"] == "EMD"
+    assert futures_examples["emd_cme_continuous"]["value"]["continuous"] is True
+    assert futures_examples["ym_cbot_by_contract_month"]["value"]["symbol"] == "YM"
+    assert futures_examples["ym_cbot_continuous"]["value"]["continuous"] is True
+    assert futures_examples["mym_cbot_by_contract_month"]["value"]["symbol"] == "MYM"
     assert fx_examples["eurusd_minimal"]["value"] == {"symbol": "EURUSD"}
     assert fx_examples["usdjpy_hourly"]["value"]["currency"] == "JPY"
     assert fx_option_examples["eurusd_call"]["value"]["symbol"] == "EURUSD"
@@ -778,6 +815,7 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
     assert bond_examples["treasury_by_cusip"]["value"]["sec_id_type"] == "CUSIP"
     assert bond_examples["bond_by_con_id"]["value"]["con_id"] == 123456789
     assert commodity_examples["cl_crude_nymex"]["value"]["symbol"] == "CL"
+    assert commodity_examples["cl_crude_continuous"]["value"]["continuous"] is True
     assert commodity_examples["gc_gold_comex"]["value"]["symbol"] == "GC"
     assert commodity_examples["ng_by_local_symbol"]["value"]["local_symbol"] == "NGM6"
     assert commodity_option_examples["cl_fop_call"]["value"]["underlying_symbol"] == "CL"
@@ -788,6 +826,7 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
     assert "end_datetime" in schemas["OHLCVRequest"]["properties"]
     assert "starttime" in schemas["UnifiedOHLCVLoadRequest"]["properties"]
     assert "contract_month" in schemas["UnifiedOHLCVLoadRequest"]["properties"]
+    assert "continuous" in schemas["UnifiedOHLCVLoadRequest"]["properties"]
     assert "Options are intentionally excluded" in schemas["UnifiedOHLCVLoadRequest"]["description"]
     assert "YYYYMM" in schemas["UnifiedOHLCVLoadRequest"]["properties"]["contract_month"]["description"]
     assert "start_datetime" in schemas["EquityOHLCVLoadRequest"]["properties"]
@@ -801,9 +840,12 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
     futures_response = paths["/api/v1/market-data/ohlcv/futures"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
     assert futures_response["items"]["$ref"] == "#/components/schemas/FutureOHLCVBar"
     assert "secType=FUT" in paths["/api/v1/market-data/ohlcv/auto"]["post"]["description"]
+    assert "secType=CONTFUT" in paths["/api/v1/market-data/ohlcv/auto"]["post"]["description"]
     assert "Options are not accepted" in paths["/api/v1/market-data/ohlcv/auto"]["post"]["description"]
     assert "secType=FUT" in paths["/api/v1/market-data/ohlcv/futures"]["post"]["description"]
+    assert "secType=CONTFUT" in paths["/api/v1/market-data/ohlcv/futures"]["post"]["description"]
     assert "secType=FUT" in paths["/api/v1/market-data/ohlcv/commodities"]["post"]["description"]
+    assert "secType=CONTFUT" in paths["/api/v1/market-data/ohlcv/commodities"]["post"]["description"]
     assert "secType=FOP" in paths["/api/v1/market-data/ohlcv/commodity-options"]["post"]["description"]
     fx_response = paths["/api/v1/market-data/ohlcv/fx"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
     assert fx_response["items"]["$ref"] == "#/components/schemas/FXOHLCVBar"
@@ -830,6 +872,10 @@ def test_integrated_ohlcv_auto_endpoint_resolves_assets_and_contracts() -> None:
             "/api/v1/market-data/ohlcv/auto",
             json={"symbol": "mhi", "contract_month": "202606", "starttime": start, "endtime": end, "interval": "1m", "cache_latest": False},
         )
+        continuous_future = client.post(
+            "/api/v1/market-data/ohlcv/auto",
+            json={"symbol": "hsi", "continuous": True, "starttime": start, "endtime": end, "interval": "1m", "cache_latest": False},
+        )
         commodity_future = client.post(
             "/api/v1/market-data/ohlcv/auto",
             json={"symbol": "LE", "contract_month": "202606", "starttime": start, "endtime": end, "interval": "1m", "cache_latest": False},
@@ -837,6 +883,10 @@ def test_integrated_ohlcv_auto_endpoint_resolves_assets_and_contracts() -> None:
         cfe_future = client.post(
             "/api/v1/market-data/ohlcv/auto",
             json={"symbol": "VX", "contract_month": "202606", "starttime": start, "endtime": end, "interval": "1m", "cache_latest": False},
+        )
+        dow_future = client.post(
+            "/api/v1/market-data/ohlcv/auto",
+            json={"symbol": "DJI", "contract_month": "202606", "starttime": start, "endtime": end, "interval": "1m", "cache_latest": False},
         )
         fx = client.post(
             "/api/v1/market-data/ohlcv/auto",
@@ -855,8 +905,10 @@ def test_integrated_ohlcv_auto_endpoint_resolves_assets_and_contracts() -> None:
 
     assert equity.status_code == 200
     assert future.status_code == 200
+    assert continuous_future.status_code == 200
     assert commodity_future.status_code == 200
     assert cfe_future.status_code == 200
+    assert dow_future.status_code == 200
     assert fx.status_code == 200
     assert index.status_code == 200
 
@@ -873,20 +925,31 @@ def test_integrated_ohlcv_auto_endpoint_resolves_assets_and_contracts() -> None:
     assert requests[1].last_trade_date_or_contract_month == "202606"
     assert requests[1].use_rth is False
     assert requests[2].asset_class is AssetClass.FUTURE
-    assert requests[2].symbol == "LE"
-    assert requests[2].exchange == "CME"
+    assert requests[2].symbol == "HSI"
+    assert requests[2].exchange == "HKFE"
+    assert requests[2].currency == "HKD"
+    assert requests[2].continuous is True
+    assert requests[2].last_trade_date_or_contract_month is None
+    assert requests[2].use_rth is False
     assert requests[3].asset_class is AssetClass.FUTURE
-    assert requests[3].symbol == "VX"
-    assert requests[3].exchange == "CFE"
-    assert requests[4].asset_class is AssetClass.FX
-    assert requests[4].exchange == "IDEALPRO"
-    assert requests[4].currency == "USD"
-    assert requests[4].what_to_show == "MIDPOINT"
-    assert requests[4].bar_size == "1 hour"
-    assert requests[5].asset_class is AssetClass.INDEX
-    assert requests[5].symbol == "HSI"
-    assert requests[5].exchange == "HKFE"
-    assert requests[5].currency == "HKD"
+    assert requests[3].symbol == "LE"
+    assert requests[3].exchange == "CME"
+    assert requests[4].asset_class is AssetClass.FUTURE
+    assert requests[4].symbol == "VX"
+    assert requests[4].exchange == "CFE"
+    assert requests[5].asset_class is AssetClass.FUTURE
+    assert requests[5].symbol == "YM"
+    assert requests[5].exchange == "CBOT"
+    assert requests[5].currency == "USD"
+    assert requests[6].asset_class is AssetClass.FX
+    assert requests[6].exchange == "IDEALPRO"
+    assert requests[6].currency == "USD"
+    assert requests[6].what_to_show == "MIDPOINT"
+    assert requests[6].bar_size == "1 hour"
+    assert requests[7].asset_class is AssetClass.INDEX
+    assert requests[7].symbol == "HSI"
+    assert requests[7].exchange == "HKFE"
+    assert requests[7].currency == "HKD"
 
 
 def test_latest_bar_endpoint_documents_and_forwards_query_params() -> None:
@@ -1603,12 +1666,17 @@ def test_asset_specific_ohlcv_wrappers_preset_asset_class_and_contract_fields() 
             "/api/v1/market-data/ohlcv/futures",
             json={"symbol": "ES", "last_trade_date_or_contract_month": "202606"},
         )
+        continuous_future = client.post(
+            "/api/v1/market-data/ohlcv/futures",
+            json={"symbol": "HSI", "exchange": "HKFE", "currency": "HKD", "continuous": True},
+        )
         fx = client.post("/api/v1/market-data/ohlcv/fx", json={"symbol": "EURUSD"})
         bond = client.post("/api/v1/market-data/ohlcv/bond", json={"sec_id_type": "CUSIP", "sec_id": "91282CJN2"})
 
     assert equity.status_code == 200
     assert index.status_code == 200
     assert future.status_code == 200
+    assert continuous_future.status_code == 200
     assert fx.status_code == 200
     assert bond.status_code == 200
 
@@ -1621,18 +1689,41 @@ def test_asset_specific_ohlcv_wrappers_preset_asset_class_and_contract_fields() 
     assert requests[2].asset_class is AssetClass.FUTURE
     assert requests[2].exchange == "CME"
     assert requests[2].last_trade_date_or_contract_month == "202606"
-    assert future.json()[0]["contract_month"] is None
+    assert future.json()[0]["contract_month"] == "202606"
     assert future.json()[0]["is_continuous"] is False
-    assert requests[3].asset_class is AssetClass.FX
-    assert requests[3].exchange == "IDEALPRO"
-    assert requests[3].what_to_show == "MIDPOINT"
-    assert requests[3].use_rth is False
+    assert requests[3].asset_class is AssetClass.FUTURE
+    assert requests[3].symbol == "HSI"
+    assert requests[3].exchange == "HKFE"
+    assert requests[3].continuous is True
+    assert continuous_future.json()[0]["contract_month"] is None
+    assert continuous_future.json()[0]["is_continuous"] is True
+    assert requests[4].asset_class is AssetClass.FX
+    assert requests[4].exchange == "IDEALPRO"
+    assert requests[4].what_to_show == "MIDPOINT"
+    assert requests[4].use_rth is False
     assert fx.json()[0]["base_currency"] == "EUR"
     assert fx.json()[0]["quote_currency"] == "USD"
-    assert requests[4].asset_class is AssetClass.BOND
-    assert requests[4].symbol == "91282CJN2"
-    assert requests[4].sec_id_type == "CUSIP"
-    assert requests[4].sec_id == "91282CJN2"
+    assert requests[5].asset_class is AssetClass.BOND
+    assert requests[5].symbol == "91282CJN2"
+    assert requests[5].sec_id_type == "CUSIP"
+    assert requests[5].sec_id == "91282CJN2"
+
+
+def test_futures_wrapper_accepts_em_midcap_shorthand() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/market-data/ohlcv/futures",
+            json={"symbol": "EM", "last_trade_date_or_contract_month": "202606"},
+        )
+
+    assert response.status_code == 200
+    request = state.loader.loaded_requests[0]
+    assert request.asset_class is AssetClass.FUTURE
+    assert request.symbol == "EMD"
+    assert request.exchange == "CME"
 
 
 def test_commodity_ohlcv_and_option_wrappers_forward_fop_contract_fields() -> None:

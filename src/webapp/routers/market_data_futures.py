@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.config.reference_data import resolve_commodity_future as _resolve_commodity_future
+from src.config.reference_data import resolve_future as _resolve_future
 from src.feeds.contracts import ContractSpec
 from src.feeds.models import AssetClass, FutureOHLCVBar, OHLCVBar, OHLCVRequest, OptionOHLCVBar
 from src.feeds.news import HistoricalNewsHeadline, HistoricalNewsRequest, NewsArticle, NewsArticleRequest
@@ -54,6 +55,13 @@ class FutureOHLCVLoadRequest(MinimalOHLCVLoadControls):
         examples=["202606"],
         description="IBKR futures contract month or last trade date. Use YYYYMM or YYYYMMDD.",
     )
+    continuous: bool = Field(
+        default=False,
+        description=(
+            "Request an IBKR continuous futures historical series with secType=CONTFUT. "
+            "Use this instead of last_trade_date_or_contract_month, local_symbol, or con_id."
+        ),
+    )
     multiplier: str | None = Field(
         default=None,
         examples=["50"],
@@ -72,20 +80,25 @@ class FutureOHLCVLoadRequest(MinimalOHLCVLoadControls):
 
     @model_validator(mode="after")
     def validate_future_identifier(self) -> "FutureOHLCVLoadRequest":
-        if not (self.last_trade_date_or_contract_month or self.local_symbol or self.con_id):
-            raise ValueError("futures wrapper requires last_trade_date_or_contract_month, local_symbol, or con_id")
+        if self.continuous and (self.last_trade_date_or_contract_month or self.local_symbol or self.con_id):
+            raise ValueError("continuous futures wrapper cannot include last_trade_date_or_contract_month, local_symbol, or con_id")
+        if not self.continuous and not (self.last_trade_date_or_contract_month or self.local_symbol or self.con_id):
+            raise ValueError("futures wrapper requires continuous=true, last_trade_date_or_contract_month, local_symbol, or con_id")
         return self
 
     def to_request(self) -> OHLCVRequest:
+        resolved = _resolve_future(self.symbol)
         return self.to_ohlcv_request(
             AssetClass.FUTURE,
-            symbol=self.symbol,
+            symbol=resolved["symbol"],
             exchange=self.exchange,
             currency=self.currency,
             last_trade_date_or_contract_month=self.last_trade_date_or_contract_month,
             multiplier=self.multiplier,
             local_symbol=self.local_symbol,
             con_id=self.con_id,
+            continuous=self.continuous,
+            metadata={**self.metadata, "is_continuous": self.continuous},
         )
 
 
@@ -106,6 +119,13 @@ class CommodityOHLCVLoadRequest(MinimalOHLCVLoadControls):
         examples=["202606"],
         description="IBKR futures contract month or last trade date. Use YYYYMM or YYYYMMDD.",
     )
+    continuous: bool = Field(
+        default=False,
+        description=(
+            "Request an IBKR continuous commodity futures historical series with secType=CONTFUT. "
+            "Use this instead of last_trade_date_or_contract_month, local_symbol, or con_id."
+        ),
+    )
     multiplier: str | None = Field(default=None, examples=["1000"], description="Optional IBKR contract multiplier.")
     local_symbol: str | None = Field(
         default=None,
@@ -121,8 +141,10 @@ class CommodityOHLCVLoadRequest(MinimalOHLCVLoadControls):
 
     @model_validator(mode="after")
     def validate_future_identifier(self) -> "CommodityOHLCVLoadRequest":
-        if not (self.last_trade_date_or_contract_month or self.local_symbol or self.con_id):
-            raise ValueError("commodity OHLCV requires last_trade_date_or_contract_month, local_symbol, or con_id")
+        if self.continuous and (self.last_trade_date_or_contract_month or self.local_symbol or self.con_id):
+            raise ValueError("continuous commodity OHLCV cannot include last_trade_date_or_contract_month, local_symbol, or con_id")
+        if not self.continuous and not (self.last_trade_date_or_contract_month or self.local_symbol or self.con_id):
+            raise ValueError("commodity OHLCV requires continuous=true, last_trade_date_or_contract_month, local_symbol, or con_id")
         return self
 
     def to_request(self) -> OHLCVRequest:
@@ -136,7 +158,8 @@ class CommodityOHLCVLoadRequest(MinimalOHLCVLoadControls):
             multiplier=self.multiplier,
             local_symbol=self.local_symbol,
             con_id=self.con_id,
-            metadata={**self.metadata, "market": "commodity"},
+            continuous=self.continuous,
+            metadata={**self.metadata, "market": "commodity", "is_continuous": self.continuous},
         )
 
 
@@ -367,6 +390,11 @@ FUTURES_OHLCV_REQUEST_EXAMPLES = {
         "description": "Futures require an expiry/contract month, local_symbol, or con_id.",
         "value": {"symbol": "ES", "exchange": "CME", "currency": "USD", "last_trade_date_or_contract_month": "202606", "start_datetime": "2026-05-01T13:30:00Z", "end_datetime": "2026-05-01T20:00:00Z", "duration": "1 D", "bar_size": "1 min"},
     },
+    "es_cme_continuous": {
+        "summary": "ES continuous future",
+        "description": "Historical continuous E-mini S&P 500 futures use IBKR secType=CONTFUT and do not require a contract month.",
+        "value": {"symbol": "ES", "exchange": "CME", "currency": "USD", "continuous": True, "duration": "1 D", "bar_size": "1 min", "what_to_show": "TRADES", "use_rth": False},
+    },
     "es_by_local_symbol": {
         "summary": "ES future by local symbol",
         "description": "Use local_symbol when that is how the contract is represented in TWS.",
@@ -376,6 +404,11 @@ FUTURES_OHLCV_REQUEST_EXAMPLES = {
         "summary": "Hang Seng Index future",
         "description": "HKEX Hang Seng Index futures use product code HSI. Use HKFE/HKD for IBKR routing.",
         "value": {"symbol": "HSI", "exchange": "HKFE", "currency": "HKD", "last_trade_date_or_contract_month": "202606", "duration": "1 D", "bar_size": "1 min", "what_to_show": "TRADES"},
+    },
+    "hsi_hkfe_continuous": {
+        "summary": "Hang Seng Index continuous future",
+        "description": "Historical continuous futures use IBKR secType=CONTFUT and do not require a contract month.",
+        "value": {"symbol": "HSI", "exchange": "HKFE", "currency": "HKD", "continuous": True, "duration": "1 D", "bar_size": "1 min", "what_to_show": "TRADES", "use_rth": False},
     },
     "hstech_hkfe_by_contract_month": {
         "summary": "Hang Seng TECH Index future",
@@ -407,10 +440,35 @@ FUTURES_OHLCV_REQUEST_EXAMPLES = {
         "description": "Nasdaq 100 E-mini on CME. Symbol NQ/USD.",
         "value": {"symbol": "NQ", "exchange": "CME", "currency": "USD", "last_trade_date_or_contract_month": "202606", "duration": "1 D", "bar_size": "1 min", "what_to_show": "TRADES"},
     },
+    "nq_cme_continuous": {
+        "summary": "NQ continuous future",
+        "description": "Historical continuous E-mini Nasdaq-100 futures use IBKR secType=CONTFUT and do not require a contract month.",
+        "value": {"symbol": "NQ", "exchange": "CME", "currency": "USD", "continuous": True, "duration": "1 D", "bar_size": "1 min", "what_to_show": "TRADES", "use_rth": False},
+    },
+    "emd_cme_by_contract_month": {
+        "summary": "E-mini S&P MidCap 400 future",
+        "description": "CME E-mini S&P MidCap 400 futures use product code EMD. EM is accepted by the auto resolver as a shorthand alias.",
+        "value": {"symbol": "EMD", "exchange": "CME", "currency": "USD", "last_trade_date_or_contract_month": "202606", "duration": "1 D", "bar_size": "1 min", "what_to_show": "TRADES"},
+    },
+    "emd_cme_continuous": {
+        "summary": "EMD continuous future",
+        "description": "Historical continuous E-mini S&P MidCap 400 futures use IBKR secType=CONTFUT and do not require a contract month.",
+        "value": {"symbol": "EMD", "exchange": "CME", "currency": "USD", "continuous": True, "duration": "1 D", "bar_size": "1 min", "what_to_show": "TRADES", "use_rth": False},
+    },
     "ym_cbot_by_contract_month": {
         "summary": "Dow Jones E-mini future",
         "description": "Dow Jones E-mini on CBOT. Symbol YM/USD.",
         "value": {"symbol": "YM", "exchange": "CBOT", "currency": "USD", "last_trade_date_or_contract_month": "202606", "duration": "1 D", "bar_size": "1 min", "what_to_show": "TRADES"},
+    },
+    "ym_cbot_continuous": {
+        "summary": "YM continuous Dow future",
+        "description": "Historical continuous E-mini Dow futures use IBKR secType=CONTFUT and do not require a contract month.",
+        "value": {"symbol": "YM", "exchange": "CBOT", "currency": "USD", "continuous": True, "duration": "1 D", "bar_size": "1 min", "what_to_show": "TRADES", "use_rth": False},
+    },
+    "mym_cbot_by_contract_month": {
+        "summary": "MYM Micro E-mini Dow future",
+        "description": "Micro E-mini Dow on CBOT. Symbol MYM/USD.",
+        "value": {"symbol": "MYM", "exchange": "CBOT", "currency": "USD", "last_trade_date_or_contract_month": "202606", "duration": "1 D", "bar_size": "1 min", "what_to_show": "TRADES"},
     },
     "rty_cme_by_contract_month": {
         "summary": "Russell 2000 E-mini future",
@@ -449,6 +507,11 @@ COMMODITY_OHLCV_REQUEST_EXAMPLES = {
         "summary": "CL crude oil future",
         "description": "CL auto-resolves to NYMEX/USD and uses futures OHLCV under the hood.",
         "value": {"symbol": "CL", "last_trade_date_or_contract_month": "202606", "duration": "1 D", "bar_size": "1 min"},
+    },
+    "cl_crude_continuous": {
+        "summary": "CL crude oil continuous future",
+        "description": "continuous=true uses IBKR secType=CONTFUT for historical continuous futures bars.",
+        "value": {"symbol": "CL", "continuous": True, "duration": "1 D", "bar_size": "1 min"},
     },
     "gc_gold_comex": {
         "summary": "GC gold future",
@@ -563,8 +626,9 @@ async def _load_commodity_news(payload: CommodityNewsRequest, state: IBKRRestApp
     response_model=list[FutureOHLCVBar],
     summary="Load futures OHLCV with preset asset_class",
     description=(
-        "Asset-specific futures OHLCV endpoint. It builds an IBKR secType=FUT contract. Provide symbol, exchange, "
-        "currency, and one identifier: last_trade_date_or_contract_month, local_symbol, or con_id."
+        "Asset-specific futures OHLCV endpoint. Dated futures build an IBKR secType=FUT contract and require "
+        "one identifier: last_trade_date_or_contract_month, local_symbol, or con_id. continuous=true builds an "
+        "IBKR secType=CONTFUT contract for historical data only."
     ),
 )
 async def load_futures_ohlcv(
@@ -588,8 +652,9 @@ async def load_futures_ohlcv(
     response_model=list[FutureOHLCVBar],
     summary="Load commodity futures OHLCV with commodity presets",
     description=(
-        "Commodity futures OHLCV endpoint. It builds an IBKR secType=FUT contract and auto-resolves common CME "
-        "Group commodity roots to NYMEX, COMEX, CBOT, or CME unless exchange/currency are overridden."
+        "Commodity futures OHLCV endpoint. Dated contracts build an IBKR secType=FUT contract and auto-resolve "
+        "common CME Group commodity roots to NYMEX, COMEX, CBOT, or CME unless exchange/currency are overridden. "
+        "continuous=true builds an IBKR secType=CONTFUT contract for historical data only."
     ),
 )
 async def load_commodity_ohlcv(

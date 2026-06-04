@@ -250,7 +250,7 @@ def _format_ibkr_end_datetime(value: datetime | None) -> str:
 
 
 def _expired_future_end_datetime(contract: Any, request: OHLCVRequest) -> datetime | None:
-    if request.asset_class is not AssetClass.FUTURE or request.end_datetime is not None:
+    if request.asset_class is not AssetClass.FUTURE or request.continuous or request.end_datetime is not None:
         return None
     last_trade = _contract_text(contract, "lastTradeDateOrContractMonth")
     if len(last_trade) != 8 or not last_trade.isdigit():
@@ -313,6 +313,7 @@ def _normalized_ibkr_volume(value: Any) -> float:
 def normalize_ibkr_bars(bars: Sequence[Any], request: OHLCVRequest) -> list[OHLCVBar]:
     normalized: list[OHLCVBar] = []
     bar_model = _ohlcv_bar_model_for_request(request)
+    is_continuous_future = request.asset_class is AssetClass.FUTURE and request.continuous
     for bar in bars:
         normalized.append(
             bar_model(
@@ -331,7 +332,7 @@ def normalize_ibkr_bars(bars: Sequence[Any], request: OHLCVRequest) -> list[OHLC
                 **(
                     {
                         "contract_month": request.last_trade_date_or_contract_month,
-                        "is_continuous": bool(request.metadata.get("is_continuous", False)),
+                        "is_continuous": bool(is_continuous_future or request.metadata.get("is_continuous", False)),
                     }
                     if request.asset_class is AssetClass.FUTURE
                     else {}
@@ -365,6 +366,8 @@ def normalize_ibkr_bars(bars: Sequence[Any], request: OHLCVRequest) -> list[OHLC
                     "con_id": request.con_id,
                     "local_symbol": request.local_symbol,
                     "contract_month": request.last_trade_date_or_contract_month,
+                    "is_continuous": bool(is_continuous_future or request.metadata.get("is_continuous", False)),
+                    "continuous": request.continuous,
                     "expiry": request.expiry,
                     "strike": request.strike,
                     "right": request.right,
@@ -381,6 +384,7 @@ def _historical_identical_key(request: OHLCVRequest) -> tuple[Any, ...]:
         request.asset_class,
         request.exchange,
         request.currency,
+        request.continuous,
         request.start_datetime,
         request.end_datetime,
         request.duration,
@@ -395,6 +399,7 @@ def _historical_same_contract_key(request: OHLCVRequest) -> tuple[Any, ...]:
         request.symbol,
         request.asset_class,
         request.exchange,
+        request.continuous,
         request.what_to_show.upper(),
     )
 
