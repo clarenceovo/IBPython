@@ -259,6 +259,7 @@ Router split:
 - `POST /api/v1/business/getUniverseBars`
 - `POST /api/v1/business/getReturns`
 - `POST /api/v1/business/getOptionSkew`
+- `POST /api/v1/business/portfolio/getRiskSnapshot`
 - `POST /api/v1/business/fixed-income/getBondFutureQuotes`
 - `POST /api/v1/business/fixed-income/getCTD`
 - `POST /api/v1/business/fixed-income/getFuturesImpliedCurve`
@@ -326,6 +327,7 @@ Research wrappers:
 - `POST /api/v1/business/getUniverseBars`: load bars for explicit symbols or a Redis index composition.
 - `POST /api/v1/business/getReturns`: close-to-close simple/log returns, cumulative return, and realized volatility.
 - `POST /api/v1/business/getOptionSkew`: minimal symbol-level wrapper over bounded option skew.
+- `POST /api/v1/business/portfolio/getRiskSnapshot`: read-only liquidity, leverage, PnL, exposure, and concentration snapshot from existing IBKR account/portfolio feeds.
 
 Fixed-income business wrappers:
 

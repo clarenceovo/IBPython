@@ -225,7 +225,7 @@ QuestDB remains the default scheduler/snapshotter market-data store. To route OH
 
 Main route groups:
 
-- `/api/v1/business/*`: research-friendly wrappers for curves, news, market panels, returns, option skew, and commodity futures
+- `/api/v1/business/*`: research-friendly wrappers for curves, news, market panels, returns, option skew, commodity futures, and portfolio risk
 - `/api/v1/business/event-contracts/*`: ForecastEx/CME Event Contract discovery, snapshots, history, websocket message helpers, and guarded Web API order tickets
 - `/api/v1/business/fixed-income/*`: bond futures quotes, CTD analytics, futures-implied curves, and cash/futures curve comparison
 - `/api/v1/system/*`: health, readiness, rate-limit diagnostics, and TTL cache controls
@@ -246,6 +246,7 @@ POST /api/v1/business/getUniverseBars
 POST /api/v1/business/getReturns
 POST /api/v1/business/getOptionSkew
 POST /api/v1/business/commodities/getFutures
+POST /api/v1/business/portfolio/getRiskSnapshot
 POST /api/v1/business/fixed-income/getBondFutureQuotes
 POST /api/v1/business/fixed-income/getCTD
 POST /api/v1/business/fixed-income/getFuturesImpliedCurve
@@ -583,6 +584,14 @@ curl -X POST http://localhost:8000/api/v1/business/getSymbolNews \
 ```
 
 `getSymbolNews` resolves the symbol to an IBKR `conId`, uses entitled news providers when `provider_codes` is omitted, then returns historical headlines. Set `include_articles=true` when you also need article bodies; this makes extra IBKR article requests. Real-time news is intentionally not part of the business wrapper because IBKR real-time news uses long-lived market-data/news subscriptions.
+
+Portfolio risk business endpoint:
+
+```text
+POST /api/v1/business/portfolio/getRiskSnapshot
+```
+
+`getRiskSnapshot` turns existing IBKR account summary, portfolio, position, and account PnL primitives into a single read-only risk view: liquidity fields, leverage, live account PnL, position exposure, currency/asset-class exposure, and top concentrations. If account PnL is unavailable, the endpoint returns the account/position snapshot with a warning instead of failing the whole response. It does not call Client Portal Web API or open any durable market-data database connection.
 
 Example business market panel request:
 

@@ -111,7 +111,7 @@ def create_app(
             "# IBKR REST API\n\n"
             "Async FastAPI bridge for Interactive Brokers TWS/Gateway.\n\n"
             "## Modules\n"
-            "- **Business** — Research-friendly wrappers for curves, news, market panels, returns, option skew, commodity futures, and Event Contracts\n"
+            "- **Business** — Research-friendly wrappers for curves, news, market panels, returns, option skew, commodity futures, portfolio risk, and Event Contracts\n"
             "- **Fixed Income** — IBKR bond futures prices, CTD analytics, and futures-implied curves\n"
             "- **Market Data** — OHLCV bars, FX/commodity options, option analytics/skew, bond yields, latest bars, snapshots\n"
             "- **Reference Data** — Option chains, fundamentals, WSH events, news, contract search\n"
@@ -152,7 +152,7 @@ def create_app(
             {"url": "http://localhost:8000", "description": "Local development"},
         ],
         openapi_tags=[
-            {"name": "business", "description": "Research-friendly wrappers for curves, symbol news, market panels, returns, option skew, commodity futures, and ForecastEx/CME Event Contracts"},
+            {"name": "business", "description": "Research-friendly wrappers for curves, symbol news, market panels, returns, option skew, commodity futures, portfolio risk, and ForecastEx/CME Event Contracts"},
             {"name": "system", "description": "Health checks, rate-limit diagnostics, and cache management"},
             {"name": "market-data", "description": "OHLCV bars, FX/commodity options, option analytics/skew, snapshots, bond yields, and latest bar queries"},
             {"name": "reference-data", "description": "Option chains, fundamental data, Wall Street Horizon events, news, and contract search"},

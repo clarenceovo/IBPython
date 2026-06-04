@@ -7,13 +7,17 @@ import logging
 import math
 import time as monotonic_time
 from collections.abc import Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from src.feeds.contracts import OptionChain, OptionChainRequest, build_ibkr_contract
+from src.feeds.exchange_resolver import resolve_equity
+from src.feeds.exceptions import IBKRContractResolutionError
 from src.feeds.ibkr_connection import (
     IBKRConnectionManager,
     acquire_market_data_line,
     _contract_int,
+    _last_ibkr_error_message,
     _root_cause_message,
     wait_for_ibkr_request,
 )
@@ -90,6 +94,127 @@ def _ibkr_sec_type_for_option_underlying(asset_class: AssetClass) -> str:
     if asset_class is AssetClass.INDEX:
         return "IND"
     raise ValueError(f"unsupported option underlying asset class: {asset_class}")
+
+
+def _option_contract_label(contract: OptionContractSpec) -> str:
+    return (
+        f"{contract.underlying_symbol} {contract.expiry} "
+        f"{contract.right.value}{contract.strike:g} "
+        f"{contract.sec_type}/{contract.exchange}/{contract.currency}"
+    )
+
+
+def _nearest_expirations(expirations: Sequence[str], requested: str, *, limit: int = 5) -> tuple[str, ...]:
+    requested_key = _expiry_sort_key(requested)
+
+    def score(expiry: str) -> tuple[int, str]:
+        expiry_key = _expiry_sort_key(expiry)
+        return abs(expiry_key - requested_key), expiry
+
+    return tuple(sorted(expirations, key=score)[:limit])
+
+
+def _expiry_sort_key(expiry: str) -> int:
+    for fmt in ("%Y%m%d", "%Y%m"):
+        try:
+            return datetime.strptime(expiry, fmt).date().toordinal()
+        except ValueError:
+            continue
+    return int(expiry) if expiry.isdigit() else 0
+
+
+def _nearest_strikes(strikes: Sequence[float], requested: float, *, limit: int = 5) -> tuple[float, ...]:
+    return tuple(sorted(strikes, key=lambda strike: (abs(strike - requested), strike))[:limit])
+
+
+def _select_diagnostic_option_chain(chains: Sequence[OptionChain], contract: OptionContractSpec) -> OptionChain | None:
+    if not chains:
+        return None
+
+    def score(chain: OptionChain) -> int:
+        value = 0
+        if contract.trading_class and chain.trading_class == contract.trading_class:
+            value += 1_000
+        if chain.exchange == contract.exchange:
+            value += 500
+        if contract.exchange == "SMART" and chain.exchange == "SMART":
+            value += 200
+        if chain.multiplier == contract.multiplier:
+            value += 100
+        if contract.expiry in chain.expirations:
+            value += 50
+        if contract.strike in chain.strikes:
+            value += 50
+        value += min(len(chain.expirations), 25)
+        return value
+
+    return max(chains, key=score)
+
+
+def format_unqualified_option_message(
+    contract: OptionContractSpec,
+    *,
+    chains: Sequence[OptionChain] = (),
+    last_ibkr_error: tuple[int, str] | None = None,
+) -> str:
+    """Build a caller-facing diagnostic for an option IBKR cannot qualify."""
+
+    base = f"IBKR could not qualify option contract {_option_contract_label(contract)}."
+    chain = _select_diagnostic_option_chain(chains, contract)
+    if chain is None:
+        return (
+            f"{base} Confirm the expiry, strike, right, exchange, multiplier, and trading_class. "
+            f"For equity/index options, discover valid expirations and strikes with load_option_chains first. "
+            f"{_last_ibkr_error_message(last_ibkr_error)}"
+        )
+
+    details: list[str] = [
+        f"matched_chain={chain.exchange}/{chain.trading_class}/multiplier={chain.multiplier}."
+    ]
+    if contract.expiry not in chain.expirations:
+        nearest = ", ".join(_nearest_expirations(chain.expirations, contract.expiry))
+        details.append(f"expiry {contract.expiry} is not listed; nearest listed expirations: {nearest}.")
+    if contract.strike not in chain.strikes:
+        nearest = ", ".join(f"{strike:g}" for strike in _nearest_strikes(chain.strikes, contract.strike))
+        details.append(f"strike {contract.strike:g} is not listed in this chain; nearest strikes: {nearest}.")
+    if contract.expiry in chain.expirations and contract.strike in chain.strikes:
+        details.append("expiry and strike are listed, so check right, exchange, multiplier, trading_class, or permissions.")
+    if not contract.trading_class and chain.trading_class:
+        details.append(f"Try trading_class='{chain.trading_class}'.")
+
+    return f"{base} {' '.join(details)} {_last_ibkr_error_message(last_ibkr_error)}"
+
+
+def option_chain_requests_for_diagnostics(contract: OptionContractSpec) -> tuple[OptionChainRequest, ...]:
+    """Return conservative chain discovery attempts for an unqualified option."""
+
+    if contract.sec_type != "OPT":
+        return ()
+
+    requests: list[OptionChainRequest] = []
+    try:
+        resolved = resolve_equity(contract.underlying_symbol)
+        requests.append(
+            OptionChainRequest(
+                symbol=resolved.symbol,
+                asset_class=AssetClass.EQUITY,
+                exchange=contract.exchange,
+                currency=contract.currency,
+                primary_exchange=resolved.primary_exchange or None,
+            )
+        )
+    except ValueError:
+        pass
+
+    requests.append(
+        OptionChainRequest(
+            symbol=contract.underlying_symbol,
+            asset_class=AssetClass.INDEX,
+            exchange=contract.exchange,
+            currency=contract.currency,
+        )
+    )
+    return tuple(requests)
 
 
 def normalize_ibkr_option_chains(
@@ -175,6 +300,9 @@ class IBKROptionsFeedClient:
         )
         if qualified:
             contract = qualified[0]
+        else:
+            error = await self._unqualified_option_error(request.contract)
+            raise error
         generic_tick_list = request.generic_tick_list
         use_snapshot = not generic_tick_list
         if generic_tick_list and request.regulatory_snapshot:
@@ -218,6 +346,29 @@ class IBKROptionsFeedClient:
             except Exception:
                 logger.debug("Failed to cancel market data subscription for %s", request.contract.underlying_symbol, exc_info=True)
             await lease.release()
+
+    async def _unqualified_option_error(self, contract: OptionContractSpec) -> IBKRContractResolutionError:
+        chains: list[OptionChain] = []
+        for chain_request in option_chain_requests_for_diagnostics(contract):
+            try:
+                chains = await self.load_option_chains(chain_request)
+            except Exception:
+                logger.debug(
+                    "option diagnostic chain lookup failed for %s as %s",
+                    contract.underlying_symbol,
+                    chain_request.asset_class,
+                    exc_info=True,
+                )
+                continue
+            if chains:
+                break
+        return IBKRContractResolutionError(
+            format_unqualified_option_message(
+                contract,
+                chains=chains,
+                last_ibkr_error=self._connection.last_ibkr_error,
+            )
+        )
 
     async def capture_fx_option_snapshots(
         self,

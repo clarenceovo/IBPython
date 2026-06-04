@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from src.config.settings import Settings
-from src.feeds.account import LivePositionDTO
+from src.feeds.account import AccountPnLDTO, AccountSummaryDTO, AccountValueDTO, LivePositionDTO, PortfolioItemDTO
 from src.feeds.bonds import BondInstrument
 from src.feeds.event_contracts import (
     EventContractHistoryBar,
@@ -154,6 +154,10 @@ class FakeFeed:
         self.fx_option_snapshot_requests: list[tuple[object, ...]] = []
         self.equity_snapshot_requests: list[tuple[tuple[str, str, str, str, int], ...]] = []
         self.cancelled_equity_tickers: list[object] = []
+        self.account_summary_requests: list[str] = []
+        self.portfolio_item_requests: list[str] = []
+        self.account_pnl_requests: list[tuple[str, str, float]] = []
+        self.raise_account_pnl = False
         self.provider_calls = 0
         self.news_providers = [NewsProvider(provider_code="BZ", provider_name="Benzinga")]
 
@@ -337,6 +341,73 @@ class FakeFeed:
             )
         ]
 
+    async def load_account_summary(self, account: str = "") -> list[AccountSummaryDTO]:
+        self.account_summary_requests.append(account)
+        return [
+            AccountSummaryDTO(
+                account="DU123",
+                values={
+                    "NetLiquidation": AccountValueDTO(account="DU123", tag="NetLiquidation", value="100000", currency="USD"),
+                    "TotalCashValue": AccountValueDTO(account="DU123", tag="TotalCashValue", value="25000", currency="USD"),
+                    "AvailableFunds": AccountValueDTO(account="DU123", tag="AvailableFunds", value="75000", currency="USD"),
+                    "ExcessLiquidity": AccountValueDTO(account="DU123", tag="ExcessLiquidity", value="70000", currency="USD"),
+                    "Cushion": AccountValueDTO(account="DU123", tag="Cushion", value="0.70", currency=""),
+                    "GrossPositionValue": AccountValueDTO(account="DU123", tag="GrossPositionValue", value="50000", currency="USD"),
+                },
+            )
+        ]
+
+    async def load_portfolio_items(self, account: str = "") -> list[PortfolioItemDTO]:
+        self.portfolio_item_requests.append(account)
+        return [
+            PortfolioItemDTO(
+                account="DU123",
+                con_id=123,
+                symbol="AAPL",
+                sec_type="STK",
+                exchange="NASDAQ",
+                currency="USD",
+                position=10,
+                market_price=160,
+                market_value=1600,
+                average_cost=150,
+                unrealized_pnl=100,
+                realized_pnl=10,
+            ),
+            PortfolioItemDTO(
+                account="DU123",
+                con_id=456,
+                symbol="EUR",
+                sec_type="CASH",
+                exchange="IDEALPRO",
+                currency="USD",
+                position=-5000,
+                market_price=1.1,
+                market_value=-5500,
+                average_cost=1.12,
+                unrealized_pnl=-100,
+                realized_pnl=0,
+            ),
+        ]
+
+    async def load_account_pnl_snapshot(
+        self,
+        account: str,
+        model_code: str = "",
+        *,
+        wait_seconds: float = 1.2,
+    ) -> AccountPnLDTO:
+        self.account_pnl_requests.append((account, model_code, wait_seconds))
+        if self.raise_account_pnl:
+            raise RuntimeError("simulated PnL timeout")
+        return AccountPnLDTO(
+            account=account,
+            model_code=model_code,
+            daily_pnl=250,
+            unrealized_pnl=100,
+            realized_pnl=150,
+        )
+
     # -- Order management stubs for FakeFeed --
 
     async def place_order(self, request: object) -> object:
@@ -508,6 +579,7 @@ def test_webapp_registers_domain_routers() -> None:
     assert "/api/v1/business/getNewsArticle" in paths
     assert "/api/v1/business/getMarketPanel" in paths
     assert "/api/v1/business/commodities/getFutures" in paths
+    assert "/api/v1/business/portfolio/getRiskSnapshot" in paths
     assert "/api/v1/business/fixed-income/getBondFutureQuotes" in paths
     assert "/api/v1/business/fixed-income/getCTD" in paths
     assert "/api/v1/business/fixed-income/getFuturesImpliedCurve" in paths
@@ -658,7 +730,7 @@ def test_index_resolution_uses_reference_map_for_business_symbols() -> None:
     resolved = resolve_business_symbol(symbol="HSI", asset_class=AssetClass.INDEX)
 
     assert resolved.symbol == "HSI"
-    assert resolved.exchange == "SEHK"
+    assert resolved.exchange == "HKFE"
     assert resolved.currency == "HKD"
     assert resolve_index("RUT") == {"symbol": "RUT", "exchange": "CBOE", "currency": "USD"}
 
@@ -797,6 +869,112 @@ def test_business_news_provider_endpoint_uses_ttl_cache_and_openapi() -> None:
     assert operation["tags"] == ["business"]
 
 
+def test_business_portfolio_risk_snapshot_aggregates_account_and_position_risk() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/business/portfolio/getRiskSnapshot",
+            json={"account": "DU123", "use_ttl_cache": False},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["account"] == "DU123"
+    assert payload["base_currency"] == "USD"
+    assert payload["net_liquidation"] == 100000
+    assert payload["total_cash_value"] == 25000
+    assert payload["available_funds"] == 75000
+    assert payload["excess_liquidity"] == 70000
+    assert payload["cushion"] == 0.70
+    assert payload["gross_position_value"] == 50000
+    assert payload["leverage"] == 0.5
+    assert payload["daily_pnl"] == 250
+    assert payload["unrealized_pnl"] == 100
+    assert payload["realized_pnl"] == 150
+    assert [position["symbol"] for position in payload["positions"]] == ["AAPL", "EUR"]
+    assert payload["positions"][0]["gross_exposure"] == 1600
+    assert payload["positions"][0]["weight_of_net_liquidation"] == 0.016
+    assert {row["key"]: row["gross_exposure"] for row in payload["exposures_by_asset_class"]} == {
+        "CASH": 5500,
+        "STK": 1600,
+    }
+    assert payload["exposures_by_currency"] == [
+        {"key": "USD", "gross_exposure": 7100, "net_exposure": -3900, "market_value": -3900, "weight_of_net_liquidation": 0.071}
+    ]
+    assert payload["top_concentrations"][0]["symbol"] == "EUR"
+    assert payload["warnings"] == []
+    assert state.feed.account_summary_requests == ["DU123"]
+    assert state.feed.portfolio_item_requests == ["DU123"]
+    assert state.feed.account_pnl_requests == [("DU123", "", 1.2)]
+
+
+def test_business_portfolio_risk_snapshot_uses_ttl_cache() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        first = client.post(
+            "/api/v1/business/portfolio/getRiskSnapshot",
+            json={"account": "DU123", "cache_ttl_seconds": 5},
+        )
+        second = client.post(
+            "/api/v1/business/portfolio/getRiskSnapshot",
+            json={"account": "DU123", "cache_ttl_seconds": 5},
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["net_liquidation"] == second.json()["net_liquidation"]
+    assert state.feed.account_summary_requests == ["DU123"]
+
+
+def test_business_portfolio_risk_snapshot_isolates_account_pnl_failure() -> None:
+    state = FakeState()
+    state.feed.raise_account_pnl = True
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/business/portfolio/getRiskSnapshot",
+            json={"account": "DU123", "use_ttl_cache": False},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["net_liquidation"] == 100000
+    assert payload["positions"][0]["symbol"] == "AAPL"
+    assert payload["daily_pnl"] is None
+    assert payload["warnings"] == ["account PnL unavailable: simulated PnL timeout"]
+
+
+def test_business_portfolio_risk_snapshot_openapi_schema_is_registered() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+    spec = app.openapi()
+
+    operation = spec["paths"]["/api/v1/business/portfolio/getRiskSnapshot"]["post"]
+    assert operation["tags"] == ["business"]
+    content = operation["requestBody"]["content"]["application/json"]
+    assert content["schema"]["$ref"] == "#/components/schemas/BusinessPortfolioRiskRequest"
+    assert content["examples"]["account_risk"]["value"]["cache_ttl_seconds"] == 5
+    response_schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+    assert response_schema["$ref"] == "#/components/schemas/BusinessPortfolioRiskResponse"
+
+    schemas = spec["components"]["schemas"]
+    request_properties = schemas["BusinessPortfolioRiskRequest"]["properties"]
+    response_properties = schemas["BusinessPortfolioRiskResponse"]["properties"]
+    position_properties = schemas["BusinessPortfolioPosition"]["properties"]
+
+    assert request_properties["include_account_pnl"]["default"] is True
+    assert request_properties["include_positions"]["default"] is True
+    assert request_properties["cache_ttl_seconds"]["default"] == 5
+    assert "exposures_by_asset_class" in response_properties
+    assert "top_concentrations" in response_properties
+    assert "weight_of_net_liquidation" in position_properties
+
+
 def test_business_swagger_examples_are_loaded_from_markdown() -> None:
     state = FakeState()
     app = create_app(settings=state.settings, state=state)
@@ -804,6 +982,7 @@ def test_business_swagger_examples_are_loaded_from_markdown() -> None:
 
     symbol_news_examples = paths["/api/v1/business/getSymbolNews"]["post"]["requestBody"]["content"]["application/json"]["examples"]
     market_panel_examples = paths["/api/v1/business/getMarketPanel"]["post"]["requestBody"]["content"]["application/json"]["examples"]
+    portfolio_examples = paths["/api/v1/business/portfolio/getRiskSnapshot"]["post"]["requestBody"]["content"]["application/json"]["examples"]
     returns_examples = paths["/api/v1/business/getReturns"]["post"]["requestBody"]["content"]["application/json"]["examples"]
     option_skew_examples = paths["/api/v1/business/getOptionSkew"]["post"]["requestBody"]["content"]["application/json"]["examples"]
     fixed_income_examples = paths["/api/v1/business/fixed-income/getBondFutureQuotes"]["post"]["requestBody"]["content"]["application/json"][
@@ -816,6 +995,7 @@ def test_business_swagger_examples_are_loaded_from_markdown() -> None:
 
     assert symbol_news_examples["tsla_news"]["value"]["symbol"] == "TSLA"
     assert market_panel_examples["us_equity_panel"]["value"]["symbols"] == ["SPY", "QQQ", "TSLA"]
+    assert portfolio_examples["account_risk"]["value"]["account"] == "DU123456"
     assert returns_examples["us_equity_returns"]["value"]["bar_size"] == "5 mins"
     assert option_skew_examples["tsla_skew"]["value"]["primary_exchange"] == "NASDAQ"
     assert fixed_income_examples["ust_futures_quotes"]["value"]["market"] == "UST"

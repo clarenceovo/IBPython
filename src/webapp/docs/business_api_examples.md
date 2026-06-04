@@ -66,6 +66,24 @@ payload.
 }
 ```
 
+## Portfolio Risk
+
+<!-- openapi-example: business.portfolio.getRiskSnapshot account_risk -->
+### Account risk snapshot
+Summarize liquidity, leverage, PnL, exposures, and position concentration from
+the existing IBKR account and portfolio feeds.
+
+```json
+{
+  "account": "DU123456",
+  "include_account_pnl": true,
+  "include_positions": true,
+  "wait_seconds": 1.2,
+  "use_ttl_cache": true,
+  "cache_ttl_seconds": 5
+}
+```
+
 ## Fixed Income
 
 <!-- openapi-example: business.fixedIncome.getBondFutureQuotes ust_futures_quotes -->

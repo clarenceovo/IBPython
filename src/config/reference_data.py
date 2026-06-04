@@ -33,10 +33,10 @@ _INDEX_EXCHANGE_MAP: dict[str, tuple[str, str]] = {
     "DJI": ("CBOE", "USD"),
     "OEX": ("CBOE", "USD"),
     "NDXP": ("CBOE", "USD"),
-    # Hong Kong
-    "HSI": ("SEHK", "HKD"),
-    "HSCEI": ("SEHK", "HKD"),
-    "HSTECH": ("SEHK", "HKD"),
+    # Hong Kong index underlyings route through HKFE in IBKR TWS.
+    "HSI": ("HKFE", "HKD"),
+    "HSCEI": ("HKFE", "HKD"),
+    "HSTECH": ("HKFE", "HKD"),
     # Japan
     "NIKKEI": ("TSEJ", "JPY"),
     "NKY": ("TSEJ", "JPY"),

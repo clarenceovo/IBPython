@@ -119,7 +119,9 @@ from src.feeds.ibkr_options_feed import (
     IBKROptionsFeedClient,
     _ticker_snapshot_price,
     _finite_positive,
+    format_unqualified_option_message,
     normalize_ibkr_option_chains,
+    option_chain_requests_for_diagnostics,
 )
 from src.feeds.ibkr_account_feed import IBKRAccountFeedClient
 from src.feeds.ibkr_reference_feed import (
@@ -489,6 +491,9 @@ class IBKRFeedClient:
         )
         if qualified:
             contract = qualified[0]
+        else:
+            error = await self._unqualified_option_error(request.contract)
+            raise error
         generic_tick_list = request.generic_tick_list
         use_snapshot = not generic_tick_list
         if generic_tick_list and request.regulatory_snapshot:
@@ -532,6 +537,29 @@ class IBKRFeedClient:
             except Exception:
                 logger.debug("Failed to cancel market data subscription for %s", request.contract.underlying_symbol, exc_info=True)
             await lease.release()
+
+    async def _unqualified_option_error(self, contract: OptionContractSpec) -> IBKRContractResolutionError:
+        chains: list[OptionChain] = []
+        for chain_request in option_chain_requests_for_diagnostics(contract):
+            try:
+                chains = await self.load_option_chains(chain_request)
+            except Exception:
+                logger.debug(
+                    "option diagnostic chain lookup failed for %s as %s",
+                    contract.underlying_symbol,
+                    chain_request.asset_class,
+                    exc_info=True,
+                )
+                continue
+            if chains:
+                break
+        return IBKRContractResolutionError(
+            format_unqualified_option_message(
+                contract,
+                chains=chains,
+                last_ibkr_error=self._last_ibkr_error,
+            )
+        )
 
     async def capture_fx_option_snapshots(
         self,

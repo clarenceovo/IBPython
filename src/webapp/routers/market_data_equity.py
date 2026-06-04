@@ -72,7 +72,7 @@ class IndexOHLCVLoadRequest(MinimalOHLCVLoadControls):
         examples=["SPX", "NDX", "HSI", "DAX"],
         description=(
             "Index symbol as recognized by IBKR. "
-            "SPX → CBOE/USD, NDX → CBOE/USD, HSI → SEHK/HKD, DAX → EUREX/EUR. "
+            "SPX → CBOE/USD, NDX → CBOE/USD, HSI → HKFE/HKD, DAX → EUREX/EUR. "
             "Use the exchange/currency overrides for less common indices."
         ),
     )
@@ -179,7 +179,7 @@ INDEX_OHLCV_REQUEST_EXAMPLES = {
     "vix_us": {"summary": "CBOE Volatility Index (VIX)", "description": "Auto-resolves to CBOE/USD.", "value": {"symbol": "VIX"}},
     "rut_us": {"summary": "Russell 2000 (RUT)", "description": "Auto-resolves to CBOE/USD.", "value": {"symbol": "RUT"}},
     "dji_us": {"summary": "Dow Jones Industrial Average (DJI)", "description": "Auto-resolves to CBOE/USD.", "value": {"symbol": "DJI"}},
-    "hsi_hk": {"summary": "Hang Seng Index (HSI)", "description": "Auto-resolves to SEHK/HKD.", "value": {"symbol": "HSI"}},
+    "hsi_hk": {"summary": "Hang Seng Index (HSI)", "description": "Auto-resolves to HKFE/HKD.", "value": {"symbol": "HSI"}},
     "dax_de": {"summary": "DAX (DAX)", "description": "Auto-resolves to EUREX/EUR.", "value": {"symbol": "DAX"}},
     "nikkei_jp": {"summary": "Nikkei 225 (NIKKEI)", "description": "Auto-resolves to TSEJ/JPY.", "value": {"symbol": "NIKKEI"}},
     "ftse100_uk": {"summary": "FTSE 100 (UK)", "description": "Auto-resolves to LSE/GBP.", "value": {"symbol": "FTSE100"}},
