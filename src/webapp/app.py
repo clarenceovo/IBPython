@@ -15,11 +15,6 @@ from src.transport.metrics import MetricsMiddleware, metrics
 from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
 from src.webapp.middleware.correlation import CorrelationIdFilter, CorrelationIdMiddleware
 from src.webapp.middleware.request_timeout import RequestTimeoutMiddleware
-
-# Maximum request body size (10 MB). Prevents memory exhaustion from
-# unbounded payloads.
-_MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
-
 from src.webapp.middleware.body_limit import RequestBodyLimitMiddleware
 from src.webapp.routers import (
     account,
@@ -203,7 +198,8 @@ def create_app(
     fastapi_app.add_middleware(CorrelationIdMiddleware)
     # Request deadline — prevents slow clients from occupying workers forever.
     fastapi_app.add_middleware(RequestTimeoutMiddleware, timeout_seconds=resolved_settings.ibkr_rest_request_timeout_seconds)
-    # Reject oversized request bodies.
+    # Reject oversized request bodies (10 MB).
+    _MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
     fastapi_app.add_middleware(RequestBodyLimitMiddleware, max_bytes=_MAX_REQUEST_BODY_BYTES)
 
     # API-wide bearer auth — wraps all endpoints when IBKR_API_BEARER_TOKEN is set
