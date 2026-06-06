@@ -51,7 +51,7 @@ def test_tool_count():
             for d in node.decorator_list
         )
     ]
-    assert len(tools) == 15, f"Expected 15 MCP tools, found {len(tools)}: {tools}"
+    assert len(tools) == 41, f"Expected 41 MCP tools, found {len(tools)}: {tools}"
 
 
 def test_resource_count():
@@ -99,6 +99,32 @@ def test_expected_tools_present():
         "load_news",
         "query_equity_snapshots",
         "query_fx_option_snapshots",
+        "load_portfolio_items",
+        "load_account_pnl",
+        "load_position_pnl",
+        "load_news_providers",
+        "load_news_article",
+        "load_wsh_metadata",
+        "load_wsh_event_data",
+        "load_economic_calendar",
+        "get_latest_equity_snapshots",
+        "get_latest_fx_option_snapshot",
+        "get_all_latest_equity_snapshots",
+        "list_snapshot_watchlists",
+        "get_snapshot_watchlist",
+        "load_option_analytics",
+        "load_option_skew_surface",
+        "get_latest_ticks",
+        "load_historical_ticks",
+        "calculate_iv",
+        "calculate_option_price",
+        "get_head_timestamp",
+        "scan_contracts",
+        "load_bond_yield_history",
+        "get_market_depth",
+        "get_ibkr_rate_limits",
+        "get_scheduler_health",
+        "get_cache_stats",
     }
     missing = expected - tools
     assert not missing, f"Missing tools: {missing}"
