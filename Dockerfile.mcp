@@ -18,5 +18,11 @@ COPY src ./src
 COPY PROJECT_SETUP_ARCHITECTURE.md .
 COPY README.md .
 
-# stdio transport by default; override command for HTTP mode
+RUN adduser --disabled-password --gecos "" appuser
+USER appuser
+
+EXPOSE 9000
+
+# MCP streamable HTTP transport — binds 0.0.0.0:9000 inside container.
+# Auth is handled by MCPBearerAuthMiddleware when MCP_API_KEY is set.
 CMD ["python", "-m", "src.mcp_server"]
