@@ -16,6 +16,11 @@ class IBKRPacingError(IBKRError):
     pass
 
 
+class IBKRMarketDataLeaseTimeoutError(IBKRPacingError):
+    """No market-data line was available within the request budget."""
+    pass
+
+
 class IBKRCircuitOpenError(IBKRError):
     """Circuit breaker is open — fast-failing."""
     pass
@@ -23,6 +28,11 @@ class IBKRCircuitOpenError(IBKRError):
 
 class IBKRContractResolutionError(IBKRError):
     """Contract could not be qualified/resolved."""
+    pass
+
+
+class IBKRMarketDataUnavailableError(IBKRError):
+    """Requested live market data was unavailable within the request budget."""
     pass
 
 

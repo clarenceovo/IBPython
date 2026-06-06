@@ -77,6 +77,21 @@ class Settings(BaseModel):
         alias=constants.IBKR_REST_MARKET_DATA_CACHE_MAXSIZE_ENV,
         gt=0,
     )
+    ibkr_market_depth_request_timeout_seconds: float = Field(
+        default=constants.DEFAULT_IBKR_MARKET_DEPTH_REQUEST_TIMEOUT_SECONDS,
+        alias=constants.IBKR_MARKET_DEPTH_REQUEST_TIMEOUT_SECONDS_ENV,
+        gt=0,
+    )
+    ibkr_market_depth_lease_wait_seconds: float = Field(
+        default=constants.DEFAULT_IBKR_MARKET_DEPTH_LEASE_WAIT_SECONDS,
+        alias=constants.IBKR_MARKET_DEPTH_LEASE_WAIT_SECONDS_ENV,
+        gt=0,
+    )
+    ibkr_market_depth_cache_ttl_seconds: float = Field(
+        default=constants.DEFAULT_IBKR_MARKET_DEPTH_CACHE_TTL_SECONDS,
+        alias=constants.IBKR_MARKET_DEPTH_CACHE_TTL_SECONDS_ENV,
+        ge=0,
+    )
     ibkr_rest_ohlcv_rate_limit_retry_delay_seconds: float = Field(
         default=constants.DEFAULT_IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS,
         alias=constants.IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS_ENV,

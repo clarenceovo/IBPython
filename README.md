@@ -230,7 +230,7 @@ Main route groups:
 - `/api/v1/business/fixed-income/*`: bond futures quotes, CTD analytics, futures-implied curves, and cash/futures curve comparison
 - `/api/v1/system/*`: health, readiness, rate-limit diagnostics, and TTL cache controls
 - `/api/v1/market-data/*`: OHLCV, latest Redis bars, option analytics, commodity futures/options, bond yield history
-- `/api/v1/reference-data/*`: option chains, fundamentals, WSH events, news
+- `/api/v1/reference-data/*`: option chains, fundamentals, WSH events/economic calendar, news
 - `/api/v1/account/*`: account summary, live positions, portfolio, PnL snapshots
 - `/api/v1/orders/*`: protected order lifecycle, execution lookup, what-if preview, and order-envelope cache
 
@@ -277,6 +277,9 @@ GET  /api/v1/snapshot/fx-options/latest
 POST /api/v1/snapshot/fx-options/query
 POST /api/v1/reference-data/options/chains
 POST /api/v1/reference-data/fundamentals
+GET  /api/v1/reference-data/wsh/metadata
+POST /api/v1/reference-data/wsh/events
+POST /api/v1/reference-data/economic-calendar
 GET  /api/v1/reference-data/news/providers
 POST /api/v1/reference-data/news/historical
 POST /api/v1/reference-data/news/article
@@ -550,11 +553,17 @@ Fixed-income research endpoints:
 POST /api/v1/business/fixed-income/getBondFutureQuotes
 POST /api/v1/business/fixed-income/getCTD
 POST /api/v1/business/fixed-income/getFuturesImpliedCurve
+POST /api/v1/business/fixed-income/getBondYieldCurve
 POST /api/v1/business/fixed-income/getCashBondCurve
 POST /api/v1/business/fixed-income/getCurveComparison
+POST /api/v1/business/fixed-income/getFedFundsFuturesRate
 ```
 
 `getBondFutureQuotes` uses IBKR historical OHLCV on futures contracts and accepts the business minimum: `market` plus `contract_month` for the default curve futures, or an explicit `futures` list. For IBKR futures qualification the generated contract request uses `symbol`, `exchange`, `currency`, and one of `contract_month`, `local_symbol`, or `con_id`. `getCTD`, `getFuturesImpliedCurve`, and `getCurveComparison` additionally require `FIXED_INCOME_REFERENCE_PROVIDER`, because IBKR does not provide a complete official CTD delivery basket or conversion-factor feed through the standard TWS historical bar API. To make these routes work in local demos, set `FIXED_INCOME_REFERENCE_PROVIDER=src.feeds.fixed_income_reference:provider`; that built-in provider is indicative only and must not be used for trading, backtesting, or risk. IBKR currently documents historical/live bar limitations for OSE, so treat JGB futures as entitlement/feed dependent and validate with your gateway before relying on them in production.
+
+`getBondYieldCurve` is the single sovereign curve API for `UST`, `JGB`, and `BUND`/`GERMAN_BUND`. Use `source_mode="futures_implied"` with `contract_month` or explicit futures plus `FIXED_INCOME_REFERENCE_PROVIDER` for an IBKR futures-price-backed CTD curve. Use `source_mode="indicative_placeholder"` for the built-in standard-tenor workflow stub, or `source_mode="auto"` with `allow_indicative_fallback=true` when you explicitly accept fallback. IBKR historical yield fields are documented as corporate-bond-only, so this endpoint does not pretend there is a direct IBKR UST/JGB/Bund sovereign yield-curve feed.
+
+`getFedFundsFuturesRate` loads 30-Day Fed Funds futures (`ZQ`, CBOT/USD) from IBKR and returns the implied average rate as `100 - futures_price`. This is an IBKR-native futures proxy, not the official overnight effective Fed Funds fixing; use Federal Reserve/FRED-style benchmark data for the actual overnight time series.
 
 Commodity business endpoint:
 

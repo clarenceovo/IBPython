@@ -19,6 +19,9 @@ def test_default_config_values_come_from_config_constants() -> None:
     assert values["ibkr_rest_market_data_cache_maxsize"] == constants.DEFAULT_IBKR_REST_MARKET_DATA_CACHE_MAXSIZE
     assert values["ibkr_rest_ohlcv_rate_limit_retry_delay_seconds"] == constants.DEFAULT_IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS
     assert values["ibkr_rest_ohlcv_rate_limit_retry_count"] == constants.DEFAULT_IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT
+    assert values["ibkr_market_depth_request_timeout_seconds"] == constants.DEFAULT_IBKR_MARKET_DEPTH_REQUEST_TIMEOUT_SECONDS
+    assert values["ibkr_market_depth_lease_wait_seconds"] == constants.DEFAULT_IBKR_MARKET_DEPTH_LEASE_WAIT_SECONDS
+    assert values["ibkr_market_depth_cache_ttl_seconds"] == constants.DEFAULT_IBKR_MARKET_DEPTH_CACHE_TTL_SECONDS
     assert values["ibkr_equity_snapshot_wait_seconds"] == constants.DEFAULT_IBKR_EQUITY_SNAPSHOT_WAIT_SECONDS
     assert values["ibkr_historical_max_chunks"] == constants.DEFAULT_IBKR_HISTORICAL_MAX_CHUNKS
 
@@ -34,6 +37,9 @@ def test_env_name_constants_are_canonical_names() -> None:
     assert constants.MARKET_DATA_DB_BACKEND_ENV == "MARKET_DATA_DB_BACKEND"
     assert constants.IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS_ENV == "IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS"
     assert constants.IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT_ENV == "IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT"
+    assert constants.IBKR_MARKET_DEPTH_REQUEST_TIMEOUT_SECONDS_ENV == "IBKR_MARKET_DEPTH_REQUEST_TIMEOUT_SECONDS"
+    assert constants.IBKR_MARKET_DEPTH_LEASE_WAIT_SECONDS_ENV == "IBKR_MARKET_DEPTH_LEASE_WAIT_SECONDS"
+    assert constants.IBKR_MARKET_DEPTH_CACHE_TTL_SECONDS_ENV == "IBKR_MARKET_DEPTH_CACHE_TTL_SECONDS"
 
 
 def test_config_loader_uses_defaults_when_env_file_is_missing() -> None:
@@ -54,6 +60,9 @@ def test_config_loader_ignores_blank_dotenv_values_and_parses_types(tmp_path: Pa
                 "MARKET_DATA_DB_BACKEND=MYSQL",
                 "IBKR_REST_CONNECT_ON_STARTUP=true",
                 "IBKR_REST_MARKET_DATA_TTL_SECONDS=12.5",
+                "IBKR_MARKET_DEPTH_REQUEST_TIMEOUT_SECONDS=4",
+                "IBKR_MARKET_DEPTH_LEASE_WAIT_SECONDS=0.5",
+                "IBKR_MARKET_DEPTH_CACHE_TTL_SECONDS=0.1",
                 "IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS=45",
                 "IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT=2",
                 "IBKR_EQUITY_SNAPSHOT_WAIT_SECONDS=9.5",
@@ -71,6 +80,9 @@ def test_config_loader_ignores_blank_dotenv_values_and_parses_types(tmp_path: Pa
     assert values["market_data_db_backend"] == "mysql"
     assert values["ibkr_rest_connect_on_startup"] is True
     assert values["ibkr_rest_market_data_ttl_seconds"] == 12.5
+    assert values["ibkr_market_depth_request_timeout_seconds"] == 4.0
+    assert values["ibkr_market_depth_lease_wait_seconds"] == 0.5
+    assert values["ibkr_market_depth_cache_ttl_seconds"] == 0.1
     assert values["ibkr_rest_ohlcv_rate_limit_retry_delay_seconds"] == 45.0
     assert values["ibkr_rest_ohlcv_rate_limit_retry_count"] == 2
     assert values["ibkr_equity_snapshot_wait_seconds"] == 9.5

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+import json
+from datetime import date, datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -18,15 +20,20 @@ from src.feeds.event_contracts import (
     EventContractSearchResult,
     EventContractStrikesResponse,
 )
+from src.feeds.fundamental_data import WSHEventDataReport, WSHEventDataRequest, WSHMetadataReport
 from src.feeds.fixed_income import DeliverableBasketRequest, DeliverableBondInput
 from src.feeds.index_composition import IndexCompositionPayload
+from src.feeds.exceptions import IBKRMarketDataLeaseTimeoutError, IBKRMarketDataUnavailableError
 from src.feeds.models import AssetClass, FutureOHLCVBar, OHLCVBar, OptionOHLCVBar
 from src.feeds.news import HistoricalNewsHeadline, NewsArticle, NewsProvider
 from src.feeds.options import OptionAnalyticsSnapshot, OptionSkewSurfaceResponse
 from src.feeds.snapshotter import EquitySnapshot, EquitySnapshotCaptureResult, FXOptionSnapshot
-from src.feeds.tick_data import HistoricalTickResponse, MarketRule, PriceIncrement
+from src.feeds.tick_data import HistoricalTickResponse, MarketDepthLevel, MarketDepthSnapshot, MarketRule, PriceIncrement
+from src.feeds.streaming import StreamSubscription
+from src.transport.metrics import metrics
 import src.webapp.app as app_module
 import src.webapp.routers.business as business_router
+import src.webapp.routers.streaming as streaming_router
 from src.webapp.app import create_app
 from src.webapp.cache import AsyncTTLCache
 from src.webapp.dependencies import IBKRRestAppState
@@ -68,6 +75,7 @@ class FakeLoader:
                 )
             ]
         if getattr(request, "asset_class") is AssetClass.FUTURE:
+            close = 95.67 if symbol == "ZQ" else 100.5
             return [
                 FutureOHLCVBar(
                     symbol=symbol,
@@ -75,10 +83,10 @@ class FakeLoader:
                     exchange=getattr(request, "exchange"),
                     currency=getattr(request, "currency"),
                     timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
-                    open=100,
-                    high=101,
-                    low=99,
-                    close=100.5,
+                    open=close - 0.5,
+                    high=close + 0.5,
+                    low=close - 1,
+                    close=close,
                     volume=1000,
                     bar_size=getattr(request, "bar_size"),
                     source="test",
@@ -170,6 +178,8 @@ class FakeFeed:
         self.option_analytics_requests: list[object] = []
         self.historical_tick_requests: list[object] = []
         self.market_rule_requests: list[int] = []
+        self.market_depth_requests: list[tuple[object, int, bool, float, float, float]] = []
+        self.market_depth_exception: BaseException | None = None
         self.fx_option_snapshot_requests: list[tuple[object, ...]] = []
         self.equity_snapshot_requests: list[tuple[tuple[str, str, str, str, int], ...]] = []
         self.cancelled_equity_tickers: list[object] = []
@@ -179,6 +189,8 @@ class FakeFeed:
         self.raise_account_pnl = False
         self.provider_calls = 0
         self.news_providers = [NewsProvider(provider_code="BZ", provider_name="Benzinga")]
+        self.wsh_metadata_calls = 0
+        self.wsh_event_requests: list[tuple[WSHEventDataRequest, bool]] = []
 
     async def load_historical_ohlcv_range(
         self,
@@ -235,6 +247,23 @@ class FakeFeed:
             received_at=datetime(2026, 1, 1, 12, 31, tzinfo=timezone.utc),
         )
 
+    async def load_wsh_metadata(self) -> WSHMetadataReport:
+        self.wsh_metadata_calls += 1
+        return WSHMetadataReport.from_raw_json('{"filters":["country"],"event_types":["wshe_ed"]}')
+
+    async def load_wsh_event_data(
+        self,
+        request: WSHEventDataRequest,
+        *,
+        ensure_metadata: bool = True,
+    ) -> WSHEventDataReport:
+        self.wsh_event_requests.append((request, ensure_metadata))
+        return WSHEventDataReport.from_raw_json(
+            raw_json='[{"event_type":"wshe_ed","headline":"earnings date"}]',
+            request_filter_json=request.to_filter_json() if request.uses_filter_json else "",
+            metadata={"wsh_event_data": request.to_wsh_event_data_kwargs()},
+        )
+
     async def load_option_skew_surface(self, request: object) -> OptionSkewSurfaceResponse:
         return OptionSkewSurfaceResponse(
             underlying_symbol=getattr(request.chain_request, "symbol"),
@@ -254,6 +283,42 @@ class FakeFeed:
     async def load_market_rule(self, price_magnitude: int) -> MarketRule:
         self.market_rule_requests.append(price_magnitude)
         return MarketRule(price_magnitude=price_magnitude, increments=[PriceIncrement(low_edge=0, increment=0.01)])
+
+    async def load_market_depth_snapshot(
+        self,
+        spec: object,
+        *,
+        num_rows: int = 5,
+        is_smart_depth: bool = False,
+        snapshot_wait_seconds: float = 1.5,
+        request_timeout_seconds: float = 5.0,
+        lease_wait_seconds: float = 2.0,
+    ) -> MarketDepthSnapshot:
+        self.market_depth_requests.append((
+            spec,
+            num_rows,
+            is_smart_depth,
+            snapshot_wait_seconds,
+            request_timeout_seconds,
+            lease_wait_seconds,
+        ))
+        if self.market_depth_exception is not None:
+            raise self.market_depth_exception
+        return MarketDepthSnapshot(
+            symbol=getattr(spec, "symbol"),
+            asset_class=getattr(spec, "asset_class").value,
+            exchange=getattr(spec, "exchange"),
+            currency=getattr(spec, "currency"),
+            primary_exchange=getattr(spec, "primary_exchange", None),
+            con_id=getattr(spec, "con_id", None) or 265598,
+            sec_type="STK",
+            num_rows=num_rows,
+            is_smart_depth=is_smart_depth,
+            snapshot_wait_seconds=snapshot_wait_seconds,
+            received_at=datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc),
+            bids=[MarketDepthLevel(position=0, price=100.0, size=10, market_maker="ARCA")],
+            asks=[MarketDepthLevel(position=0, price=100.1, size=12, market_maker="ISLAND")],
+        )
 
     async def load_head_timestamp(self, request: object) -> datetime:
         return datetime(2020, 1, 1, tzinfo=timezone.utc)
@@ -583,6 +648,7 @@ def test_webapp_registers_domain_routers() -> None:
     assert "/api/v1/system/rate-limits" in paths
     assert "/api/v1/market-data/ohlcv" in paths
     assert "/api/v1/market-data/ohlcv/auto" in paths
+    assert "/api/v1/market-data/depth/auto" in paths
     assert "/api/v1/market-data/ohlcv/equity" in paths
     assert "/api/v1/market-data/ohlcv/futures" in paths
     assert "/api/v1/market-data/ohlcv/commodities" in paths
@@ -603,12 +669,17 @@ def test_webapp_registers_domain_routers() -> None:
     assert "/api/v1/business/fixed-income/getBondFutureQuotes" in paths
     assert "/api/v1/business/fixed-income/getCTD" in paths
     assert "/api/v1/business/fixed-income/getFuturesImpliedCurve" in paths
+    assert "/api/v1/business/fixed-income/getBondYieldCurve" in paths
+    assert "/api/v1/business/fixed-income/getFedFundsFuturesRate" in paths
     assert "/api/v1/business/fixed-income/getCashBondCurve" in paths
     assert "/api/v1/business/fixed-income/getCurveComparison" in paths
     assert "/api/v1/business/event-contracts/discover/search" in paths
     assert "/api/v1/business/event-contracts/market-data/snapshot" in paths
     assert "/api/v1/business/event-contracts/orders/place" in paths
     assert "/api/v1/reference-data/options/chains" in paths
+    assert "/api/v1/reference-data/wsh/metadata" in paths
+    assert "/api/v1/reference-data/wsh/events" in paths
+    assert "/api/v1/reference-data/economic-calendar" in paths
     assert "/api/v1/market-data/options/skew" in paths
     assert "/api/v1/snapshot/fx-options/capture" in paths
     assert "/api/v1/snapshot/fx-options/latest" in paths
@@ -628,6 +699,61 @@ def test_event_contract_search_endpoint_uses_web_api_client() -> None:
     assert response.status_code == 200
     assert response.json()[0]["con_id"] == 658663572
     assert response.json()[0]["opt_expirations"] == ["20260616"]
+
+
+def test_market_depth_auto_endpoint_resolves_equity_contract() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/market-data/depth/auto",
+            json={"symbol": "TSLA", "snapshot_wait_seconds": 0.1},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbol"] == "TSLA"
+    assert payload["is_smart_depth"] is True
+    assert payload["bids"][0]["price"] == 100.0
+    spec, num_rows, is_smart_depth, snapshot_wait_seconds, request_timeout_seconds, lease_wait_seconds = state.feed.market_depth_requests[0]
+    assert getattr(spec, "symbol") == "TSLA"
+    assert getattr(spec, "exchange") == "SMART"
+    assert getattr(spec, "primary_exchange") == "NASDAQ"
+    assert num_rows == 5
+    assert is_smart_depth is True
+    assert snapshot_wait_seconds == 0.1
+    assert request_timeout_seconds == 5.0
+    assert lease_wait_seconds == 2.0
+
+
+def test_market_depth_auto_endpoint_returns_503_when_depth_unavailable() -> None:
+    state = FakeState()
+    state.feed.market_depth_exception = IBKRMarketDataUnavailableError("empty depth")
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/market-data/depth/auto",
+            json={"symbol": "TSLA", "snapshot_wait_seconds": 0.1},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "empty depth"
+
+
+def test_market_depth_auto_endpoint_returns_429_when_lease_unavailable() -> None:
+    state = FakeState()
+    state.feed.market_depth_exception = IBKRMarketDataLeaseTimeoutError("line budget exhausted")
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/market-data/depth/auto",
+            json={"symbol": "TSLA", "snapshot_wait_seconds": 0.1},
+        )
+
+    assert response.status_code == 429
+    assert response.json()["detail"] == "line budget exhausted"
 
 
 def test_event_contract_snapshot_endpoint_normalizes_market_fields() -> None:
@@ -1245,6 +1371,105 @@ def test_fixed_income_futures_implied_curve_uses_quotes_and_ctd_provider() -> No
     assert payload["diagnostics"]["provider"] == "test_fixed_income_provider"
 
 
+def test_fixed_income_bond_yield_curve_indicative_mode_supports_bund() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/business/fixed-income/getBondYieldCurve",
+            json={"market": "BUND", "source_mode": "indicative_placeholder", "use_ttl_cache": False},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["market"] == "GERMAN_BUND"
+    assert payload["currency"] == "EUR"
+    assert payload["source_mode"] == "indicative_placeholder"
+    assert [point["tenor"] for point in payload["points"]] == ["2Y", "5Y", "10Y", "30Y"]
+    assert "indicative placeholders" in payload["caveats"][0]
+
+
+def test_fixed_income_bond_yield_curve_futures_mode_uses_ibkr_quotes_and_provider() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/business/fixed-income/getBondYieldCurve",
+            json={
+                "market": "UST",
+                "source_mode": "futures_implied",
+                "contract_month": "202606",
+                "futures": [
+                    {
+                        "market": "UST",
+                        "futures_symbol": "ZN",
+                        "exchange": "CBOT",
+                        "currency": "USD",
+                        "contract_month": "202606",
+                    }
+                ],
+                "use_ttl_cache": False,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source_mode"] == "futures_implied"
+    assert payload["points"][0]["futures_symbol"] == "ZN"
+    assert payload["futures_implied_curve"]["diagnostics"]["provider"] == "test_fixed_income_provider"
+    assert len(state.fixed_income_reference_provider.basket_requests) == 1
+
+
+def test_fixed_income_bond_yield_curve_auto_without_live_inputs_fails_unless_fallback_allowed() -> None:
+    state = FakeState()
+    state.fixed_income_reference_provider = None
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/business/fixed-income/getBondYieldCurve",
+            json={"market": "JGB", "source_mode": "auto", "use_ttl_cache": False},
+        )
+
+    assert response.status_code == 503
+    assert "allow_indicative_fallback=true" in response.json()["detail"]
+
+    with TestClient(app) as client:
+        fallback_response = client.post(
+            "/api/v1/business/fixed-income/getBondYieldCurve",
+            json={"market": "JGB", "source_mode": "auto", "allow_indicative_fallback": True, "use_ttl_cache": False},
+        )
+
+    assert fallback_response.status_code == 200
+    assert fallback_response.json()["market"] == "JGB"
+    assert "AUTO mode" in fallback_response.json()["caveats"][0]
+
+
+def test_fixed_income_fed_funds_futures_rate_is_ibkr_futures_proxy_not_overnight_fixing() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/business/fixed-income/getFedFundsFuturesRate",
+            json={"contract_month": "202606", "use_ttl_cache": False},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbol"] == "ZQ"
+    assert payload["futures_price"] == 95.67
+    assert payload["implied_average_rate_percent"] == 4.329999999999998
+    assert payload["actual_overnight_fixing_available_from_ibkr"] is False
+    assert "not the official overnight effective Fed Funds fixing" in payload["caveats"][0]
+    latest_request = state.loader.loaded_requests[-1]
+    assert latest_request.symbol == "ZQ"
+    assert latest_request.asset_class is AssetClass.FUTURE
+    assert latest_request.last_trade_date_or_contract_month == "202606"
+
+
 def test_fixed_income_provider_backed_endpoints_fail_clearly_when_provider_missing() -> None:
     state = FakeState()
     state.fixed_income_reference_provider = None
@@ -1339,6 +1564,81 @@ def test_reference_historical_news_rejects_unentitled_provider_codes() -> None:
     assert response.status_code == 422
     assert "not entitled" in response.json()["detail"]
     assert state.feed.historical_news_requests == []
+
+
+def test_reference_economic_calendar_wraps_wsh_event_data() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/reference-data/economic-calendar",
+            json={
+                "country": "US",
+                "event_types": ["wshe_ed"],
+                "limit": 5,
+                "total_limit": 25,
+                "ensure_metadata": False,
+                "use_ttl_cache": False,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source"] == "ibkr_wsh"
+    assert payload["calendar_type"] == "wall_street_horizon_event_calendar"
+    assert payload["dedicated_macro_calendar_endpoint_available"] is False
+    assert payload["payload"][0]["event_type"] == "wshe_ed"
+    assert "Wall Street Horizon" in payload["subscription_required"]
+    request, ensure_metadata = state.feed.wsh_event_requests[0]
+    assert ensure_metadata is False
+    assert request.country == "US"
+    assert request.event_types == ("wshe_ed",)
+    assert request.uses_filter_json is True
+    assert json.loads(request.to_wsh_event_data_kwargs()["filter"])["country"] == "US"
+    assert request.to_wsh_event_data_kwargs()["totalLimit"] == 25
+
+
+def test_reference_economic_calendar_rejects_filter_fields_with_date_bounds() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/reference-data/economic-calendar",
+            json={
+                "country": "US",
+                "start_date": "2026-06-01",
+                "end_date": "2026-06-30",
+                "use_ttl_cache": False,
+            },
+        )
+
+    assert response.status_code == 422
+    assert state.feed.wsh_event_requests == []
+
+
+def test_reference_economic_calendar_accepts_con_id_mode() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/reference-data/economic-calendar",
+            json={
+                "con_id": 8314,
+                "start_date": "2026-06-01",
+                "end_date": "2026-06-30",
+                "total_limit": 10,
+                "use_ttl_cache": False,
+            },
+        )
+
+    assert response.status_code == 200
+    request, _ = state.feed.wsh_event_requests[0]
+    assert request.uses_filter_json is False
+    assert response.json()["request_filter_json"] == ""
+    assert response.json()["metadata"]["wsh_event_data"]["conId"] == 8314
 
 
 def test_business_symbol_news_rejects_missing_news_providers() -> None:
@@ -1521,6 +1821,21 @@ def test_system_readiness_reports_unavailable_when_ibkr_is_disconnected() -> Non
     assert response.json()["status"] == "unavailable"
     assert response.json()["ibkr_connection"] == "disconnected"
     assert response.json()["redis_connection"] == "connected"
+
+
+def test_system_health_is_liveness_while_readiness_requires_ibkr() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        health_response = client.get("/api/v1/system/health")
+        readiness_response = client.get("/api/v1/system/readiness")
+
+    assert health_response.status_code == 200
+    assert health_response.json()["status"] == "degraded"
+    assert health_response.json()["ibkr_connection"] == "disconnected"
+    assert readiness_response.status_code == 503
+    assert readiness_response.json()["status"] == "unavailable"
 
 
 def test_system_readiness_reports_unavailable_when_redis_is_down() -> None:
@@ -1978,6 +2293,38 @@ def test_ttl_cache_single_flights_concurrent_same_key_requests() -> None:
 
     assert values == [42, 42, 42]
     assert calls == 1
+
+
+def test_streaming_subscription_removal_is_idempotent_for_active_gauge() -> None:
+    streaming_router._active_subscriptions.clear()
+    metrics.streaming_subscriptions_active.set(0)
+    subscription = StreamSubscription(
+        subscription_id="sub-1",
+        symbol="AAPL",
+        asset_class=AssetClass.EQUITY,
+        exchange="SMART",
+        currency="USD",
+        connected_at=datetime.now(timezone.utc),
+    )
+    streaming_router._active_subscriptions["sub-1"] = subscription
+    metrics.streaming_subscriptions_active.inc()
+
+    first = streaming_router._pop_subscription_locked("sub-1")
+    second = streaming_router._pop_subscription_locked("sub-1")
+
+    assert first is subscription
+    assert second is None
+    assert "streaming_subscriptions_active 0.0" in metrics.expose()
+    streaming_router._active_subscriptions.clear()
+    metrics.streaming_subscriptions_active.set(0)
+
+
+def test_docker_compose_api_healthcheck_uses_readiness() -> None:
+    compose = (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "IBKR_REST_CONNECT_ON_STARTUP: ${IBKR_REST_CONNECT_ON_STARTUP:-true}" in compose
+    assert "http://localhost:8000/api/v1/system/readiness" in compose
+    assert "http://localhost:8000/api/v1/system/health" not in compose
 
 
 # ── API-wide bearer token auth tests ────────────────────────────────────────

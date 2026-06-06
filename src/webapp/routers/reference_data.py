@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Annotated
+from datetime import datetime
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -83,6 +84,123 @@ class CachedOptionChainRequest(BaseModel):
     cache_ttl_seconds: float | None = Field(default=300, ge=0)
 
 
+class EconomicCalendarRequest(WSHEventDataRequest):
+    """Convenience request for IBKR Wall Street Horizon calendar/event data."""
+
+    limit_region: int = Field(default=50, gt=0, le=500)
+    limit: int = Field(default=50, gt=0, le=500)
+    total_limit: int | None = Field(default=100, gt=0, le=100)
+    ensure_metadata: bool = True
+    use_ttl_cache: bool = True
+    cache_ttl_seconds: float | None = Field(default=300, ge=0)
+
+    def to_wsh_request(self) -> WSHEventDataRequest:
+        if not self.uses_filter_json:
+            return WSHEventDataRequest(
+                con_id=self.con_id,
+                fill_watchlist=self.fill_watchlist,
+                fill_portfolio=self.fill_portfolio,
+                fill_competitors=self.fill_competitors,
+                start_date=self.start_date,
+                end_date=self.end_date,
+                total_limit=self.total_limit,
+            )
+        return WSHEventDataRequest(
+            con_ids=self.con_ids,
+            country=self.country,
+            limit_region=self.limit_region,
+            limit=self.limit,
+            event_types=self.event_types,
+            extra_filters=self.extra_filters,
+            raw_filter_json=self.raw_filter_json,
+            fill_watchlist=self.fill_watchlist,
+            fill_portfolio=self.fill_portfolio,
+            fill_competitors=self.fill_competitors,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            total_limit=self.total_limit,
+        )
+
+
+class EconomicCalendarResponse(BaseModel):
+    """IBKR WSH calendar response with explicit source caveats."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    received_at: datetime
+    source: str = "ibkr_wsh"
+    calendar_type: str = "wall_street_horizon_event_calendar"
+    dedicated_macro_calendar_endpoint_available: bool = False
+    subscription_required: str = "Wall Street Horizon Corporate Event Data"
+    caveats: tuple[str, ...] = (
+        "IBKR exposes this through Wall Street Horizon event calendar data, not a dedicated macroeconomic-release calendar endpoint.",
+        "Available filters and event-type tags are entitlement/session dependent; call /reference-data/wsh/metadata to inspect them.",
+        "A Wall Street Horizon Corporate Event Data research subscription must be enabled for the account.",
+    )
+    request_filter_json: str
+    raw_json: str
+    payload: dict[str, Any] | list[Any]
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def from_wsh_report(cls, report: WSHEventDataReport) -> "EconomicCalendarResponse":
+        return cls(
+            received_at=report.received_at,
+            source=report.source,
+            request_filter_json=report.request_filter_json,
+            raw_json=report.raw_json,
+            payload=report.payload,
+            metadata=report.metadata,
+        )
+
+
+ECONOMIC_CALENDAR_EXAMPLES = {
+    "all_us_wsh_events": {
+        "summary": "US WSH events",
+        "description": "Returns WSH calendar events using JSON filter mode when the account is entitled.",
+        "value": {
+            "country": "US",
+            "limit": 50,
+            "total_limit": 100,
+            "use_ttl_cache": True,
+        },
+    },
+    "watchlist_date_range": {
+        "summary": "Watchlist date-bounded lookup",
+        "description": "Date bounds use WshEventData object mode; do not combine them with JSON filter fields.",
+        "value": {
+            "fill_watchlist": True,
+            "start_date": "20260601",
+            "end_date": "20260630",
+            "total_limit": 50,
+            "use_ttl_cache": True,
+        },
+    },
+    "single_contract_earnings": {
+        "summary": "Single contract event lookup",
+        "description": "Use con_id mode for date-bounded WSH event lookups on one IBKR contract.",
+        "value": {
+            "con_id": 8314,
+            "start_date": "20260601",
+            "end_date": "20260630",
+            "total_limit": 50,
+            "use_ttl_cache": True,
+        },
+    },
+    "metadata_filter_tags": {
+        "summary": "Filter by WSH tags",
+        "description": "Event-type tags are returned by /reference-data/wsh/metadata and can change by entitlement/session.",
+        "value": {
+            "country": "All",
+            "con_ids": [8314],
+            "event_types": ["wshe_ed"],
+            "limit": 10,
+            "use_ttl_cache": False,
+        },
+    },
+}
+
+
 @router.post("/options/chains", response_model=list[OptionChain])
 async def load_option_chains(
     payload: Annotated[CachedOptionChainRequest, Body(openapi_examples=OPTION_CHAIN_REQUEST_EXAMPLES)],
@@ -116,6 +234,23 @@ async def load_wsh_event_data(
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> WSHEventDataReport:
     return await state.feed.load_wsh_event_data(request)
+
+
+@router.post("/economic-calendar", response_model=EconomicCalendarResponse)
+async def load_economic_calendar(
+    payload: Annotated[EconomicCalendarRequest, Body(openapi_examples=ECONOMIC_CALENDAR_EXAMPLES)],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> EconomicCalendarResponse:
+    request = payload.to_wsh_request()
+
+    async def load() -> EconomicCalendarResponse:
+        report = await state.feed.load_wsh_event_data(request, ensure_metadata=payload.ensure_metadata)
+        return EconomicCalendarResponse.from_wsh_report(report)
+
+    if payload.use_ttl_cache:
+        key = stable_cache_key("economic_calendar", payload)
+        return await state.market_data_cache.get_or_set(key, load, ttl_seconds=payload.cache_ttl_seconds)
+    return await load()
 
 
 @router.get("/news/providers", response_model=list[NewsProvider])

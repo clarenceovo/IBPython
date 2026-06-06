@@ -319,6 +319,26 @@ class MetricsCollector:
             "Total market data quality failures",
             label_names=("asset_class", "data_type", "severity"),
         )
+        self.market_depth_request_total: _Counter = _Counter(
+            "market_depth_request_total",
+            "Total market depth request outcomes",
+            label_names=("status",),
+        )
+        self.market_depth_request_duration: _Histogram = _Histogram(
+            "market_depth_request_duration_seconds",
+            "Duration of market depth requests in seconds",
+            label_names=("status",),
+        )
+        self.market_depth_empty_book_total: _Counter = _Counter(
+            "market_depth_empty_book_total",
+            "Total market depth requests that received no bid or ask levels",
+            label_names=("asset_class",),
+        )
+        self.market_depth_cleanup_failures_total: _Counter = _Counter(
+            "market_depth_cleanup_failures_total",
+            "Total market depth cleanup failures",
+            label_names=("operation",),
+        )
 
         # All metrics in a stable order for exposition
         self._all_metrics: list[_Counter | _Gauge | _Histogram] = [
@@ -339,6 +359,10 @@ class MetricsCollector:
             self.market_data_historical_chunks_total,
             self.market_data_historical_bars_total,
             self.market_data_quality_failures_total,
+            self.market_depth_request_total,
+            self.market_depth_request_duration,
+            self.market_depth_empty_book_total,
+            self.market_depth_cleanup_failures_total,
         ]
 
     def expose(self) -> str:

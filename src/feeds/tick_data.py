@@ -112,6 +112,79 @@ class SmartComponent(BaseModel):
     description: str | None = None
 
 
+class MarketDepthLevel(BaseModel):
+    """One price level from IBKR market depth."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    position: int = Field(ge=0)
+    price: float = Field(ge=0)
+    size: float = Field(ge=0)
+    market_maker: str | None = None
+
+    @field_validator("market_maker", mode="before")
+    @classmethod
+    def normalize_optional_market_maker(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
+
+class MarketDepthSnapshot(BaseModel):
+    """Short-lived DOM/L2 snapshot assembled from a live IBKR depth subscription."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    symbol: str = Field(min_length=1)
+    asset_class: str = Field(min_length=1)
+    exchange: str = Field(min_length=1)
+    currency: str = Field(min_length=1)
+    primary_exchange: str | None = None
+    con_id: int | None = Field(default=None, gt=0)
+    local_symbol: str | None = None
+    sec_type: str | None = None
+    num_rows: int = Field(ge=1)
+    is_smart_depth: bool
+    snapshot_wait_seconds: float = Field(gt=0)
+    received_at: datetime
+    bids: list[MarketDepthLevel]
+    asks: list[MarketDepthLevel]
+    source: str = Field(default="ibkr", min_length=1)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("symbol", "exchange", "currency", "primary_exchange", "local_symbol", "sec_type", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            return None
+        return normalized.upper()
+
+    @field_validator("asset_class", mode="before")
+    @classmethod
+    def normalize_asset_class(cls, value: Any) -> str:
+        if value is None:
+            raise ValueError("asset_class is required")
+        normalized = str(value).strip().lower()
+        if not normalized:
+            raise ValueError("asset_class cannot be empty")
+        return normalized
+
+    @field_validator("received_at", mode="before")
+    @classmethod
+    def normalize_received_at_utc(cls, value: Any) -> datetime:
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if not isinstance(value, datetime):
+            raise TypeError("received_at must be a datetime")
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+
 class SymbolDescription(BaseModel):
     """A symbol match from fuzzy symbol search."""
 

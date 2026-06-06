@@ -24,14 +24,6 @@ x-app-env: &app-env
   IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS: ${IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS:-60}
   IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT: ${IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT:-1}
 
-x-app-depends: &app-depends
-  redis:
-    condition: service_healthy
-  questdb:
-    condition: service_started
-  mysql:
-    condition: service_healthy
-
 services:
   ibkr-rest-app:
     build:
@@ -48,12 +40,12 @@ services:
       <<: *app-env
       IBKR_CLIENT_ID: ${IBKR_API_CLIENT_ID:-101}
       IBKR_REST_APP_NAME: ${IBKR_REST_APP_NAME:-IBKRRestApp}
-      IBKR_REST_CONNECT_ON_STARTUP: ${IBKR_REST_CONNECT_ON_STARTUP:-false}
+      IBKR_REST_CONNECT_ON_STARTUP: ${IBKR_REST_CONNECT_ON_STARTUP:-true}
       IBKR_REST_MARKET_DATA_TTL_SECONDS: ${IBKR_REST_MARKET_DATA_TTL_SECONDS:-5}
       IBKR_REST_MARKET_DATA_CACHE_MAXSIZE: ${IBKR_REST_MARKET_DATA_CACHE_MAXSIZE:-512}
     depends_on: *app-depends
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/system/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/system/readiness"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -61,81 +53,3 @@ services:
     stop_grace_period: 30s
     restart: unless-stopped
 
-  ibkr-scheduler:
-    build:
-      context: .
-      dockerfile: Dockerfile.scheduler
-    image: ibpython-scheduler:latest
-    init: true
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      <<: *app-env
-      IBKR_CLIENT_ID: ${IBKR_SCHEDULER_CLIENT_ID:-201}
-      IBKR_REST_BASE_URL: ${IBKR_DOCKER_REST_BASE_URL:-http://ibkr-rest-app:8000}
-    depends_on:
-      <<: *app-depends
-      ibkr-rest-app:
-        condition: service_healthy
-    stop_grace_period: 30s
-    restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
-    command:
-      - sh
-      - -c
-      - |
-        if [ -n "$$REDIS_PASSWORD" ]; then
-          redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
-        else
-          redis-server --appendonly yes
-        fi
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD-SHELL", "if [ -n \"$${REDIS_PASSWORD}\" ]; then redis-cli -a \"$${REDIS_PASSWORD}\" ping; else redis-cli ping; fi"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  questdb:
-    image: questdb/questdb:latest
-    ports:
-      - "9000:9000"
-      - "8812:8812"
-      - "9009:9009"
-    environment:
-      QDB_PG_USER: ${QUESTDB_USER:-admin}
-      QDB_PG_PASSWORD: ${QUESTDB_PASSWORD:-quest}
-      QDB_PG_DATABASE: ${QUESTDB_DATABASE:-qdb}
-    volumes:
-      - questdb-data:/var/lib/questdb
-
-  mysql:
-    image: mysql:8.4
-    ports:
-      - "3306:3306"
-    environment:
-      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-trading}
-      MYSQL_USER: ${MYSQL_APP_USER:-trading}
-      MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD:-trading}
-    volumes:
-      - mysql-data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost --silent"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
-
-volumes:
-  redis-data:
-  questdb-data:
-  mysql-data:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
@@ -13,7 +14,6 @@ from fastapi.responses import StreamingResponse
 from src.feeds.contracts import ContractSpec
 from src.feeds.exchange_resolver import resolve_equity
 from src.feeds.models import AssetClass
-from src.feeds.snapshot_converters import _safe_float
 from src.feeds.streaming import StreamRequest, StreamSubscription, StreamingTickerSnapshot
 from src.transport.metrics import metrics
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
@@ -46,6 +46,15 @@ _CLEANUP_INTERVAL_SECONDS: float = 60.0
 _cleanup_task: asyncio.Task[None] | None = None
 
 
+def _pop_subscription_locked(subscription_id: str) -> StreamSubscription | None:
+    """Remove a subscription once and decrement active telemetry once."""
+
+    sub = _active_subscriptions.pop(subscription_id, None)
+    if sub is not None:
+        metrics.streaming_subscriptions_active.dec()
+    return sub
+
+
 def _is_subscription_expired(sub: StreamSubscription) -> bool:
     """Check if a subscription has exceeded its TTL."""
     age = (datetime.now(timezone.utc) - sub.connected_at).total_seconds()
@@ -72,8 +81,7 @@ async def _cleanup_orphaned_subscriptions() -> None:
                             (datetime.now(timezone.utc) - sub.connected_at).total_seconds(),
                         )
                         sub.stop()
-                        _active_subscriptions.pop(sid, None)
-                        metrics.streaming_subscriptions_active.dec()
+                        _pop_subscription_locked(sid)
         except Exception:
             logger.exception("Error during subscription cleanup")
 
@@ -125,6 +133,16 @@ STREAM_REQUEST_EXAMPLES = {
         },
     },
 }
+
+
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _ticker_to_snapshot(ticker: Any, spec: ContractSpec) -> StreamingTickerSnapshot:
@@ -283,8 +301,7 @@ async def stream_ticker(
             if ticker is not None:
                 await state.feed.unsubscribe_ticker(ticker)
             async with _sub_lock:
-                _active_subscriptions.pop(subscription_id, None)
-            metrics.streaming_subscriptions_active.dec()
+                _pop_subscription_locked(subscription_id)
             logger.info("SSE stream closed: subscription_id=%s updates_sent=%d dropped=%d", subscription_id, updates_sent, subscription.dropped_updates)
 
     # Start the background cleanup task on first subscription
@@ -315,10 +332,9 @@ async def list_active_subscriptions() -> list[StreamSubscription]:
             if _is_subscription_expired(sub)
         ]
         for sid in expired_ids:
-            sub = _active_subscriptions.pop(sid, None)
+            sub = _pop_subscription_locked(sid)
             if sub is not None:
                 sub.stop()
-                metrics.streaming_subscriptions_active.dec()
         return list(_active_subscriptions.values())
 
 
@@ -333,6 +349,5 @@ async def stop_subscription(subscription_id: str) -> dict[str, str]:
             raise HTTPException(status_code=404, detail=f"Subscription {subscription_id} not found")
         # Signal the SSE generator to stop, then clean up
         sub.stop()
-        _active_subscriptions.pop(subscription_id, None)
-        metrics.streaming_subscriptions_active.dec()
+        _pop_subscription_locked(subscription_id)
     return {"status": "stopped", "subscription_id": subscription_id}

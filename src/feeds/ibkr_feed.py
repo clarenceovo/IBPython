@@ -98,6 +98,7 @@ from src.feeds.ibkr_connection import (
 from src.feeds.exceptions import (  # noqa: E402
     IBKRConnectionError,
     IBKRContractResolutionError,
+    IBKRMarketDataUnavailableError,
 )
 from src.feeds.ibkr_historical import (
     IBKRHistoricalClient,
@@ -790,6 +791,35 @@ class IBKRFeedClient:
         n: int = 100,
     ) -> "list":
         return self._marketdata_ext.get_latest_ticks(symbol, sec_type, exchange, n)
+
+    async def load_market_depth_snapshot(
+        self,
+        spec: ContractSpec,
+        *,
+        num_rows: int = 5,
+        is_smart_depth: bool = False,
+        snapshot_wait_seconds: float = 1.5,
+        request_timeout_seconds: float = constants.DEFAULT_IBKR_MARKET_DEPTH_REQUEST_TIMEOUT_SECONDS,
+        lease_wait_seconds: float = constants.DEFAULT_IBKR_MARKET_DEPTH_LEASE_WAIT_SECONDS,
+    ) -> "Any":
+        request_timeout_seconds = max(0.05, float(request_timeout_seconds))
+        deadline = monotonic_time.monotonic() + request_timeout_seconds
+        try:
+            contract = await asyncio.wait_for(self.qualify_contract(spec), timeout=request_timeout_seconds)
+        except TimeoutError as exc:
+            raise IBKRMarketDataUnavailableError(
+                f"market depth contract qualification timed out for {spec.symbol} after {request_timeout_seconds:.2f}s"
+            ) from exc
+        remaining_timeout = max(0.05, deadline - monotonic_time.monotonic())
+        return await self._marketdata_ext.load_market_depth_snapshot(
+            contract=contract,
+            spec=spec,
+            num_rows=num_rows,
+            is_smart_depth=is_smart_depth,
+            snapshot_wait_seconds=snapshot_wait_seconds,
+            request_timeout_seconds=remaining_timeout,
+            lease_wait_seconds=lease_wait_seconds,
+        )
 
     async def load_historical_ticks(self, request: "Any") -> "Any":
         return await self._marketdata_ext.load_historical_ticks(request)

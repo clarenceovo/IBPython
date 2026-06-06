@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import StrEnum
 from typing import Any, Self
 
@@ -116,6 +116,7 @@ class WSHEventDataRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
+    con_id: int | None = Field(default=None, gt=0)
     con_ids: tuple[int, ...] = Field(default_factory=tuple)
     country: str = "All"
     limit_region: int = Field(default=10, gt=0)
@@ -123,6 +124,12 @@ class WSHEventDataRequest(BaseModel):
     event_types: tuple[str, ...] = Field(default_factory=tuple)
     extra_filters: dict[str, Any] = Field(default_factory=dict)
     raw_filter_json: str | None = None
+    fill_watchlist: bool = False
+    fill_portfolio: bool = False
+    fill_competitors: bool = False
+    start_date: date | None = None
+    end_date: date | None = None
+    total_limit: int | None = Field(default=None, gt=0, le=100)
 
     @field_validator("con_ids", mode="before")
     @classmethod
@@ -142,6 +149,51 @@ class WSHEventDataRequest(BaseModel):
             raise TypeError("event_types must be a sequence of WSH event type tags")
         return tuple(sorted(str(item).strip() for item in value if str(item).strip()))
 
+    @field_validator("start_date", "end_date", mode="before")
+    @classmethod
+    def normalize_wsh_date(cls, value: Any) -> date | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        token = str(value).strip()
+        if len(token) == 8 and token.isdigit():
+            return datetime.strptime(token, "%Y%m%d").date()
+        return date.fromisoformat(token)
+
+    @model_validator(mode="after")
+    def validate_wsh_request_mode(self) -> Self:
+        if self.start_date and self.end_date and self.start_date > self.end_date:
+            raise ValueError("start_date must be on or before end_date")
+
+        filter_fields = {
+            "con_ids",
+            "country",
+            "limit_region",
+            "limit",
+            "event_types",
+            "extra_filters",
+            "raw_filter_json",
+        }
+        object_fields = {"con_id", "start_date", "end_date"}
+        explicitly_set_filter_fields = filter_fields.intersection(self.model_fields_set)
+        explicitly_set_object_fields = object_fields.intersection(self.model_fields_set)
+        if explicitly_set_filter_fields and explicitly_set_object_fields:
+            filter_field_list = ", ".join(sorted(explicitly_set_filter_fields))
+            object_field_list = ", ".join(sorted(explicitly_set_object_fields))
+            raise ValueError(
+                "IBKR WshEventData filter mode cannot be combined with "
+                f"object field(s) {object_field_list}; remove filter field(s): {filter_field_list}"
+            )
+        return self
+
+    @property
+    def uses_filter_json(self) -> bool:
+        object_fields = {"con_id", "start_date", "end_date"}
+        return not object_fields.intersection(self.model_fields_set)
+
     def to_filter_json(self) -> str:
         if self.raw_filter_json:
             json.loads(self.raw_filter_json)
@@ -158,6 +210,32 @@ class WSHEventDataRequest(BaseModel):
         for event_type in self.event_types:
             payload[event_type] = "true"
         return json.dumps(payload, sort_keys=True)
+
+    @staticmethod
+    def _format_wsh_date(value: date) -> str:
+        return value.strftime("%Y%m%d")
+
+    def to_wsh_event_data_kwargs(self) -> dict[str, Any]:
+        """Build kwargs for ib_insync.WshEventData using documented IBKR fields."""
+        kwargs: dict[str, Any] = {}
+        if self.con_id is not None:
+            kwargs["conId"] = self.con_id
+        if self.uses_filter_json:
+            kwargs["filter"] = self.to_filter_json()
+
+        if self.fill_watchlist:
+            kwargs["fillWatchlist"] = True
+        if self.fill_portfolio:
+            kwargs["fillPortfolio"] = True
+        if self.fill_competitors:
+            kwargs["fillCompetitors"] = True
+        if self.start_date is not None:
+            kwargs["startDate"] = self._format_wsh_date(self.start_date)
+        if self.end_date is not None:
+            kwargs["endDate"] = self._format_wsh_date(self.end_date)
+        if self.total_limit is not None:
+            kwargs["totalLimit"] = self.total_limit
+        return kwargs
 
 
 class WSHEventDataReport(BaseModel):

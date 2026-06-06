@@ -13,13 +13,31 @@ from src.config.settings import Settings, load_settings
 from src.transport.metrics import MetricsMiddleware, metrics
 from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
 from src.webapp.middleware.correlation import CorrelationIdFilter, CorrelationIdMiddleware
-from src.webapp.routers import account, business, fixed_income, market_data_bonds, market_data_equity, market_data_fx, market_data_futures, market_data_options, orders, reference_data, scanner, snapshot, streaming, system, tick_data
+from src.webapp.routers import (
+    account,
+    business,
+    fixed_income,
+    market_data_bonds,
+    market_data_depth,
+    market_data_equity,
+    market_data_fx,
+    market_data_futures,
+    market_data_options,
+    orders,
+    reference_data,
+    scanner,
+    snapshot,
+    streaming,
+    system,
+    tick_data,
+)
 from src.webapp.routers import market_data  # noqa: F401 — kept for import compatibility
 from src.feeds.ibkr_historical import HistoricalRequestTooLargeError
 from src.feeds.exceptions import (
     IBKRConnectionError,
     IBKRCircuitOpenError,
     IBKRContractResolutionError,
+    IBKRMarketDataUnavailableError,
     IBKRPacingError,
     IBKROrderError,
     QuestDBWriteError,
@@ -113,7 +131,7 @@ def create_app(
             "## Modules\n"
             "- **Business** — Research-friendly wrappers for curves, news, market panels, returns, option skew, commodity futures, portfolio risk, and Event Contracts\n"
             "- **Fixed Income** — IBKR bond futures prices, CTD analytics, and futures-implied curves\n"
-            "- **Market Data** — OHLCV bars, FX/commodity options, option analytics/skew, bond yields, latest bars, snapshots\n"
+            "- **Market Data** — OHLCV bars, DOM/L2 snapshots, FX/commodity options, option analytics/skew, bond yields, and latest bars\n"
             "- **Reference Data** — Option chains, fundamentals, WSH events, news, contract search\n"
             "- **Account** — Positions, portfolio, P&L snapshots\n"
             "- **Orders** — Place, cancel, modify orders; execution details; explicit what-if margin preview\n"
@@ -154,7 +172,7 @@ def create_app(
         openapi_tags=[
             {"name": "business", "description": "Research-friendly wrappers for curves, symbol news, market panels, returns, option skew, commodity futures, portfolio risk, and ForecastEx/CME Event Contracts"},
             {"name": "system", "description": "Health checks, rate-limit diagnostics, and cache management"},
-            {"name": "market-data", "description": "OHLCV bars, FX/commodity options, option analytics/skew, snapshots, bond yields, and latest bar queries"},
+            {"name": "market-data", "description": "OHLCV bars, DOM/L2 snapshots, FX/commodity options, option analytics/skew, bond yields, and latest bar queries"},
             {"name": "reference-data", "description": "Option chains, fundamental data, Wall Street Horizon events, news, and contract search"},
             {"name": "account", "description": "Account summary, positions, portfolio items, and P&L snapshots"},
             {"name": "orders", "description": "Order management — live place/cancel/modify, execution details, and explicit what-if preview"},
@@ -177,6 +195,7 @@ def create_app(
     fastapi_app.include_router(fixed_income.router, prefix="/api/v1")
     fastapi_app.include_router(system.router, prefix="/api/v1")
     fastapi_app.include_router(market_data_equity.router, prefix="/api/v1")
+    fastapi_app.include_router(market_data_depth.router, prefix="/api/v1")
     fastapi_app.include_router(market_data_futures.router, prefix="/api/v1")
     fastapi_app.include_router(market_data_fx.router, prefix="/api/v1")
     fastapi_app.include_router(market_data_options.router, prefix="/api/v1")
@@ -208,6 +227,11 @@ def create_app(
     async def ibkr_contract_resolution_error_handler(_request: Request, exc: IBKRContractResolutionError) -> JSONResponse:
         logger.warning("IBKR contract resolution error: %s", exc)
         return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    @fastapi_app.exception_handler(IBKRMarketDataUnavailableError)
+    async def ibkr_market_data_unavailable_handler(_request: Request, exc: IBKRMarketDataUnavailableError) -> JSONResponse:
+        logger.warning("IBKR market data unavailable: %s", exc)
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
 
     @fastapi_app.exception_handler(IBKRPacingError)
     async def ibkr_pacing_error_handler(_request: Request, exc: IBKRPacingError) -> JSONResponse:

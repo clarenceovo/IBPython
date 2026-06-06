@@ -73,12 +73,12 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
-def _build_wsh_event_data(filter_json: str) -> Any:
+def _build_wsh_event_data(request: WSHEventDataRequest) -> Any:
     try:
         from ib_insync import WshEventData
     except ImportError as exc:
         raise RuntimeError("ib_insync is required for WSH event data requests") from exc
-    return WshEventData(filter=filter_json)
+    return WshEventData(**request.to_wsh_event_data_kwargs())
 
 
 class IBKRReferenceFeedClient:
@@ -179,8 +179,8 @@ class IBKRReferenceFeedClient:
         t0 = monotonic_time.monotonic()
         if ensure_metadata and not self._wsh_metadata_loaded:
             await self.load_wsh_metadata()
-        request_filter_json = request.to_filter_json()
-        wsh_event_data = _build_wsh_event_data(request_filter_json)
+        request_filter_json = request.to_filter_json() if request.uses_filter_json else ""
+        wsh_event_data = _build_wsh_event_data(request)
         raw_json = await self._connection.with_retry(
             lambda: self._ib.getWshEventDataAsync(wsh_event_data),
             operation="wsh_event_data",
@@ -188,6 +188,7 @@ class IBKRReferenceFeedClient:
         report = WSHEventDataReport.from_raw_json(
             raw_json=raw_json,
             request_filter_json=request_filter_json,
+            metadata={"wsh_event_data": request.to_wsh_event_data_kwargs()},
         )
         logger.info("load_wsh_event_data: completed in %.2fs", monotonic_time.monotonic() - t0)
         return report
@@ -381,6 +382,7 @@ class IBKRReferenceFeedClient:
             lease = None
             try:
                 from ib_insync import Contract
+
                 kwargs: dict[str, Any] = {
                     "secType": "STK",
                     "symbol": symbol.upper(),

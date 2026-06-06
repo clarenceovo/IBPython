@@ -8,11 +8,19 @@ from fastapi import APIRouter, Body, Depends
 from pydantic import Field, field_validator
 
 from src.feeds.models import AssetClass, FXOHLCVBar, OHLCVRequest, OptionOHLCVBar
-from src.feeds.snapshotter import fx_pair_parts
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 from src.webapp.routers.market_data_shared import MinimalOHLCVLoadControls, load_ohlcv_with_controls
 
 router = APIRouter(prefix="/market-data", tags=["market-data"])
+
+
+def _fx_pair_parts(symbol: str, currency: str | None = None) -> tuple[str, str, str]:
+    normalized = symbol.replace("/", "").strip().upper()
+    if len(normalized) != 6:
+        raise ValueError("FX option symbols must be six-character pairs such as EURUSD")
+    base = normalized[:3]
+    quote = currency.strip().upper() if currency else normalized[3:]
+    return normalized, base, quote
 
 
 class FXOHLCVLoadRequest(MinimalOHLCVLoadControls):
@@ -55,7 +63,7 @@ class FXOptionOHLCVLoadRequest(MinimalOHLCVLoadControls):
         raise ValueError("right must be C/CALL or P/PUT")
 
     def to_request(self) -> OHLCVRequest:
-        pair, base, quote = fx_pair_parts(self.symbol, self.currency)
+        pair, base, quote = _fx_pair_parts(self.symbol, self.currency)
         symbol = self.local_symbol or f"{pair} {self.expiry}{self.right}{self.strike:g}"
         return self.to_ohlcv_request(
             AssetClass.OPTION,

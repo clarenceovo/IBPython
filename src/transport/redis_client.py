@@ -277,10 +277,6 @@ class MarketDataRedisClient:
         await self.set_raw(key, json.dumps(status, sort_keys=True, default=str))
         return key
 
-    # ------------------------------------------------------------------
-    # Equity snapshot caching
-    # ------------------------------------------------------------------
-
     async def set_latest_equity_snapshot(self, snapshot: EquitySnapshot) -> str:
         """Cache the latest snapshot for a symbol."""
         await self.connect()
@@ -305,17 +301,13 @@ class MarketDataRedisClient:
         keys = [constants.REDIS_EQUITY_SNAPSHOT_KEY_TEMPLATE.format(symbol=s.strip().upper()) for s in symbols]
         payloads = await self._client.mget(keys)
         result: dict[str, EquitySnapshot] = {}
-        for symbol, payload in zip(symbols, payloads):
+        for symbol, payload in zip(symbols, payloads, strict=True):
             if payload is not None:
                 try:
                     result[symbol.strip().upper()] = EquitySnapshot.from_redis_json(payload)
                 except Exception:
                     logger.debug("failed to parse Redis snapshot for symbol=%s", symbol, exc_info=True)
         return result
-
-    # ------------------------------------------------------------------
-    # FX option snapshot caching
-    # ------------------------------------------------------------------
 
     async def set_latest_fx_option_snapshot(self, snapshot: FXOptionSnapshot) -> str:
         await self.connect()

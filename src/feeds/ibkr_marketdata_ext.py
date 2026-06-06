@@ -6,20 +6,31 @@ Composes ``IBKRConnectionManager`` for connection lifecycle, retry, and pacing.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
 import time as monotonic_time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Any, Callable
 
 from src.feeds.contracts import build_ibkr_contract, ContractSpec
-from src.feeds.ibkr_connection import IBKRConnectionManager, acquire_market_data_line, wait_for_ibkr_request
+from src.feeds.exceptions import IBKRMarketDataLeaseTimeoutError, IBKRMarketDataUnavailableError
+from src.feeds.ibkr_connection import (
+    IBKRConnectionManager,
+    _contract_int,
+    _contract_text,
+    acquire_market_data_line,
+    wait_for_ibkr_request,
+)
 from src.feeds.models import AssetClass
 from src.feeds.tick_data import (
     HeadTimestampRequest,
     HistoricalTickRequest,
     HistoricalTickResponse,
     IVCalcRequest,
+    MarketDepthLevel,
+    MarketDepthSnapshot,
     MarketRule,
     OptionPriceCalcRequest,
     PriceIncrement,
@@ -28,6 +39,7 @@ from src.feeds.tick_data import (
     TickByTickData,
     TickType,
 )
+from src.transport.metrics import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +130,45 @@ def _what_to_show_to_tick_type(what_to_show: str) -> TickType:
         "MIDPOINT": TickType.MIDPOINT,
     }
     return mapping.get(what_to_show.upper(), TickType.ALL_LAST)
+
+
+def _finite_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _normalize_dom_levels(levels: list[Any], *, limit: int) -> list[MarketDepthLevel]:
+    normalized: list[MarketDepthLevel] = []
+    for position, level in enumerate(levels[:limit]):
+        price = _finite_float(getattr(level, "price", None))
+        size = _finite_float(getattr(level, "size", None))
+        if price is None or size is None:
+            continue
+        normalized.append(
+            MarketDepthLevel(
+                position=position,
+                price=max(price, 0.0),
+                size=max(size, 0.0),
+                market_maker=getattr(level, "marketMaker", None),
+            )
+        )
+    return normalized
+
+
+def _market_depth_contract_key(contract: Any, spec: ContractSpec) -> str:
+    con_id = _contract_int(contract, "conId")
+    if con_id:
+        return f"market_depth:conId:{con_id}"
+    local_symbol = _contract_text(contract, "localSymbol", "local_symbol")
+    if local_symbol:
+        return f"market_depth:localSymbol:{local_symbol}"
+    sec_type = _contract_text(contract, "secType") or ""
+    exchange = _contract_text(contract, "exchange") or spec.exchange
+    currency = _contract_text(contract, "currency") or spec.currency
+    return f"market_depth:{sec_type}:{spec.symbol}:{exchange}:{currency}"
 
 
 class IBKRMarketDataExtClient:
@@ -271,7 +322,163 @@ class IBKRMarketDataExtClient:
         ]
 
     # ------------------------------------------------------------------
-    # 2. Historical ticks
+    # 2. Market depth / DOM snapshots
+    # ------------------------------------------------------------------
+
+    async def load_market_depth_snapshot(
+        self,
+        *,
+        contract: Any,
+        spec: ContractSpec,
+        num_rows: int = 5,
+        is_smart_depth: bool = False,
+        snapshot_wait_seconds: float = 1.5,
+        request_timeout_seconds: float = 5.0,
+        lease_wait_seconds: float = 2.0,
+    ) -> MarketDepthSnapshot:
+        """Capture a short-lived live DOM snapshot using IBKR ``reqMktDepth``.
+
+        IBKR market depth is a subscription, so this method starts it, waits
+        briefly for depth callbacks to populate ``Ticker.domBids/domAsks``, and
+        always cancels the subscription before returning.
+        """
+
+        start = monotonic_time.monotonic()
+        status = "error"
+        try:
+            snapshot = await asyncio.wait_for(
+                self._capture_market_depth_snapshot(
+                    contract=contract,
+                    spec=spec,
+                    num_rows=num_rows,
+                    is_smart_depth=is_smart_depth,
+                    snapshot_wait_seconds=snapshot_wait_seconds,
+                    lease_wait_seconds=lease_wait_seconds,
+                ),
+                timeout=max(0.05, float(request_timeout_seconds)),
+            )
+            status = "ok"
+            return snapshot
+        except TimeoutError as exc:
+            status = "timeout"
+            raise IBKRMarketDataUnavailableError(
+                f"market depth request timed out for {spec.symbol} after {request_timeout_seconds:.2f}s"
+            ) from exc
+        except IBKRMarketDataLeaseTimeoutError:
+            status = "lease_timeout"
+            raise
+        except IBKRMarketDataUnavailableError:
+            status = "unavailable"
+            raise
+        except Exception as exc:
+            status = "error"
+            raise IBKRMarketDataUnavailableError(f"market depth unavailable for {spec.symbol}: {exc}") from exc
+        finally:
+            elapsed = monotonic_time.monotonic() - start
+            metrics.market_depth_request_total.inc({"status": status})
+            metrics.market_depth_request_duration.observe(elapsed, {"status": status})
+
+    async def _capture_market_depth_snapshot(
+        self,
+        *,
+        contract: Any,
+        spec: ContractSpec,
+        num_rows: int,
+        is_smart_depth: bool,
+        snapshot_wait_seconds: float,
+        lease_wait_seconds: float,
+    ) -> MarketDepthSnapshot:
+        await self._connection.ensure_connected()
+        bounded_rows = max(1, min(int(num_rows), 5))
+        bounded_wait = max(0.05, float(snapshot_wait_seconds))
+        operation = f"market_depth:{spec.symbol}"
+        try:
+            lease = await asyncio.wait_for(
+                acquire_market_data_line(
+                    self._connection,
+                    contract_key=_market_depth_contract_key(contract, spec),
+                    operation=operation,
+                    ttl_seconds=max(10.0, bounded_wait + 5.0),
+                ),
+                timeout=max(0.05, float(lease_wait_seconds)),
+            )
+        except TimeoutError as exc:
+            raise IBKRMarketDataLeaseTimeoutError(
+                f"market depth line unavailable for {spec.symbol} after {lease_wait_seconds:.2f}s"
+            ) from exc
+
+        subscribed = False
+        last_error_before = getattr(self._connection, "last_ibkr_error", None)
+        try:
+            await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktDepth")
+            ticker = self._ib.reqMktDepth(
+                contract,
+                numRows=bounded_rows,
+                isSmartDepth=is_smart_depth,
+                mktDepthOptions=[],
+            )
+            subscribed = True
+            await asyncio.sleep(bounded_wait)
+            bids = _normalize_dom_levels(list(getattr(ticker, "domBids", []) or []), limit=bounded_rows)
+            asks = _normalize_dom_levels(list(getattr(ticker, "domAsks", []) or []), limit=bounded_rows)
+            if not bids and not asks:
+                metrics.market_depth_empty_book_total.inc({"asset_class": spec.asset_class.value})
+                raise IBKRMarketDataUnavailableError(
+                    "No market depth levels were received; check market depth subscriptions, "
+                    "venue routing, market hours, and IBKR depth-request limits."
+                )
+            dom_ticks = list(getattr(ticker, "domTicks", []) or [])
+            metadata: dict[str, Any] = {
+                "dom_tick_count": len(dom_ticks),
+                "qualified_symbol": _contract_text(contract, "symbol"),
+            }
+            local_symbol = _contract_text(contract, "localSymbol", "local_symbol")
+            if local_symbol:
+                metadata["qualified_local_symbol"] = local_symbol
+            last_error_after = getattr(self._connection, "last_ibkr_error", None)
+            if last_error_after is not None and last_error_after != last_error_before:
+                code, message = last_error_after
+                if code in {200, 309, 316, 317, 354, 10167}:
+                    metadata["last_ibkr_error"] = {"code": code, "message": message}
+            return MarketDepthSnapshot(
+                symbol=spec.symbol,
+                asset_class=spec.asset_class.value,
+                exchange=_contract_text(contract, "exchange") or spec.exchange,
+                currency=_contract_text(contract, "currency") or spec.currency,
+                primary_exchange=_contract_text(contract, "primaryExchange", "primaryExch") or spec.primary_exchange,
+                con_id=_contract_int(contract, "conId"),
+                local_symbol=local_symbol,
+                sec_type=_contract_text(contract, "secType"),
+                num_rows=bounded_rows,
+                is_smart_depth=is_smart_depth,
+                snapshot_wait_seconds=bounded_wait,
+                received_at=datetime.now(tz=timezone.utc),
+                bids=bids,
+                asks=asks,
+                metadata=metadata,
+            )
+        finally:
+            if subscribed:
+                try:
+                    await asyncio.wait_for(
+                        self._cancel_market_depth(contract, spec.symbol, is_smart_depth=is_smart_depth),
+                        timeout=1.0,
+                    )
+                except Exception:
+                    metrics.market_depth_cleanup_failures_total.inc({"operation": "cancelMktDepth"})
+                    logger.debug("error cancelling market depth for %s", spec.symbol, exc_info=True)
+            try:
+                await lease.release()
+            except Exception:
+                metrics.market_depth_cleanup_failures_total.inc({"operation": "release_lease"})
+                logger.debug("error releasing market depth lease for %s", spec.symbol, exc_info=True)
+
+    async def _cancel_market_depth(self, contract: Any, symbol: str, *, is_smart_depth: bool) -> None:
+        await wait_for_ibkr_request(self._connection, operation=f"market_depth:{symbol}:cancelMktDepth")
+        self._ib.cancelMktDepth(contract, isSmartDepth=is_smart_depth)
+
+    # ------------------------------------------------------------------
+    # 3. Historical ticks
     # ------------------------------------------------------------------
 
     async def load_historical_ticks(self, request: HistoricalTickRequest) -> HistoricalTickResponse:
@@ -355,7 +562,7 @@ class IBKRMarketDataExtClient:
         )
 
     # ------------------------------------------------------------------
-    # 3. Market rules
+    # 4. Market rules
     # ------------------------------------------------------------------
 
     async def load_market_rule(self, price_magnitude: int) -> MarketRule:
@@ -387,7 +594,7 @@ class IBKRMarketDataExtClient:
         )
 
     # ------------------------------------------------------------------
-    # 4. Smart components
+    # 5. Smart components
     # ------------------------------------------------------------------
 
     async def load_smart_components(self, exchange: str) -> list[SmartComponent]:
@@ -411,7 +618,7 @@ class IBKRMarketDataExtClient:
         return result
 
     # ------------------------------------------------------------------
-    # 5. Head timestamp
+    # 6. Head timestamp
     # ------------------------------------------------------------------
 
     async def load_head_timestamp(self, request: HeadTimestampRequest) -> datetime | None:
@@ -446,7 +653,7 @@ class IBKRMarketDataExtClient:
         return _parse_tick_timestamp(ts)
 
     # ------------------------------------------------------------------
-    # 6. Implied volatility calculation
+    # 7. Implied volatility calculation
     # ------------------------------------------------------------------
 
     async def calculate_iv(
@@ -484,7 +691,7 @@ class IBKRMarketDataExtClient:
         return vol
 
     # ------------------------------------------------------------------
-    # 7. Option price calculation
+    # 8. Option price calculation
     # ------------------------------------------------------------------
 
     async def calculate_option_price(
@@ -521,7 +728,7 @@ class IBKRMarketDataExtClient:
         return opt_price
 
     # ------------------------------------------------------------------
-    # 8. Symbol search (fuzzy matching)
+    # 9. Symbol search (fuzzy matching)
     # ------------------------------------------------------------------
 
     async def search_matching_symbols(self, pattern: str) -> list[SymbolDescription]:

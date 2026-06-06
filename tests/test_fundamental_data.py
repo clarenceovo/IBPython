@@ -1,4 +1,5 @@
 import json
+from datetime import date
 
 import pytest
 from pydantic import ValidationError
@@ -51,6 +52,65 @@ def test_wsh_event_data_request_accepts_raw_filter_json() -> None:
     request = WSHEventDataRequest(raw_filter_json=raw_filter)
 
     assert request.to_filter_json() == raw_filter
+
+
+def test_wsh_event_data_request_builds_ibkr_wsh_object_kwargs() -> None:
+    request = WSHEventDataRequest(
+        con_ids=[8314],
+        event_types=["wshe_ed"],
+        fill_watchlist=True,
+        total_limit=25,
+    )
+
+    kwargs = request.to_wsh_event_data_kwargs()
+
+    assert json.loads(kwargs["filter"])["watchlist"] == ["8314"]
+    assert kwargs["fillWatchlist"] is True
+    assert kwargs["totalLimit"] == 25
+
+
+def test_wsh_event_data_request_supports_date_bounded_watchlist_mode() -> None:
+    request = WSHEventDataRequest(
+        fill_watchlist=True,
+        start_date=date(2026, 6, 1),
+        end_date="20260630",
+        total_limit=25,
+    )
+
+    kwargs = request.to_wsh_event_data_kwargs()
+
+    assert "filter" not in kwargs
+    assert kwargs["startDate"] == "20260601"
+    assert kwargs["endDate"] == "20260630"
+    assert kwargs["fillWatchlist"] is True
+    assert kwargs["totalLimit"] == 25
+
+
+def test_wsh_event_data_request_supports_con_id_mode_without_filter_json() -> None:
+    request = WSHEventDataRequest(con_id=8314, start_date="2026-06-01", end_date="2026-06-30", total_limit=10)
+
+    assert request.uses_filter_json is False
+    assert request.to_wsh_event_data_kwargs() == {
+        "conId": 8314,
+        "startDate": "20260601",
+        "endDate": "20260630",
+        "totalLimit": 10,
+    }
+
+
+def test_wsh_event_data_request_rejects_con_id_plus_filter_fields() -> None:
+    with pytest.raises(ValidationError):
+        WSHEventDataRequest(con_id=8314, event_types=["wshe_ed"])
+
+
+def test_wsh_event_data_request_rejects_date_bounds_plus_filter_fields() -> None:
+    with pytest.raises(ValidationError):
+        WSHEventDataRequest(start_date="20260601", country="US")
+
+
+def test_wsh_event_data_request_rejects_inverted_date_range() -> None:
+    with pytest.raises(ValidationError):
+        WSHEventDataRequest(start_date="20260630", end_date="20260601")
 
 
 def test_wsh_reports_parse_raw_json_payloads() -> None:

@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from src.feeds.contracts import ContractSpec
+from src.feeds.exceptions import IBKRMarketDataLeaseTimeoutError, IBKRMarketDataUnavailableError
 from src.feeds.tick_data import (
     HeadTimestampRequest,
     HistoricalTickRequest,
     HistoricalTickResponse,
     IVCalcRequest,
+    MarketDepthLevel,
+    MarketDepthSnapshot,
     MarketRule,
     OptionPriceCalcRequest,
     PriceIncrement,
@@ -30,6 +35,7 @@ from src.feeds.ibkr_marketdata_ext import (
     _what_to_show_to_tick_type,
     _parse_tick_timestamp,
 )
+from src.transport.metrics import metrics
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +139,29 @@ class TestSmartComponent:
     def test_valid_component(self) -> None:
         comp = SmartComponent(exchange="NYSE", con_id=123, description="New York Stock Exchange")
         assert comp.exchange == "NYSE"
+
+
+class TestMarketDepthSnapshot:
+    def test_valid_depth_snapshot(self) -> None:
+        snapshot = MarketDepthSnapshot(
+            symbol="AAPL",
+            asset_class="equity",
+            exchange="SMART",
+            currency="USD",
+            primary_exchange="NASDAQ",
+            con_id=265598,
+            sec_type="STK",
+            num_rows=5,
+            is_smart_depth=True,
+            snapshot_wait_seconds=1.5,
+            received_at=datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc),
+            bids=[MarketDepthLevel(position=0, price=100.0, size=10, market_maker="ARCA")],
+            asks=[MarketDepthLevel(position=0, price=100.1, size=12, market_maker="ISLAND")],
+        )
+
+        assert snapshot.symbol == "AAPL"
+        assert snapshot.asset_class == "equity"
+        assert snapshot.bids[0].market_maker == "ARCA"
 
 
 class TestSymbolDescription:
@@ -290,6 +319,41 @@ class _FakeConnection:
         return isinstance(exc, (ConnectionError, OSError))
 
 
+class _FakeMarketDataLease:
+    def __init__(self) -> None:
+        self.released = False
+
+    async def release(self) -> None:
+        self.released = True
+
+
+class _LeaseConnection(_FakeConnection):
+    def __init__(self, ib: Any | None = None, *, lease: _FakeMarketDataLease | None = None) -> None:
+        super().__init__(ib)
+        self.lease = lease or _FakeMarketDataLease()
+
+    async def acquire_market_data_line(
+        self,
+        *,
+        contract_key: str,
+        operation: str,
+        ttl_seconds: float | None = None,
+    ) -> _FakeMarketDataLease:
+        return self.lease
+
+
+class _SlowLeaseConnection(_FakeConnection):
+    async def acquire_market_data_line(
+        self,
+        *,
+        contract_key: str,
+        operation: str,
+        ttl_seconds: float | None = None,
+    ) -> _FakeMarketDataLease:
+        await asyncio.sleep(0.1)
+        return _FakeMarketDataLease()
+
+
 class _FakePacingGuard:
     async def acquire(self, request: Any) -> None:
         pass
@@ -321,6 +385,69 @@ class FakeIBTickByTick:
 
     def isConnected(self) -> bool:
         return True
+
+
+class FakeIBMarketDepth:
+    """IB mock that supports market depth snapshots."""
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[Any, int, bool, list[Any]]] = []
+        self.cancelled: list[tuple[Any, bool]] = []
+
+    def reqMktDepth(
+        self,
+        contract: Any,
+        *,
+        numRows: int,
+        isSmartDepth: bool,
+        mktDepthOptions: list[Any],
+    ) -> SimpleNamespace:
+        self.requests.append((contract, numRows, isSmartDepth, mktDepthOptions))
+        return SimpleNamespace(
+            domBids=[
+                SimpleNamespace(price=100.0, size=10, marketMaker="ARCA"),
+                SimpleNamespace(price=99.9, size=20, marketMaker="NYSE"),
+            ],
+            domAsks=[
+                SimpleNamespace(price=100.1, size=12, marketMaker="ISLAND"),
+            ],
+            domTicks=[SimpleNamespace()],
+        )
+
+    def cancelMktDepth(self, contract: Any, *, isSmartDepth: bool = False) -> None:
+        self.cancelled.append((contract, isSmartDepth))
+
+    def isConnected(self) -> bool:
+        return True
+
+
+class FakeIBEmptyMarketDepth(FakeIBMarketDepth):
+    """IB mock that returns a market-depth ticker with no DOM levels."""
+
+    def reqMktDepth(
+        self,
+        contract: Any,
+        *,
+        numRows: int,
+        isSmartDepth: bool,
+        mktDepthOptions: list[Any],
+    ) -> SimpleNamespace:
+        self.requests.append((contract, numRows, isSmartDepth, mktDepthOptions))
+        return SimpleNamespace(domBids=[], domAsks=[], domTicks=[])
+
+
+class FakeIBCancelFailsMarketDepth(FakeIBMarketDepth):
+    """IB mock that raises while cancelling an otherwise successful DOM subscription."""
+
+    def cancelMktDepth(self, contract: Any, *, isSmartDepth: bool = False) -> None:
+        super().cancelMktDepth(contract, isSmartDepth=isSmartDepth)
+        raise RuntimeError("cancel failed")
+
+
+def _metric_value(exposition: str, metric_prefix: str) -> float:
+    pattern = re.compile(rf"^{re.escape(metric_prefix)}\s+([0-9.]+)$", re.MULTILINE)
+    match = pattern.search(exposition)
+    return float(match.group(1)) if match else 0.0
 
 
 class TestIBKRMarketDataExtTickByTick:
@@ -407,6 +534,114 @@ class TestIBKRMarketDataExtTickByTick:
         # Here we just test the buffer append worked
         ticks = client.get_latest_ticks("MSFT")
         assert len(ticks) == 1
+
+
+class TestIBKRMarketDataExtMarketDepth:
+    @staticmethod
+    def _contract_and_spec() -> tuple[Any, ContractSpec]:
+        contract = SimpleNamespace(
+            conId=265598,
+            symbol="AAPL",
+            secType="STK",
+            exchange="SMART",
+            currency="USD",
+            primaryExchange="NASDAQ",
+        )
+        spec = ContractSpec(
+            symbol="AAPL",
+            asset_class="equity",
+            exchange="SMART",
+            currency="USD",
+            primary_exchange="NASDAQ",
+        )
+        return contract, spec
+
+    def test_load_market_depth_snapshot_requests_and_cancels(self) -> None:
+        fake_ib = FakeIBMarketDepth()
+        conn = _FakeConnection(fake_ib)
+        client = IBKRMarketDataExtClient(conn)
+        contract, spec = self._contract_and_spec()
+
+        snapshot = asyncio.run(
+            client.load_market_depth_snapshot(
+                contract=contract,
+                spec=spec,
+                num_rows=5,
+                is_smart_depth=True,
+                snapshot_wait_seconds=0.001,
+            )
+        )
+
+        assert snapshot.symbol == "AAPL"
+        assert snapshot.con_id == 265598
+        assert len(snapshot.bids) == 2
+        assert snapshot.asks[0].price == pytest.approx(100.1)
+        assert fake_ib.requests[0][1] == 5
+        assert fake_ib.requests[0][2] is True
+        assert fake_ib.cancelled == [(contract, True)]
+
+    def test_load_market_depth_snapshot_empty_book_is_unavailable(self) -> None:
+        fake_ib = FakeIBEmptyMarketDepth()
+        conn = _FakeConnection(fake_ib)
+        client = IBKRMarketDataExtClient(conn)
+        contract, spec = self._contract_and_spec()
+
+        with pytest.raises(IBKRMarketDataUnavailableError, match="No market depth levels"):
+            asyncio.run(
+                client.load_market_depth_snapshot(
+                    contract=contract,
+                    spec=spec,
+                    snapshot_wait_seconds=0.001,
+                )
+            )
+
+        assert fake_ib.cancelled == [(contract, False)]
+
+    def test_load_market_depth_snapshot_lease_timeout_is_backpressure(self) -> None:
+        fake_ib = FakeIBMarketDepth()
+        conn = _SlowLeaseConnection(fake_ib)
+        client = IBKRMarketDataExtClient(conn)
+        contract, spec = self._contract_and_spec()
+
+        with pytest.raises(IBKRMarketDataLeaseTimeoutError, match="line unavailable"):
+            asyncio.run(
+                client.load_market_depth_snapshot(
+                    contract=contract,
+                    spec=spec,
+                    snapshot_wait_seconds=0.001,
+                    request_timeout_seconds=1.0,
+                    lease_wait_seconds=0.001,
+                )
+            )
+
+        assert fake_ib.requests == []
+
+    def test_load_market_depth_snapshot_cancel_failure_releases_lease_and_records_metric(self) -> None:
+        fake_ib = FakeIBCancelFailsMarketDepth()
+        lease = _FakeMarketDataLease()
+        conn = _LeaseConnection(fake_ib, lease=lease)
+        client = IBKRMarketDataExtClient(conn)
+        contract, spec = self._contract_and_spec()
+        before = _metric_value(
+            metrics.expose(),
+            'market_depth_cleanup_failures_total{operation="cancelMktDepth"}',
+        )
+
+        snapshot = asyncio.run(
+            client.load_market_depth_snapshot(
+                contract=contract,
+                spec=spec,
+                snapshot_wait_seconds=0.001,
+            )
+        )
+
+        after = _metric_value(
+            metrics.expose(),
+            'market_depth_cleanup_failures_total{operation="cancelMktDepth"}',
+        )
+        assert snapshot.symbol == "AAPL"
+        assert lease.released is True
+        assert after == before + 1
 
 
 class FakeIBHistoricalTicks:
