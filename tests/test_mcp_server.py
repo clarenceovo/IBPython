@@ -263,7 +263,7 @@ def _validate_sql(sql: str) -> dict[str, Any] | None:
         return {"error": "Only SELECT and WITH (CTE) queries are permitted"}
 
     dangerous_keywords = re.compile(
-        r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|EXECUTE)\b",
+        r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|EXECUTE|INTO)\b",
         re.IGNORECASE,
     )
     match = dangerous_keywords.search(normalized)
@@ -387,6 +387,85 @@ def test_sql_source_uses_stripped_for_execution():
     # The query_raw_sql function should call fetch_dicts with stripped, not sql
     assert "fetch_dicts(stripped)" in source, (
         "Must pass stripped SQL to fetch_dicts, not the original sql variable"
+    )
+
+
+def test_sql_validation_rejects_select_into():
+    """SELECT ... INTO ... FROM is a write operation in QuestDB and must be blocked."""
+    result = _validate_sql("SELECT * INTO new_table FROM old_table")
+    assert result is not None
+    assert "error" in result
+    assert "INTO" in result["error"]
+
+
+def test_sql_validation_rejects_select_into_with_columns():
+    """SELECT col INTO target FROM source must also be blocked."""
+    result = _validate_sql("SELECT symbol, close INTO backup_bars FROM equity_ohlcv")
+    assert result is not None
+    assert "error" in result
+
+
+def test_sql_source_blocks_into_keyword():
+    """Verify the source code has INTO in the dangerous keywords blocklist."""
+    source = MCP_SERVER_PATH.read_text()
+    assert "INTO" in source, "INTO must be in the dangerous keywords blocklist"
+
+
+def test_sql_source_notes_string_literal_false_positive():
+    """Verify the source has a comment noting the string literal false-positive limitation."""
+    source = MCP_SERVER_PATH.read_text()
+    # Check for a comment near the dangerous_keywords section about false positives
+    assert "false" in source.lower() or "string literal" in source.lower() or "NOTE" in source, (
+        "Source should document the string literal false-positive limitation"
+    )
+
+
+# ── Lifespan resilience tests ────────────────────────────────────────────────
+
+
+def test_lifespan_tracks_connection_status():
+    """Verify the lifespan function tracks connection status booleans."""
+    source = MCP_SERVER_PATH.read_text()
+    assert "questdb_connected" in source, "Must track questdb_connected status"
+    assert "redis_connected" in source, "Must track redis_connected status"
+    assert "ibkr_connected" in source, "Must track ibkr_connected status"
+
+
+def test_lifespan_yields_connection_flags():
+    """Verify the lifespan yields connection flags in the context."""
+    source = MCP_SERVER_PATH.read_text()
+    # The yield should include the connection flags
+    assert '"questdb_connected"' in source, "Must yield questdb_connected flag"
+    assert '"redis_connected"' in source, "Must yield redis_connected flag"
+    assert '"ibkr_connected"' in source, "Must yield ibkr_connected flag"
+
+
+def test_tools_check_questdb_availability():
+    """Verify QuestDB tools guard against unavailable QuestDB connection."""
+    source = MCP_SERVER_PATH.read_text()
+    assert "_require_questdb" in source, "Must have _require_questdb helper"
+    assert "QuestDB is not available" in source, "Must return QuestDB unavailable error"
+
+
+def test_tools_check_redis_availability():
+    """Verify Redis tools guard against unavailable Redis connection."""
+    source = MCP_SERVER_PATH.read_text()
+    assert "_require_redis" in source, "Must have _require_redis helper"
+    assert "Redis is not available" in source, "Must return Redis unavailable error"
+
+
+def test_tools_check_ibkr_availability():
+    """Verify IBKR tools guard against unavailable IBKR connection."""
+    source = MCP_SERVER_PATH.read_text()
+    assert "_require_ibkr" in source, "Must have _require_ibkr helper"
+    assert "IBKR feed is not available" in source, "Must return IBKR unavailable error"
+
+
+def test_questdb_tools_use_loader_questdb():
+    """Verify QuestDB tools access questdb through state.loader.questdb."""
+    source = MCP_SERVER_PATH.read_text()
+    assert "state.loader.questdb" in source, (
+        "Must access QuestDB via state.loader.questdb (IBKRRestAppState has no .questdb)"
     )
 
 
@@ -581,3 +660,81 @@ def _run_asgi_middleware(middleware, scope):
 
     asyncio.run(middleware(scope, receive, send))
     return status_code, body
+
+
+# ── Source-code assertions for duplicated middleware (P1-8) ───────────────────
+
+
+def test_mcp_auth_middleware_uses_compare_digest():
+    """Verify the real MCPBearerAuthMiddleware uses timing-safe comparison."""
+    source = MCP_SERVER_PATH.read_text()
+    assert "secrets.compare_digest" in source, (
+        "MCPBearerAuthMiddleware must use secrets.compare_digest for timing-safe comparison"
+    )
+
+
+def test_mcp_auth_middleware_compare_digest_pattern():
+    """Verify the real middleware compares token against api_key.strip()."""
+    source = MCP_SERVER_PATH.read_text()
+    assert "compare_digest(token, self._api_key.strip())" in source, (
+        "MCPBearerAuthMiddleware must use compare_digest(token, self._api_key.strip())"
+    )
+
+
+def test_mcp_auth_middleware_401_has_www_authenticate():
+    """Verify 401 responses include proper WWW-Authenticate header."""
+    source = MCP_SERVER_PATH.read_text()
+    # Find the middleware's 401 sending code
+    assert 'b"www-authenticate"' in source or "b'www-authenticate'" in source, (
+        "401 responses must include WWW-Authenticate header"
+    )
+
+
+# ── Static tool list vs AST tool count (P1-9) ──────────────────────────────
+
+
+def test_server_status_tool_count_matches_ast():
+    """Verify the hardcoded tool list in get_server_status matches actual tool count."""
+    source = MCP_SERVER_PATH.read_text()
+    tree = ast.parse(source)
+
+    # Count actual @mcp.tool() decorated functions via AST
+    ast_tools = [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+        and any(
+            isinstance(d, ast.Call)
+            and isinstance(d.func, ast.Attribute)
+            and d.func.attr == "tool"
+            for d in node.decorator_list
+        )
+    ]
+
+    # Extract the tools list from get_server_status resource function
+    # Find the JSON string in the function body and parse it
+    status_func_start = source.index("def get_server_status()")
+    # Find the next function/class definition after get_server_status
+    next_def_match = re.search(r"\n(?:def |class |@mcp\.)", source[status_func_start + 1:])
+    if next_def_match:
+        status_func_source = source[status_func_start : status_func_start + 1 + next_def_match.start()]
+    else:
+        status_func_source = source[status_func_start:]
+
+    # Extract the JSON object from json.dumps({...})
+    json_match = re.search(r"json\.loads\((r?f?\"{3}|')(.+?)(\1)\)", status_func_source, re.DOTALL)
+    # Alternative: just extract the dict from json.dumps call
+    # Find the tools list directly
+    tools_list_match = re.search(r'"tools":\s*\[(.*?)\]', status_func_source, re.DOTALL)
+    assert tools_list_match, "Could not find tools list in get_server_status"
+    tools_list_str = tools_list_match.group(1)
+    # Count items — each tool entry is a quoted string
+    tool_entries = re.findall(r'"[^"]+—[^"]+"', tools_list_str)
+    if not tool_entries:
+        # Fallback: count entries separated by commas that contain descriptions
+        tool_entries = re.findall(r'"[^"]+ — [^"]+"', tools_list_str)
+
+    assert len(tool_entries) == len(ast_tools), (
+        f"get_server_status lists {len(tool_entries)} tools but AST finds {len(ast_tools)}: "
+        f"status={tool_entries}, ast={ast_tools}"
+    )

@@ -42,25 +42,37 @@ async def mcp_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     settings = load_settings()
     state = build_rest_app_state(settings)
 
+    redis_connected = False
+    questdb_connected = False
+    ibkr_connected = False
+
     try:
         await state.redis.connect()
+        redis_connected = True
         logger.info("MCP server: Redis connected")
     except Exception:
         logger.exception("MCP server: Redis connection failed")
 
     try:
-        await state.questdb.connect()
+        await state.loader.questdb.connect()
+        questdb_connected = True
         logger.info("MCP server: QuestDB connected")
     except Exception:
         logger.exception("MCP server: QuestDB connection failed")
 
     try:
         await state.feed.connect()
+        ibkr_connected = True
         logger.info("MCP server: IBKR feed connected")
     except Exception:
         logger.exception("MCP server: IBKR feed connection failed (tools requiring live IBKR will be unavailable)")
 
-    yield {"ibkr_state": state}
+    yield {
+        "ibkr_state": state,
+        "redis_connected": redis_connected,
+        "questdb_connected": questdb_connected,
+        "ibkr_connected": ibkr_connected,
+    }
 
     await state.close()
     logger.info("MCP server: all connections closed")
@@ -68,13 +80,34 @@ async def mcp_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
 
 mcp = FastMCP(
     "IBPython Market Data",
-    version="0.1.0",
+    version=constants.APP_VERSION,
     lifespan=mcp_lifespan,
 )
 
 
 def _state(ctx: Context) -> IBKRRestAppState:
     return ctx.request_context.lifespan_context["ibkr_state"]
+
+
+def _require_questdb(ctx: Context) -> dict[str, Any] | None:
+    """Return an error dict if QuestDB is not connected, else None."""
+    if not ctx.request_context.lifespan_context.get("questdb_connected"):
+        return {"error": "QuestDB is not available"}
+    return None
+
+
+def _require_redis(ctx: Context) -> dict[str, Any] | None:
+    """Return an error dict if Redis is not connected, else None."""
+    if not ctx.request_context.lifespan_context.get("redis_connected"):
+        return {"error": "Redis is not available"}
+    return None
+
+
+def _require_ibkr(ctx: Context) -> dict[str, Any] | None:
+    """Return an error dict if IBKR feed is not connected, else None."""
+    if not ctx.request_context.lifespan_context.get("ibkr_connected"):
+        return {"error": "IBKR feed is not available"}
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -103,12 +136,14 @@ async def query_historical_ohlcv(
         end: End datetime in ISO format
         limit: Max rows to return (default 5000, max 50000)
     """
+    if err := _require_questdb(ctx):
+        return [err]  # type: ignore[list-item]
     state = _state(ctx)
     limit = min(limit, 50_000)
     start_dt = datetime.fromisoformat(start) if start else None
     end_dt = datetime.fromisoformat(end) if end else None
 
-    return await state.questdb.query_historical_bars(
+    return await state.loader.questdb.query_historical_bars(
         symbol=symbol,
         asset_class=asset_class,
         bar_size=bar_size,
@@ -138,12 +173,15 @@ async def query_latest_bars(
         limit: Max rows (default 100)
     """
     state = _state(ctx)
-    return await state.questdb.query_latest_bars(
-        asset_class=asset_class,
-        bar_size=bar_size,
-        contract_key=contract_key,
-        limit=limit,
-    )
+    try:
+        return await state.loader.questdb.query_latest_bars(
+            asset_class=asset_class,
+            bar_size=bar_size,
+            contract_key=contract_key,
+            limit=limit,
+        )
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @mcp.tool()
@@ -180,9 +218,12 @@ async def query_raw_sql(
     if first_keyword not in ("SELECT", "WITH"):
         return {"error": "Only SELECT and WITH (CTE) queries are permitted"}
 
-    # Block dangerous keywords anywhere in the query
+    # Block dangerous keywords anywhere in the query.
+    # NOTE: This scans raw text including string literals, so queries like
+    #   SELECT * FROM foo WHERE name = 'INSERT INTO bar'
+    # will be falsely blocked. A full SQL parser would be needed to fix this.
     dangerous_keywords = re.compile(
-        r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|EXECUTE)\b",
+        r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|EXECUTE|INTO)\b",
         re.IGNORECASE,
     )
     match = dangerous_keywords.search(normalized)
@@ -190,7 +231,7 @@ async def query_raw_sql(
         return {"error": f"Keyword '{match.group(1).upper()}' is not permitted in queries"}
 
     try:
-        return await state.questdb.fetch_dicts(stripped)
+        return await state.loader.questdb.fetch_dicts(stripped)
     except Exception as e:
         return {"error": str(e)}
 
@@ -251,6 +292,12 @@ async def list_scheduler_jobs(
     return {"jobs": keys, "count": len(keys)}
 
 
+_SENSITIVE_KEY_PATTERNS = re.compile(
+    r"(auth|token|secret|password|bearer)",
+    re.IGNORECASE,
+)
+
+
 @mcp.tool()
 async def get_redis_key(
     ctx: Context,
@@ -261,6 +308,9 @@ async def get_redis_key(
     Args:
         key: Full Redis key to read
     """
+    if _SENSITIVE_KEY_PATTERNS.search(key):
+        return {"error": "Access to this key is restricted"}
+
     state = _state(ctx)
     raw = await state.redis.get_raw(key)
     if raw is None:
@@ -299,24 +349,27 @@ async def load_option_chains(
     from src.feeds.contracts import OptionChainRequest
     from src.feeds.models import AssetClass
 
-    request = OptionChainRequest(
-        symbol=symbol,
-        asset_class=AssetClass(asset_class.upper()),
-        exchange=exchange,
-        currency=currency,
-    )
-    chains = await state.feed.load_option_chains(request)
-    result = []
-    for chain in chains:
-        result.append({
-            "symbol": chain.symbol,
-            "exchange": chain.exchange,
-            "expirations": chain.expirations,
-            "strikes": chain.strikes,
-            "trading_class": getattr(chain, "trading_class", None),
-            "multiplier": getattr(chain, "multiplier", None),
-        })
-    return result
+    try:
+        request = OptionChainRequest(
+            symbol=symbol,
+            asset_class=AssetClass(asset_class.upper()),
+            exchange=exchange,
+            currency=currency,
+        )
+        chains = await state.feed.load_option_chains(request)
+        result = []
+        for chain in chains:
+            result.append({
+                "symbol": chain.symbol,
+                "exchange": chain.exchange,
+                "expirations": chain.expirations,
+                "strikes": chain.strikes,
+                "trading_class": getattr(chain, "trading_class", None),
+                "multiplier": getattr(chain, "multiplier", None),
+            })
+        return result
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @mcp.tool()
@@ -330,8 +383,11 @@ async def load_account_summary(
         account: Account ID (empty string for default account)
     """
     state = _state(ctx)
-    rows = await state.feed.load_account_summary(account=account)
-    return {row.tag: {"value": row.value, "currency": row.currency} for row in rows}
+    try:
+        rows = await state.feed.load_account_summary(account=account)
+        return {row.tag: {"value": row.value, "currency": row.currency} for row in rows}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @mcp.tool()
@@ -340,20 +396,23 @@ async def load_live_positions(
 ) -> list[dict[str, Any]]:
     """Load all live positions from IBKR."""
     state = _state(ctx)
-    positions = await state.feed.load_live_positions()
-    return [
-        {
-            "symbol": p.symbol,
-            "sec_type": p.sec_type,
-            "exchange": p.exchange,
-            "currency": p.currency,
-            "position": p.position,
-            "average_cost": p.average_cost,
-            "account": p.account,
-            "con_id": p.con_id,
-        }
-        for p in positions
-    ]
+    try:
+        positions = await state.feed.load_live_positions()
+        return [
+            {
+                "symbol": p.symbol,
+                "sec_type": p.sec_type,
+                "exchange": p.exchange,
+                "currency": p.currency,
+                "position": p.position,
+                "average_cost": p.average_cost,
+                "account": p.account,
+                "con_id": p.con_id,
+            }
+            for p in positions
+        ]
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @mcp.tool()
@@ -443,10 +502,13 @@ async def search_contracts(
         pattern: Search pattern (e.g. 'Apple', 'TESLA', 'ES futures')
     """
     state = _state(ctx)
-    results = await state.feed.search_matching_symbols(pattern)
-    if not results:
-        return {"message": "No matching contracts found"}
-    return results
+    try:
+        results = await state.feed.search_matching_symbols(pattern)
+        if not results:
+            return {"message": "No matching contracts found"}
+        return results
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -493,6 +555,9 @@ async def load_news(
     symbol: str,
     provider_codes: list[str] | None = None,
     limit: int = 20,
+    asset_class: str = "EQUITY",
+    exchange: str = "SMART",
+    currency: str = "USD",
 ) -> dict[str, Any] | list[dict[str, Any]]:
     """Load recent news headlines for a symbol from IBKR.
 
@@ -500,6 +565,9 @@ async def load_news(
         symbol: Ticker symbol (e.g. 'AAPL', 'BTC')
         provider_codes: News provider codes (default ['BRFG', 'BRFUPDN'])
         limit: Max articles to return (default 20, max 300)
+        asset_class: Asset class (CRYPTO, FUTURES, INDEX, FX, EQUITY, BOND, OPTION; default 'EQUITY')
+        exchange: Exchange (default 'SMART')
+        currency: Currency (default 'USD')
     """
     state = _state(ctx)
     from src.feeds.news import HistoricalNewsRequest
@@ -508,7 +576,7 @@ async def load_news(
     try:
         from src.feeds.contracts import ContractSpec
         from src.feeds.models import AssetClass
-        spec = ContractSpec(symbol=symbol, asset_class=AssetClass.EQUITY, exchange="SMART", currency="USD")
+        spec = ContractSpec(symbol=symbol, asset_class=AssetClass(asset_class.upper()), exchange=exchange, currency=currency)
         contract = await state.feed.qualify_contract(spec)
         con_id = contract.conId
     except Exception:
@@ -547,7 +615,7 @@ async def query_equity_snapshots(
     state = _state(ctx)
     start_dt = datetime.fromisoformat(start) if start else None
     end_dt = datetime.fromisoformat(end) if end else None
-    return await state.questdb.query_snapshots(symbol=symbol, start=start_dt, end=end_dt, limit=limit)
+    return await state.loader.questdb.query_snapshots(symbol=symbol, start=start_dt, end=end_dt, limit=limit)
 
 
 @mcp.tool()
@@ -575,7 +643,7 @@ async def query_fx_option_snapshots(
     state = _state(ctx)
     start_dt = datetime.fromisoformat(start) if start else None
     end_dt = datetime.fromisoformat(end) if end else None
-    return await state.questdb.query_fx_option_snapshots(
+    return await state.loader.questdb.query_fx_option_snapshots(
         symbol=symbol, expiry=expiry, strike=strike, right=right,
         start=start_dt, end=end_dt, limit=limit,
     )
@@ -590,7 +658,7 @@ def get_server_status() -> str:
     """IBPython MCP server status and available capabilities."""
     return json.dumps({
         "server": "IBPython Market Data MCP",
-        "version": "0.1.0",
+        "version": constants.APP_VERSION,
         "tools": [
             "query_historical_ohlcv — QuestDB historical OHLCV bars",
             "query_latest_bars — Latest bar per symbol from QuestDB",
