@@ -96,15 +96,20 @@ class EconomicCalendarRequest(WSHEventDataRequest):
 
     def to_wsh_request(self) -> WSHEventDataRequest:
         if not self.uses_filter_json:
-            return WSHEventDataRequest(
-                con_id=self.con_id,
-                fill_watchlist=self.fill_watchlist,
-                fill_portfolio=self.fill_portfolio,
-                fill_competitors=self.fill_competitors,
-                start_date=self.start_date,
-                end_date=self.end_date,
-                total_limit=self.total_limit,
-            )
+            kwargs: dict[str, Any] = {
+                "fill_watchlist": self.fill_watchlist,
+                "fill_portfolio": self.fill_portfolio,
+                "fill_competitors": self.fill_competitors,
+            }
+            if self.con_id is not None:
+                kwargs["con_id"] = self.con_id
+            if self.start_date is not None:
+                kwargs["start_date"] = self.start_date
+            if self.end_date is not None:
+                kwargs["end_date"] = self.end_date
+            if self.total_limit is not None:
+                kwargs["total_limit"] = self.total_limit
+            return WSHEventDataRequest(**kwargs)
         return WSHEventDataRequest(
             con_ids=self.con_ids,
             country=self.country,
@@ -116,8 +121,6 @@ class EconomicCalendarRequest(WSHEventDataRequest):
             fill_watchlist=self.fill_watchlist,
             fill_portfolio=self.fill_portfolio,
             fill_competitors=self.fill_competitors,
-            start_date=self.start_date,
-            end_date=self.end_date,
             total_limit=self.total_limit,
         )
 
@@ -135,6 +138,7 @@ class EconomicCalendarResponse(BaseModel):
     caveats: tuple[str, ...] = (
         "IBKR exposes this through Wall Street Horizon event calendar data, not a dedicated macroeconomic-release calendar endpoint.",
         "Available filters and event-type tags are entitlement/session dependent; call /reference-data/wsh/metadata to inspect them.",
+        "IBKR WSH accepts one event-type tag per request; issue separate requests for multiple event categories.",
         "A Wall Street Horizon Corporate Event Data research subscription must be enabled for the account.",
     )
     request_filter_json: str

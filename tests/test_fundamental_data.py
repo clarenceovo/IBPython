@@ -36,14 +36,13 @@ def test_fundamental_data_request_rejects_non_equity_asset_class() -> None:
 
 
 def test_wsh_event_data_request_builds_filter_json() -> None:
-    request = WSHEventDataRequest(con_ids=[8314], event_types=["wshe_ed", "wshe_bod"], limit=5)
+    request = WSHEventDataRequest(con_ids=[8314], event_types=["wshe_ed"], limit=5)
 
     payload = json.loads(request.to_filter_json())
 
     assert payload["country"] == "All"
     assert payload["watchlist"] == ["8314"]
     assert payload["limit"] == 5
-    assert payload["wshe_bod"] == "true"
     assert payload["wshe_ed"] == "true"
 
 
@@ -106,6 +105,11 @@ def test_wsh_event_data_request_rejects_con_id_plus_filter_fields() -> None:
 def test_wsh_event_data_request_rejects_date_bounds_plus_filter_fields() -> None:
     with pytest.raises(ValidationError):
         WSHEventDataRequest(start_date="20260601", country="US")
+
+
+def test_wsh_event_data_request_rejects_multiple_event_type_tags() -> None:
+    with pytest.raises(ValidationError):
+        WSHEventDataRequest(event_types=["wshe_ed", "wshe_bod"])
 
 
 def test_wsh_event_data_request_rejects_inverted_date_range() -> None:

@@ -167,6 +167,8 @@ class WSHEventDataRequest(BaseModel):
     def validate_wsh_request_mode(self) -> Self:
         if self.start_date and self.end_date and self.start_date > self.end_date:
             raise ValueError("start_date must be on or before end_date")
+        if len(self.event_types) > 1:
+            raise ValueError("IBKR WSH accepts only one event type tag per request")
 
         filter_fields = {
             "con_ids",
