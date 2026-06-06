@@ -10,9 +10,17 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from src.config.settings import Settings, load_settings
+from src.config.config_constant import APP_VERSION
 from src.transport.metrics import MetricsMiddleware, metrics
 from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
 from src.webapp.middleware.correlation import CorrelationIdFilter, CorrelationIdMiddleware
+from src.webapp.middleware.request_timeout import RequestTimeoutMiddleware
+
+# Maximum request body size (10 MB). Prevents memory exhaustion from
+# unbounded payloads.
+_MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024
+
+from src.webapp.middleware.body_limit import RequestBodyLimitMiddleware
 from src.webapp.routers import (
     account,
     business,
@@ -31,7 +39,6 @@ from src.webapp.routers import (
     system,
     tick_data,
 )
-from src.webapp.routers import market_data  # noqa: F401 — kept for import compatibility
 from src.feeds.ibkr_historical import HistoricalRequestTooLargeError
 from src.feeds.exceptions import (
     IBKRConnectionError,
@@ -115,16 +122,24 @@ def create_app(
             resolved_settings.ibkr_client_id,
         )
         if resolved_settings.ibkr_rest_connect_on_startup:
-            await app_state.connect()
+            try:
+                await app_state.connect()
+            except Exception:
+                logger.exception("IBKRRestApp startup failed — exiting to allow orchestrator restart")
+                # Re-raise so uvicorn/gunicorn exits with non-zero code.
+                # This prevents the service from running half-alive.
+                raise
         try:
             yield
         finally:
             logger.info("IBKRRestApp shutdown requested; closing IBKR and Redis transports")
+            # Cancel SSE subscription cleanup task (single-process).
+            streaming.stop_cleanup_task()
             await app_state.close()
 
     fastapi_app = FastAPI(
         title=resolved_settings.ibkr_rest_app_name,
-        version="0.1.0",
+        version=APP_VERSION,
         description=(
             "# IBKR REST API\n\n"
             "Async FastAPI bridge for Interactive Brokers TWS/Gateway.\n\n"
@@ -186,6 +201,10 @@ def create_app(
     # Metrics middleware must wrap early (added last = wraps outermost)
     fastapi_app.add_middleware(MetricsMiddleware)
     fastapi_app.add_middleware(CorrelationIdMiddleware)
+    # Request deadline — prevents slow clients from occupying workers forever.
+    fastapi_app.add_middleware(RequestTimeoutMiddleware, timeout_seconds=resolved_settings.ibkr_rest_request_timeout_seconds)
+    # Reject oversized request bodies.
+    fastapi_app.add_middleware(RequestBodyLimitMiddleware, max_bytes=_MAX_REQUEST_BODY_BYTES)
 
     # API-wide bearer auth — wraps all endpoints when IBKR_API_BEARER_TOKEN is set
     if resolved_settings.ibkr_api_bearer_token:

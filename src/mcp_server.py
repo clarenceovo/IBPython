@@ -190,7 +190,7 @@ async def query_raw_sql(
         return {"error": f"Keyword '{match.group(1).upper()}' is not permitted in queries"}
 
     try:
-        return await state.questdb._fetch_dicts(stripped, [])
+        return await state.questdb.fetch_dicts(stripped)
     except Exception as e:
         return {"error": str(e)}
 

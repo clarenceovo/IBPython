@@ -144,9 +144,7 @@ class TelegramLogHandler(logging.Handler):
 
     @staticmethod
     def _stderr(msg: str) -> None:
-        import sys
-
-        print(f"[telegram_client] {msg}", file=sys.stderr)
+        logging.getLogger("telegram_client").warning("%s", msg)
 
 
 # ------------------------------------------------------------------
@@ -207,9 +205,9 @@ class AsyncTelegramLogHandler(logging.Handler):
             async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status >= 400:
                     body = await resp.text()
-                    print(f"[telegram_client] API error {resp.status}: {body}", file=__import__("sys").stderr)
+                    logging.getLogger("telegram_client").warning("API error %s: %s", resp.status, body)
         except Exception as exc:
-            print(f"[telegram_client] send failed: {exc}", file=__import__("sys").stderr)
+            logging.getLogger("telegram_client").warning("send failed: %s", exc)
 
     def emit(self, record: logging.LogRecord) -> None:
         try:

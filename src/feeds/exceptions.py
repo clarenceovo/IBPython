@@ -49,3 +49,15 @@ class QuestDBWriteError(Exception):
 class QuestDBConnectionError(Exception):
     """QuestDB connection failed."""
     pass
+
+
+class ConnectionStatus:
+    """String constants for IBKR connection status.
+
+    Using a class namespace (not Enum) so that string comparisons
+    remain natural: ``if status == ConnectionStatus.CONNECTED``.
+    """
+
+    CONNECTED = "connected"
+    DISCONNECTED = "disconnected"
+    DOWN = "down"

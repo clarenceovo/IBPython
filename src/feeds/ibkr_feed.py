@@ -99,6 +99,7 @@ from src.feeds.exceptions import (  # noqa: E402
     IBKRConnectionError,
     IBKRContractResolutionError,
     IBKRMarketDataUnavailableError,
+    ConnectionStatus,
 )
 from src.feeds.ibkr_historical import (
     IBKRHistoricalClient,
@@ -272,14 +273,14 @@ class IBKRFeedClient:
     def connection_status(self) -> str:
         """Return the current IBKR connection status as a string.
 
-        Returns one of: "connected", "disconnected", or "down".
+        Returns one of: ``ConnectionStatus.CONNECTED``,
+        ``ConnectionStatus.DISCONNECTED``, or ``ConnectionStatus.DOWN``.
         """
         if getattr(self._connection, '_connection_dead', False):
-            return "down"
-        ib = self._connection.ib
-        if ib is not None and hasattr(ib, 'isConnected') and ib.isConnected():
-            return "connected"
-        return "disconnected"
+            return ConnectionStatus.DOWN
+        if self._connection.is_connected:
+            return ConnectionStatus.CONNECTED
+        return ConnectionStatus.DISCONNECTED
 
     # ------------------------------------------------------------------
     # Connection lifecycle — delegated to connection manager

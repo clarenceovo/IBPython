@@ -23,4 +23,17 @@ USER appuser
 
 EXPOSE 8000
 
-CMD ["uvicorn", "src.webapp.app:get_app", "--host", "0.0.0.0", "--port", "8000", "--factory", "--loop", "asyncio", "--lifespan", "on"]
+# Gunicorn with uvicorn workers for production HA:
+#   - Multiple workers for process-level resilience
+#   - Graceful timeout for in-flight request drain during rolling deploys
+#   - Timeout kills stuck workers
+# Workers default to 4; override with GUNICORN_CMD_ARGS env var.
+CMD ["gunicorn", "src.webapp.app:get_app()", \
+     "--factory", \
+     "-k", "uvicorn.workers.UvicornWorker", \
+     "-w", "4", \
+     "-b", "0.0.0.0:8000", \
+     "--timeout", "120", \
+     "--graceful-timeout", "30", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-"]

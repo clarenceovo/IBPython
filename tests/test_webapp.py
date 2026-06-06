@@ -2319,12 +2319,13 @@ def test_streaming_subscription_removal_is_idempotent_for_active_gauge() -> None
     metrics.streaming_subscriptions_active.set(0)
 
 
-def test_docker_compose_api_healthcheck_uses_readiness() -> None:
+def test_docker_compose_api_healthcheck_uses_liveness() -> None:
     compose = (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
 
     assert "IBKR_REST_CONNECT_ON_STARTUP: ${IBKR_REST_CONNECT_ON_STARTUP:-true}" in compose
-    assert "http://localhost:8000/api/v1/system/readiness" in compose
-    assert "http://localhost:8000/api/v1/system/health" not in compose
+    # Docker healthcheck should use /live (cheap liveness probe, zero I/O),
+    # not /readiness (checks deps, can time out).
+    assert "http://localhost:8000/api/v1/system/live" in compose
 
 
 # ── API-wide bearer token auth tests ────────────────────────────────────────

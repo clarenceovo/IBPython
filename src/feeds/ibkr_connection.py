@@ -174,6 +174,11 @@ class IBKRConnectionManager:
         return self._ib
 
     @property
+    def is_connected(self) -> bool:
+        """Whether the underlying ib_insync IB instance is connected."""
+        return self._ib is not None and self._ib.isConnected()
+
+    @property
     def pacing_guard(self) -> "IBKRHistoricalPacingGuard | None":
         return self._pacing_guard
 

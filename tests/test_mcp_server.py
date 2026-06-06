@@ -382,12 +382,11 @@ def test_sql_validation_rejects_malformed_block_comment():
 
 
 def test_sql_source_uses_stripped_for_execution():
-    """Verify the source code passes stripped SQL to _fetch_dicts, not original."""
+    """Verify the source code passes stripped SQL to the query method, not original."""
     source = MCP_SERVER_PATH.read_text()
-    # The query_raw_sql function should call _fetch_dicts with stripped, not sql
-    # Look for the pattern: _fetch_dicts(stripped, [])
-    assert "_fetch_dicts(stripped, [])" in source, (
-        "Must pass stripped SQL to _fetch_dicts, not the original sql variable"
+    # The query_raw_sql function should call fetch_dicts with stripped, not sql
+    assert "fetch_dicts(stripped)" in source, (
+        "Must pass stripped SQL to fetch_dicts, not the original sql variable"
     )
 
 

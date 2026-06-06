@@ -164,6 +164,7 @@ class MySQLClient(MarketOHLCVStore):
             maxsize=self.pool_max_size,
             autocommit=self.autocommit,
             charset="utf8mb4",
+            connect_timeout=5,
         )
         self._connected = True
         logger.info("MySQL connected")

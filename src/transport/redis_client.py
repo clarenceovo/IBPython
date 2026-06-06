@@ -138,6 +138,8 @@ class MarketDataRedisClient:
             self.url,
             decode_responses=False,
             password=self.password or None,
+            socket_timeout=5.0,
+            socket_connect_timeout=5.0,
         )
 
     async def close(self) -> None:

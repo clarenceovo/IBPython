@@ -173,7 +173,7 @@ class QuestDBClient(MarketOHLCVStore):
             self.host, self.port, self.database, self.pool_size,
         )
         self._pool = AsyncConnectionPool(
-            conninfo=self.dsn,
+            conninfo=self.dsn + " connect_timeout=5",
             min_size=1,
             max_size=self.pool_size,
             open=False,
@@ -478,6 +478,14 @@ class QuestDBClient(MarketOHLCVStore):
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         sql, params = build_latest_query(asset_class=asset_class, bar_size=bar_size, contract_key=contract_key, limit=limit)
+        return await self._fetch_dicts(sql, params)
+
+    async def fetch_dicts(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
+        """Execute a validated SQL query and return rows as list[dict].
+
+        Callers **must** validate that *sql* is SELECT-only before calling
+        this method (e.g. via MCP ``query_raw_sql`` validation).
+        """
         return await self._fetch_dicts(sql, params)
 
     async def _fetch_dicts(self, sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:

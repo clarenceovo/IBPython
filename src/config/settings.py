@@ -77,6 +77,11 @@ class Settings(BaseModel):
         alias=constants.IBKR_REST_MARKET_DATA_CACHE_MAXSIZE_ENV,
         gt=0,
     )
+    ibkr_rest_request_timeout_seconds: float = Field(
+        default=60.0,
+        alias="IBKR_REST_REQUEST_TIMEOUT_SECONDS",
+        gt=0,
+    )
     ibkr_market_depth_request_timeout_seconds: float = Field(
         default=constants.DEFAULT_IBKR_MARKET_DEPTH_REQUEST_TIMEOUT_SECONDS,
         alias=constants.IBKR_MARKET_DEPTH_REQUEST_TIMEOUT_SECONDS_ENV,
