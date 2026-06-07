@@ -351,27 +351,21 @@ class IBKROrderClient:
         the order, waits briefly for acknowledgment, and returns the result.
         The order is UUID-tagged and cached to Redis for auditability.
 
-        If ``request.idempotency_key`` is provided, checks Redis for a previous
-        order with the same key. If found, returns the cached response instead
-        of submitting a new order.
+        If ``request.idempotency_key`` is provided, reserves it in Redis before
+        any live submission. Concurrent callers with the same key wait for the
+        reserved order's cached response instead of submitting another order.
         """
-        # Idempotency check
-        if request.idempotency_key and self._redis is not None:
-            cached_uuid = await self._check_idempotency_key(request.idempotency_key)
-            if cached_uuid is not None:
-                logger.info(
-                    "place_order: idempotency key=%s found existing order_uuid=%s, returning cached",
-                    request.idempotency_key,
-                    cached_uuid,
-                )
-                lookup = await self.get_cached_order(cached_uuid)
-                if lookup.found and lookup.envelope is not None and lookup.envelope.response:
-                    return OrderResponse.model_validate(lookup.envelope.response)
-                # Envelope missing — fall through to place a new order
-
-        await self._connection.ensure_connected()
-
         order_uuid = str(_uuid.uuid4())
+        if request.idempotency_key and self._redis is not None:
+            reserved, reserved_uuid = await self._reserve_idempotency_key(request.idempotency_key, order_uuid)
+            if not reserved:
+                logger.info(
+                    "place_order: idempotency key=%s is already reserved by order_uuid=%s",
+                    request.idempotency_key,
+                    reserved_uuid,
+                )
+                return await self._wait_for_idempotent_response(request.idempotency_key, reserved_uuid)
+
         envelope = OrderEnvelope(
             order_uuid=order_uuid,
             action="place",
@@ -395,6 +389,7 @@ class IBKROrderClient:
 
         await self._cache_envelope(envelope, ttl_seconds=0)
         try:
+            await self._connection.ensure_connected()
             qualified = await self._connection.with_retry(
                 lambda: self._ib.qualifyContractsAsync(contract),
                 operation=f"qualify_order_contract:{request.symbol}",
@@ -442,10 +437,6 @@ class IBKROrderClient:
         envelope.touch()
 
         await self._cache_envelope(envelope, ttl_seconds=0)
-
-        # Store idempotency key mapping
-        if request.idempotency_key and self._redis is not None:
-            await self._store_idempotency_key(request.idempotency_key, order_uuid)
 
         logger.info(
             "place_order: uuid=%s order_id=%s status=%s symbol=%s",
@@ -725,29 +716,66 @@ class IBKROrderClient:
 
     _IDEMPOTENCY_KEY_PREFIX = "order_idempotency:"
     _IDEMPOTENCY_TTL_SECONDS = 86400  # 24 hours
+    _IDEMPOTENCY_WAIT_TIMEOUT_SECONDS = 10.0
+    _IDEMPOTENCY_WAIT_INTERVAL_SECONDS = 0.05
 
-    async def _check_idempotency_key(self, idempotency_key: str) -> str | None:
-        """Check Redis for an existing order UUID mapped to the idempotency key."""
+    async def _reserve_idempotency_key(self, idempotency_key: str, order_uuid: str) -> tuple[bool, str]:
+        """Atomically reserve an idempotency key before live order submission."""
         try:
             key = f"{self._IDEMPOTENCY_KEY_PREFIX}{idempotency_key}"
             raw_client = await self._redis.raw_client()
+            reserved = await raw_client.set(
+                key,
+                order_uuid,
+                ex=self._IDEMPOTENCY_TTL_SECONDS,
+                nx=True,
+            )
+            if reserved:
+                logger.debug(
+                    "_reserve_idempotency_key: reserved key=%s -> uuid=%s (TTL=%ds)",
+                    idempotency_key,
+                    order_uuid,
+                    self._IDEMPOTENCY_TTL_SECONDS,
+                )
+                return True, order_uuid
+
             cached = await raw_client.get(key)
             if cached is not None:
-                return (cached.decode("utf-8") if isinstance(cached, bytes) else str(cached))
-            return None
-        except Exception:
-            logger.warning("_check_idempotency_key: failed for key=%s", idempotency_key, exc_info=True)
-            return None
+                return False, cached.decode("utf-8") if isinstance(cached, bytes) else str(cached)
 
-    async def _store_idempotency_key(self, idempotency_key: str, order_uuid: str) -> None:
-        """Store a mapping from idempotency key to order UUID in Redis with TTL."""
-        try:
-            key = f"{self._IDEMPOTENCY_KEY_PREFIX}{idempotency_key}"
-            raw_client = await self._redis.raw_client()
-            await raw_client.set(key, order_uuid, ex=self._IDEMPOTENCY_TTL_SECONDS)
-            logger.debug("_store_idempotency_key: stored key=%s -> uuid=%s (TTL=%ds)", idempotency_key, order_uuid, self._IDEMPOTENCY_TTL_SECONDS)
+            # The key may have expired between the failed SET NX and GET. Try
+            # once more; if it still cannot be read, fail closed.
+            reserved = await raw_client.set(
+                key,
+                order_uuid,
+                ex=self._IDEMPOTENCY_TTL_SECONDS,
+                nx=True,
+            )
+            if reserved:
+                return True, order_uuid
+            cached = await raw_client.get(key)
+            if cached is not None:
+                return False, cached.decode("utf-8") if isinstance(cached, bytes) else str(cached)
+            raise IBKROrderError("idempotency key reservation disappeared before it could be read")
+        except IBKROrderError:
+            raise
         except Exception:
-            logger.warning("_store_idempotency_key: failed for key=%s uuid=%s", idempotency_key, order_uuid, exc_info=True)
+            logger.warning("_reserve_idempotency_key: failed for key=%s", idempotency_key, exc_info=True)
+            raise IBKROrderError("idempotency key could not be reserved in Redis")
+
+    async def _wait_for_idempotent_response(self, idempotency_key: str, order_uuid: str) -> OrderResponse:
+        """Wait for the original request with this idempotency key to finish."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._IDEMPOTENCY_WAIT_TIMEOUT_SECONDS
+        while True:
+            lookup = await self.get_cached_order(order_uuid)
+            if lookup.found and lookup.envelope is not None and lookup.envelope.response:
+                return OrderResponse.model_validate(lookup.envelope.response)
+            if loop.time() >= deadline:
+                raise IBKROrderError(
+                    f"idempotency key {idempotency_key!r} is already processing order_uuid={order_uuid}; retry later"
+                )
+            await asyncio.sleep(self._IDEMPOTENCY_WAIT_INTERVAL_SECONDS)
 
 
 def _asset_class_from_sec_type(sec_type: str) -> AssetClass | None:

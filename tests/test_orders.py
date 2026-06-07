@@ -1218,6 +1218,7 @@ class FakeOrderRedis:
 
     def __init__(self) -> None:
         self._store: dict[str, str] = {}
+        self._lock = asyncio.Lock()
 
     async def cache_order_envelope(self, envelope_json: str, *, ttl: int | None = None) -> str:
         import json
@@ -1230,7 +1231,7 @@ class FakeOrderRedis:
         return self._store.get(f"OrderCache::{order_uuid}")
 
     async def scan_order_envelopes(self) -> list[str]:
-        return list(self._store.keys())
+        return [key for key in self._store if key.startswith("OrderCache::")]
 
     async def delete_order_envelope(self, order_uuid: str) -> bool:
         key = f"OrderCache::{order_uuid}"
@@ -1241,6 +1242,19 @@ class FakeOrderRedis:
 
     async def get_raw(self, key: str) -> str | None:
         return self._store.get(key)
+
+    async def raw_client(self) -> "FakeOrderRedis":
+        return self
+
+    async def get(self, key: str) -> str | None:
+        return self._store.get(key)
+
+    async def set(self, key: str, value: str, *, ex: int | None = None, nx: bool = False) -> bool:
+        async with self._lock:
+            if nx and key in self._store:
+                return False
+            self._store[key] = value
+            return True
 
 
 class TestOrderEnvelopeModel:
@@ -1472,6 +1486,47 @@ class TestOrderClientUUIDCaching:
         assert lookup.found
         assert lookup.envelope is not None
         assert lookup.envelope.ibkr_order_id == response.order_id
+
+    @pytest.mark.asyncio
+    async def test_idempotency_key_reservation_blocks_concurrent_duplicate_submit(self) -> None:
+        class SlowPlaceConnection(FakeConnection):
+            def __init__(self, ib: FakeIB) -> None:
+                super().__init__(ib)
+                self.place_waiting = asyncio.Event()
+                self.release_place = asyncio.Event()
+
+            async def wait_for_ibkr_request(self, *, operation: str, weight: int = 1) -> None:
+                await super().wait_for_ibkr_request(operation=operation, weight=weight)
+                if operation == "place_order:AAPL":
+                    self.place_waiting.set()
+                    await self.release_place.wait()
+
+        fake_ib = FakeIB()
+        conn = SlowPlaceConnection(fake_ib)
+        redis = FakeOrderRedis()
+        client = IBKROrderClient(conn, redis=redis)
+        request = PlaceOrderRequest(
+            symbol="AAPL",
+            action=OrderAction.BUY,
+            order_type=OrderType.LIMIT,
+            quantity=100,
+            price=150.0,
+            idempotency_key="retry-123",
+        )
+
+        first = asyncio.create_task(client.place_order(request))
+        await asyncio.wait_for(conn.place_waiting.wait(), timeout=1.0)
+        second = asyncio.create_task(client.place_order(request))
+        await asyncio.sleep(0.05)
+
+        assert len(fake_ib._placed_orders) == 0
+
+        conn.release_place.set()
+        first_response, second_response = await asyncio.gather(first, second)
+
+        assert len(fake_ib._placed_orders) == 1
+        assert first_response.order_uuid == second_response.order_uuid
+        assert first_response.order_id == second_response.order_id
 
 
 class TestOrderResponseUUID:
