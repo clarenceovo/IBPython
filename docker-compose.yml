@@ -68,7 +68,7 @@ services:
     image: ibpython-mcp:latest
     init: true
     ports:
-      - "${MCP_HTTP_PORT:-9000}:${MCP_HTTP_PORT:-9000}"
+      - "${MCP_HTTP_HOST_PORT:-9685}:${MCP_HTTP_PORT:-9000}"
     env_file:
       - path: .env
         required: true
