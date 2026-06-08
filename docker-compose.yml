@@ -2,7 +2,7 @@ x-app-env: &app-env
   IBKR_HOST: ${IBKR_DOCKER_HOST:-host.docker.internal}
   IBKR_PORT: ${IBKR_DOCKER_PORT:-4001}
   IBKR_MARKET_DATA_LINES: ${IBKR_MARKET_DATA_LINES:-100}
-  REDIS_URL: redis://redis:6379/0
+  REDIS_URL: ${REDIS_DOCKER_URL:-redis://redisinsight.novatradingtech.com:6379/0}
   REDIS_PASSWORD: ${REDIS_PASSWORD:-}
   QUESTDB_HOST: questdb
   QUESTDB_PORT: 8812
