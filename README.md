@@ -82,6 +82,7 @@ Core variables:
 | `IBKR_HOST` | `127.0.0.1` | TWS or IB Gateway host |
 | `IBKR_PORT` | `4001` | IBKR API port |
 | `IBKR_CLIENT_ID` | `1` | IBKR client ID; must be unique across notebooks/API clients |
+| `IBKR_MCP_CLIENT_ID` | `301` | IBKR client ID used by the MCP server |
 | `IBKR_MARKET_DATA_LINES` | `100` | Market data entitlement baseline for pacing analysis |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis URL |
 | `REDIS_PASSWORD` | empty | Optional Redis AUTH password |
@@ -203,10 +204,11 @@ The Compose app services set `IBKR_HOST` from `IBKR_DOCKER_HOST`, defaulting to 
 
 The scheduler uses `IBKR_DOCKER_REST_BASE_URL` inside Compose, defaulting to `http://ibkr-rest-app:8000`, so it calls the FastAPI service over the Docker network instead of container-local `localhost`.
 
-The API and scheduler use separate IBKR client IDs by default:
+The API, scheduler, and MCP server use separate IBKR client IDs by default:
 
 - `IBKR_API_CLIENT_ID=101`
 - `IBKR_SCHEDULER_CLIENT_ID=201`
+- `IBKR_MCP_CLIENT_ID=301`
 
 Keep those distinct from notebooks and other API clients.
 

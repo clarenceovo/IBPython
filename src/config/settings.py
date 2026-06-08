@@ -17,6 +17,7 @@ class Settings(BaseModel):
     ibkr_host: str = Field(default=constants.DEFAULT_IBKR_HOST, alias=constants.IBKR_HOST_ENV)
     ibkr_port: int = Field(default=constants.DEFAULT_IBKR_PORT, alias=constants.IBKR_PORT_ENV)
     ibkr_client_id: int = Field(default=constants.DEFAULT_IBKR_CLIENT_ID, alias=constants.IBKR_CLIENT_ID_ENV)
+    ibkr_mcp_client_id: int = Field(default=constants.DEFAULT_IBKR_MCP_CLIENT_ID, alias=constants.IBKR_MCP_CLIENT_ID_ENV)
 
     redis_url: str = Field(default=constants.DEFAULT_REDIS_URL, alias=constants.REDIS_URL_ENV)
     redis_password: str = Field(default=constants.DEFAULT_REDIS_PASSWORD, alias=constants.REDIS_PASSWORD_ENV)

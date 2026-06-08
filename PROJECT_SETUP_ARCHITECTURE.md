@@ -115,8 +115,9 @@ Current local defaults:
 - `IBKR_HOST=127.0.0.1`
 - `IBKR_PORT=4001`
 - `IBKR_CLIENT_ID=1`
+- `IBKR_MCP_CLIENT_ID=301`
 
-Confirm your TWS or Gateway API settings before running live jobs. TWS paper/live and IB Gateway paper/live can use different default ports. Also keep `IBKR_CLIENT_ID` unique across notebooks, the REST API, and any other API client.
+Confirm your TWS or Gateway API settings before running live jobs. TWS paper/live and IB Gateway paper/live can use different default ports. Also keep IBKR client IDs unique across notebooks, the REST API, the MCP server, and any other API client.
 
 5. Run tests:
 
@@ -169,10 +170,11 @@ Inside Docker, app services set `IBKR_HOST` from `IBKR_DOCKER_HOST`, defaulting 
 
 The scheduler uses `IBKR_DOCKER_REST_BASE_URL` inside Compose, defaulting to `http://ibkr-rest-app:8000`, so OHLCV snapshot jobs call FastAPI over the Docker network instead of container-local `localhost`.
 
-The two app services intentionally use different IBKR client IDs:
+The app services intentionally use different IBKR client IDs:
 
 - `IBKR_API_CLIENT_ID=101`
 - `IBKR_SCHEDULER_CLIENT_ID=201`
+- `IBKR_MCP_CLIENT_ID=301`
 
 Keep these distinct from notebooks and other IBKR API clients.
 
@@ -212,6 +214,7 @@ Blank or missing `.env` values are treated as null and skipped, so the correspon
 | `IBKR_HOST` | `127.0.0.1` | TWS or IB Gateway host |
 | `IBKR_PORT` | `4001` | IBKR API port |
 | `IBKR_CLIENT_ID` | `1` | IBKR client ID; must be unique across API clients |
+| `IBKR_MCP_CLIENT_ID` | `301` | IBKR client ID used by the MCP server |
 | `IBKR_MARKET_DATA_LINES` | `100` | Entitlement baseline used for pacing analysis |
 | `IBKR_REST_APP_NAME` | `IBKRRestApp` | FastAPI application title |
 | `IBKR_REST_CONNECT_ON_STARTUP` | `false` | Connect to IBKR and Redis during API startup instead of first request |

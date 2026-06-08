@@ -41,7 +41,8 @@ logger = logging.getLogger(__name__)
 async def mcp_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """Connect to Redis, QuestDB, and IBKR on startup; tear down on shutdown."""
     settings = load_settings()
-    state = build_rest_app_state(settings)
+    mcp_settings = settings.model_copy(update={"ibkr_client_id": settings.ibkr_mcp_client_id})
+    state = build_rest_app_state(mcp_settings)
 
     redis_connected = False
     questdb_connected = False

@@ -30,6 +30,7 @@ def test_env_name_constants_are_canonical_names() -> None:
     assert constants.IBKR_HOST_ENV == "IBKR_HOST"
     assert constants.IBKR_PORT_ENV == "IBKR_PORT"
     assert constants.IBKR_CLIENT_ID_ENV == "IBKR_CLIENT_ID"
+    assert constants.IBKR_MCP_CLIENT_ID_ENV == "IBKR_MCP_CLIENT_ID"
     assert constants.REDIS_URL_ENV == "REDIS_URL"
     assert constants.REDIS_PASSWORD_ENV == "REDIS_PASSWORD"
     assert constants.QUESTDB_HOST_ENV == "QUESTDB_HOST"
@@ -46,8 +47,19 @@ def test_config_loader_uses_defaults_when_env_file_is_missing() -> None:
     values = ConfigLoader(env_file=Path("/tmp/does-not-exist.env"), include_os_environ=False).load()
 
     assert values["ibkr_host"] == constants.DEFAULT_IBKR_HOST
+    assert values["ibkr_mcp_client_id"] == constants.DEFAULT_IBKR_MCP_CLIENT_ID
     assert values["redis_url"] == constants.DEFAULT_REDIS_URL
     assert values["ibkr_rest_base_url"] == constants.DEFAULT_IBKR_REST_BASE_URL
+
+
+def test_mcp_client_id_is_independent_from_default_ibkr_client_id(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("IBKR_CLIENT_ID=101\nIBKR_MCP_CLIENT_ID=301\n", encoding="utf-8")
+
+    settings = load_settings(env_file=env_file, include_os_environ=False)
+
+    assert settings.ibkr_client_id == 101
+    assert settings.ibkr_mcp_client_id == 301
 
 
 def test_config_loader_ignores_blank_dotenv_values_and_parses_types(tmp_path: Path) -> None:

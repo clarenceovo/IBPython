@@ -530,6 +530,14 @@ def test_mcp_default_bind_is_localhost():
     assert constants.DEFAULT_MCP_HTTP_PORT == 9000
 
 
+def test_mcp_lifespan_uses_dedicated_ibkr_client_id():
+    """Verify MCP replaces the shared IBKR client ID before building its feed."""
+    source = MCP_SERVER_PATH.read_text()
+
+    assert "settings.ibkr_mcp_client_id" in source
+    assert 'model_copy(update={"ibkr_client_id": settings.ibkr_mcp_client_id})' in source
+
+
 def test_mcp_http_config_reads_env_vars():
     """Verify _get_mcp_http_config reads from env vars with correct defaults."""
     import os
