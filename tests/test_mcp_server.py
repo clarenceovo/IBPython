@@ -168,6 +168,27 @@ def test_has_entry_points():
     }
     assert "main_stdio" in functions, "main_stdio entry point must exist"
     assert "main_streamable_http" in functions, "main_streamable_http entry point must exist"
+    assert "main" in functions, "module entry point must dispatch transport mode"
+
+
+def test_fastmcp_constructor_uses_supported_kwargs():
+    tree = _parse_module()
+    fastmcp_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "FastMCP"
+    ]
+    assert fastmcp_calls, "MCP server must instantiate FastMCP"
+    unsupported = {kw.arg for call in fastmcp_calls for kw in call.keywords if kw.arg == "version"}
+    assert not unsupported, "FastMCP in mcp>=1.27 does not accept version="
+
+
+def test_mcp_dockerfile_starts_http_transport():
+    dockerfile = MCP_SERVER_PATH.parent.parent / "Dockerfile.mcp"
+    content = dockerfile.read_text()
+    assert '"--http"' in content, "MCP Docker image must start the Streamable HTTP transport"
 
 
 def test_raw_sql_blocks_mutations():

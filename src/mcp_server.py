@@ -8,7 +8,7 @@ that any MCP-compatible AI agent can query.
 Run:
     python -m src.mcp_server
     # or with Streamable HTTP (binds 127.0.0.1:9000 by default):
-    MCP_HTTP_HOST=0.0.0.0 MCP_HTTP_PORT=9000 MCP_API_KEY=secret python -m src.mcp_server
+    MCP_HTTP_HOST=0.0.0.0 MCP_HTTP_PORT=9000 MCP_API_KEY=secret python -m src.mcp_server --http
     # or with uvicorn:
     uvicorn src.mcp_server:mcp.streamable_http_app --host 127.0.0.1 --port 9000
 """
@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import secrets
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -80,7 +81,6 @@ async def mcp_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
 
 mcp = FastMCP(
     "IBPython Market Data",
-    version=constants.APP_VERSION,
     lifespan=mcp_lifespan,
 )
 
@@ -1716,5 +1716,14 @@ def main_streamable_http() -> None:
     uvicorn.run(app, host=host, port=port)
 
 
+def main(argv: list[str] | None = None) -> None:
+    """Run stdio by default, or Streamable HTTP when ``--http`` is passed."""
+    argv = sys.argv[1:] if argv is None else argv
+    if "--http" in argv:
+        main_streamable_http()
+    else:
+        main_stdio()
+
+
 if __name__ == "__main__":
-    main_stdio()
+    main()

@@ -25,4 +25,4 @@ EXPOSE 9000
 
 # MCP streamable HTTP transport — binds 0.0.0.0:9000 inside container.
 # Auth is handled by MCPBearerAuthMiddleware when MCP_API_KEY is set.
-CMD ["python", "-m", "src.mcp_server"]
+CMD ["python", "-m", "src.mcp_server", "--http"]
