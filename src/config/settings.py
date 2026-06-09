@@ -177,6 +177,11 @@ class Settings(BaseModel):
         default=constants.DEFAULT_IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED,
         alias=constants.IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED_ENV,
     )
+    mcp_ibkr_idle_disconnect_seconds: float = Field(
+        default=constants.DEFAULT_MCP_IBKR_IDLE_DISCONNECT_SECONDS,
+        alias=constants.MCP_IBKR_IDLE_DISCONNECT_SECONDS_ENV,
+        ge=0,
+    )
 
     # Telegram alerting
     telegram_bot_token: str = Field(

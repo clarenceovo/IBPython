@@ -258,9 +258,7 @@ class IBKRConnectionManager:
         if reconnect_tasks:
             await asyncio.gather(*reconnect_tasks, return_exceptions=True)
             self._background_tasks.difference_update(reconnect_tasks)
-        if self._ib is not None and self._ib.isConnected():
-            logger.info("disconnecting from IBKR %s:%d clientId=%d", self.host, self.port, self.client_id)
-            self._ib.disconnect()
+        self._dispose_ib_client(reason="disconnect")
 
     async def __aenter__(self) -> "IBKRConnectionManager":
         await self.connect()
@@ -496,14 +494,52 @@ class IBKRConnectionManager:
         return await self._rate_limiter.snapshot()
 
     def _disconnect_stale_client(self) -> None:
-        if self._ib is None:
+        self._dispose_ib_client(reason="stale client")
+
+    def _dispose_ib_client(self, *, reason: str) -> None:
+        """Fully release the current ib_insync client and detach callbacks."""
+        ib = self._ib
+        if ib is None:
             return
+
+        self._detach_ib_event_handlers(ib)
         try:
-            self._ib.disconnect()
+            is_connected = getattr(ib, "isConnected", None)
+            if callable(is_connected) and is_connected():
+                logger.info("disconnecting from IBKR %s:%d clientId=%d (%s)", self.host, self.port, self.client_id, reason)
+                ib.disconnect()
         except Exception:
-            logger.debug("error disconnecting stale IBKR client", exc_info=True)
+            logger.debug("error disconnecting IBKR client", exc_info=True)
+
+        client = getattr(ib, "client", None)
+        try:
+            client_connected = getattr(client, "isConnected", None)
+            client_disconnect = getattr(client, "disconnect", None)
+            if callable(client_disconnect) and (not callable(client_connected) or client_connected()):
+                client_disconnect()
+        except Exception:
+            logger.debug("error disposing low-level IBKR client connection", exc_info=True)
+        try:
+            client_reset = getattr(client, "reset", None)
+            if callable(client_reset):
+                client_reset()
+        except Exception:
+            logger.debug("error resetting low-level IBKR client", exc_info=True)
         finally:
             self._ib = None
+
+    def _detach_ib_event_handlers(self, ib: Any) -> None:
+        for event_name, handler in (
+            ("errorEvent", self._on_ibkr_error),
+            ("disconnectedEvent", self._on_ibkr_disconnected),
+            ("timeoutEvent", self._on_ibkr_timeout),
+        ):
+            event = getattr(ib, event_name, None)
+            try:
+                if event is not None:
+                    event -= handler
+            except Exception:
+                logger.debug("error detaching IBKR %s handler", event_name, exc_info=True)
 
 
 class _NoopMarketDataLease:

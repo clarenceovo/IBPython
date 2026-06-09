@@ -177,6 +177,12 @@ CONFIG_VALUE_SPECS: tuple[ConfigValueSpec, ...] = (
         constants.DEFAULT_IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED,
         parse_bool,
     ),
+    ConfigValueSpec(
+        "mcp_ibkr_idle_disconnect_seconds",
+        constants.MCP_IBKR_IDLE_DISCONNECT_SECONDS_ENV,
+        constants.DEFAULT_MCP_IBKR_IDLE_DISCONNECT_SECONDS,
+        float,
+    ),
 )
 
 _SPECS_BY_FIELD_NAME = {spec.field_name: spec for spec in CONFIG_VALUE_SPECS}
@@ -224,6 +230,7 @@ _CANONICAL_FIELD_NAME_BY_ENV_NAME = {
     "IBKR_WEB_API_COOKIE": "ibkr_web_api_cookie",
     "IBKR_WEB_API_VERIFY_SSL": "ibkr_web_api_verify_ssl",
     "IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED": "ibkr_event_contracts_live_orders_enabled",
+    "MCP_IBKR_IDLE_DISCONNECT_SECONDS": "mcp_ibkr_idle_disconnect_seconds",
 }
 
 

@@ -83,6 +83,7 @@ Core variables:
 | `IBKR_PORT` | `4001` | IBKR API port |
 | `IBKR_CLIENT_ID` | `1` | IBKR client ID; must be unique across notebooks/API clients |
 | `IBKR_MCP_CLIENT_ID` | `301` | IBKR client ID used by the MCP server |
+| `MCP_IBKR_IDLE_DISCONNECT_SECONDS` | `120` | MCP idle grace period before disconnecting its IBKR session |
 | `IBKR_MARKET_DATA_LINES` | `100` | Market data entitlement baseline for pacing analysis |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis URL |
 | `REDIS_PASSWORD` | empty | Optional Redis AUTH password |

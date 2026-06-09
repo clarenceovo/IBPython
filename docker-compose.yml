@@ -78,6 +78,7 @@ services:
       MCP_HTTP_HOST: "0.0.0.0"
       MCP_HTTP_PORT: ${MCP_HTTP_PORT:-9000}
       MCP_API_KEY: ${MCP_API_KEY:-}
+      MCP_IBKR_IDLE_DISCONNECT_SECONDS: ${MCP_IBKR_IDLE_DISCONNECT_SECONDS:-120}
     deploy:
       resources:
         limits:

@@ -116,6 +116,7 @@ Current local defaults:
 - `IBKR_PORT=4001`
 - `IBKR_CLIENT_ID=1`
 - `IBKR_MCP_CLIENT_ID=301`
+- `MCP_IBKR_IDLE_DISCONNECT_SECONDS=120`
 
 Confirm your TWS or Gateway API settings before running live jobs. TWS paper/live and IB Gateway paper/live can use different default ports. Also keep IBKR client IDs unique across notebooks, the REST API, the MCP server, and any other API client.
 
@@ -215,6 +216,7 @@ Blank or missing `.env` values are treated as null and skipped, so the correspon
 | `IBKR_PORT` | `4001` | IBKR API port |
 | `IBKR_CLIENT_ID` | `1` | IBKR client ID; must be unique across API clients |
 | `IBKR_MCP_CLIENT_ID` | `301` | IBKR client ID used by the MCP server |
+| `MCP_IBKR_IDLE_DISCONNECT_SECONDS` | `120` | MCP idle grace period before disconnecting its IBKR session |
 | `IBKR_MARKET_DATA_LINES` | `100` | Entitlement baseline used for pacing analysis |
 | `IBKR_REST_APP_NAME` | `IBKRRestApp` | FastAPI application title |
 | `IBKR_REST_CONNECT_ON_STARTUP` | `false` | Connect to IBKR and Redis during API startup instead of first request |

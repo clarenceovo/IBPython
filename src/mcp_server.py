@@ -15,6 +15,7 @@ Run:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ import secrets
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Awaitable
 
@@ -35,12 +37,43 @@ from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
 logger = logging.getLogger(__name__)
 
 
-# ── Lifespan: manage connections for the MCP server ──────────────────────────
+@dataclass
+class _MCPSharedState:
+    state: IBKRRestAppState
+    redis_connected: bool
+    questdb_connected: bool
+    ibkr_connected: bool
+    idle_disconnect_seconds: float
+    ref_count: int = 0
+    close_task: asyncio.Task[None] | None = None
+    closing: bool = False
+    cancel_idle_close_for_reuse: bool = False
 
-@asynccontextmanager
-async def mcp_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
-    """Connect to Redis, QuestDB, and IBKR on startup; tear down on shutdown."""
-    settings = load_settings()
+    def context(self) -> dict[str, Any]:
+        return {
+            "ibkr_state": self.state,
+            "redis_connected": self.redis_connected,
+            "questdb_connected": self.questdb_connected,
+            "ibkr_connected": self.ibkr_connected,
+        }
+
+
+_mcp_shared_state: _MCPSharedState | None = None
+_mcp_shared_state_lock: asyncio.Lock | None = None
+_mcp_shared_state_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_mcp_shared_state_lock() -> asyncio.Lock:
+    global _mcp_shared_state_lock
+    global _mcp_shared_state_lock_loop
+    loop = asyncio.get_running_loop()
+    if _mcp_shared_state_lock is None or _mcp_shared_state_lock_loop is not loop:
+        _mcp_shared_state_lock = asyncio.Lock()
+        _mcp_shared_state_lock_loop = loop
+    return _mcp_shared_state_lock
+
+
+async def _build_mcp_shared_state(settings: Settings) -> _MCPSharedState:
     mcp_settings = settings.model_copy(update={"ibkr_client_id": settings.ibkr_mcp_client_id})
     state = build_rest_app_state(mcp_settings)
 
@@ -56,9 +89,13 @@ async def mcp_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
         logger.exception("MCP server: Redis connection failed")
 
     try:
-        await state.loader.questdb.connect()
-        questdb_connected = True
-        logger.info("MCP server: QuestDB connected")
+        questdb = getattr(state.loader, "questdb", None)
+        if questdb is None:
+            logger.warning("MCP server: QuestDB store is not configured")
+        else:
+            await questdb.connect()
+            questdb_connected = True
+            logger.info("MCP server: QuestDB connected")
     except Exception:
         logger.exception("MCP server: QuestDB connection failed")
 
@@ -67,17 +104,123 @@ async def mcp_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
         ibkr_connected = True
         logger.info("MCP server: IBKR feed connected")
     except Exception:
-        logger.exception("MCP server: IBKR feed connection failed (tools requiring live IBKR will be unavailable)")
+        logger.exception("MCP server: IBKR feed connection failed (tools requiring live IBKR will reconnect lazily)")
 
-    yield {
-        "ibkr_state": state,
-        "redis_connected": redis_connected,
-        "questdb_connected": questdb_connected,
-        "ibkr_connected": ibkr_connected,
-    }
+    return _MCPSharedState(
+        state=state,
+        redis_connected=redis_connected,
+        questdb_connected=questdb_connected,
+        ibkr_connected=ibkr_connected,
+        idle_disconnect_seconds=settings.mcp_ibkr_idle_disconnect_seconds,
+    )
 
-    await state.close()
-    logger.info("MCP server: all connections closed")
+
+async def _cancel_mcp_idle_close(shared: _MCPSharedState) -> None:
+    task = shared.close_task
+    shared.close_task = None
+    if task is None or task.done():
+        return
+    shared.cancel_idle_close_for_reuse = True
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        logger.debug("MCP server: cancelled idle IBKR disconnect")
+
+
+async def _acquire_mcp_shared_state(settings: Settings) -> _MCPSharedState:
+    global _mcp_shared_state
+    while True:
+        close_task_to_wait: asyncio.Task[None] | None = None
+        async with _get_mcp_shared_state_lock():
+            if _mcp_shared_state is None:
+                _mcp_shared_state = await _build_mcp_shared_state(settings)
+                _mcp_shared_state.ref_count = 1
+                return _mcp_shared_state
+            if _mcp_shared_state.closing:
+                close_task_to_wait = _mcp_shared_state.close_task
+            else:
+                _mcp_shared_state.ref_count += 1
+                shared = _mcp_shared_state
+                break
+        if close_task_to_wait is not None:
+            await close_task_to_wait
+        else:
+            await asyncio.sleep(0)
+
+    await _cancel_mcp_idle_close(shared)
+    return shared
+
+
+async def _close_mcp_shared_state(shared: _MCPSharedState) -> None:
+    try:
+        await shared.state.close()
+        questdb = getattr(shared.state.loader, "questdb", None)
+        close = getattr(questdb, "close", None)
+        if callable(close):
+            await close()
+    finally:
+        logger.info("MCP server: all connections closed")
+
+
+async def _close_mcp_shared_state_after_idle(shared: _MCPSharedState, delay_seconds: float) -> None:
+    global _mcp_shared_state
+    try:
+        await asyncio.sleep(delay_seconds)
+        async with _get_mcp_shared_state_lock():
+            if _mcp_shared_state is not shared or shared.ref_count > 0:
+                return
+            shared.closing = True
+        await _close_mcp_shared_state(shared)
+        async with _get_mcp_shared_state_lock():
+            if _mcp_shared_state is shared:
+                _mcp_shared_state = None
+    except asyncio.CancelledError:
+        if shared.cancel_idle_close_for_reuse:
+            shared.cancel_idle_close_for_reuse = False
+            raise
+        if shared.ref_count == 0:
+            shared.closing = True
+            await _close_mcp_shared_state(shared)
+            async with _get_mcp_shared_state_lock():
+                if _mcp_shared_state is shared:
+                    _mcp_shared_state = None
+        raise
+
+
+async def _release_mcp_shared_state(shared: _MCPSharedState) -> None:
+    global _mcp_shared_state
+    close_now = False
+    async with _get_mcp_shared_state_lock():
+        if _mcp_shared_state is not shared:
+            return
+        shared.ref_count = max(0, shared.ref_count - 1)
+        if shared.ref_count > 0:
+            return
+        delay_seconds = shared.idle_disconnect_seconds
+        if delay_seconds <= 0:
+            shared.closing = True
+            _mcp_shared_state = None
+            close_now = True
+        else:
+            logger.info("MCP server: idle; keeping IBKR clientId=%s for %.1fs", shared.state.feed.client_id, delay_seconds)
+            shared.close_task = asyncio.create_task(_close_mcp_shared_state_after_idle(shared, delay_seconds))
+
+    if close_now:
+        await _close_mcp_shared_state(shared)
+
+
+# ── Lifespan: manage connections for the MCP server ──────────────────────────
+
+@asynccontextmanager
+async def mcp_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
+    """Connect to Redis, QuestDB, and IBKR on startup; tear down on shutdown."""
+    settings = load_settings()
+    shared = await _acquire_mcp_shared_state(settings)
+    try:
+        yield shared.context()
+    finally:
+        await _release_mcp_shared_state(shared)
 
 
 mcp = FastMCP(
@@ -88,6 +231,29 @@ mcp = FastMCP(
 
 def _state(ctx: Context) -> IBKRRestAppState:
     return ctx.request_context.lifespan_context["ibkr_state"]
+
+
+def _parse_asset_class(asset_class: str) -> Any:
+    """Parse MCP asset_class text using AssetClass values, names, and documented aliases."""
+    from src.feeds.models import AssetClass
+
+    normalized = asset_class.strip().lower()
+    aliases = {
+        "futures": AssetClass.FUTURE.value,
+        "stocks": AssetClass.EQUITY.value,
+        "stock": AssetClass.EQUITY.value,
+        "equities": AssetClass.EQUITY.value,
+        "forex": AssetClass.FX.value,
+    }
+    normalized = aliases.get(normalized, normalized)
+    try:
+        return AssetClass(normalized)
+    except ValueError:
+        member = AssetClass.__members__.get(asset_class.strip().upper())
+        if member is not None:
+            return member
+        supported = ", ".join(item.value for item in AssetClass)
+        raise ValueError(f"unsupported asset_class '{asset_class}'; expected one of: {supported}")
 
 
 def _require_questdb(ctx: Context) -> dict[str, Any] | None:
@@ -256,9 +422,8 @@ async def get_latest_bar_from_cache(
         symbol: Optional specific symbol. If omitted, returns all cached bars for the class+bar_size.
     """
     state = _state(ctx)
-    from src.feeds.models import AssetClass
     bar = await state.redis.get_latest_bar(
-        asset_class=AssetClass(asset_class.upper()),
+        asset_class=_parse_asset_class(asset_class),
         bar_size=bar_size,
         symbol=symbol,
     )
@@ -348,12 +513,11 @@ async def load_option_chains(
     """
     state = _state(ctx)
     from src.feeds.contracts import OptionChainRequest
-    from src.feeds.models import AssetClass
 
     try:
         request = OptionChainRequest(
             symbol=symbol,
-            asset_class=AssetClass(asset_class.upper()),
+            asset_class=_parse_asset_class(asset_class),
             exchange=exchange,
             currency=currency,
         )
@@ -444,12 +608,12 @@ async def load_historical_ohlcv_live(
     """
     state = _state(ctx)
     from src.feeds.ibkr_historical import ensure_historical_chunk_limit, plan_historical_auto_chunk
-    from src.feeds.models import AssetClass, OHLCVRequest
+    from src.feeds.models import OHLCVRequest
     from src.transport.metrics import metrics
 
     request = OHLCVRequest(
         symbol=symbol,
-        asset_class=AssetClass(asset_class.upper()),
+        asset_class=_parse_asset_class(asset_class),
         exchange=exchange,
         currency=currency,
         bar_size=bar_size,
@@ -576,8 +740,7 @@ async def load_news(
     # First resolve the contract to get con_id
     try:
         from src.feeds.contracts import ContractSpec
-        from src.feeds.models import AssetClass
-        spec = ContractSpec(symbol=symbol, asset_class=AssetClass(asset_class.upper()), exchange=exchange, currency=currency)
+        spec = ContractSpec(symbol=symbol, asset_class=_parse_asset_class(asset_class), exchange=exchange, currency=currency)
         contract = await state.feed.qualify_contract(spec)
         con_id = contract.conId
     except Exception:
@@ -1120,13 +1283,12 @@ async def load_option_skew_surface(
     """
     state = _state(ctx)
     from src.feeds.contracts import OptionChainRequest
-    from src.feeds.models import AssetClass
     from src.feeds.options_models import OptionSkewSurfaceRequest
 
     try:
         chain_request = OptionChainRequest(
             symbol=symbol,
-            asset_class=AssetClass(asset_class.upper()),
+            asset_class=_parse_asset_class(asset_class),
             exchange=exchange,
             currency=currency,
         )
@@ -1478,12 +1640,11 @@ async def get_market_depth(
     """
     state = _state(ctx)
     from src.feeds.contracts import ContractSpec
-    from src.feeds.models import AssetClass
 
     try:
         spec = ContractSpec(
             symbol=symbol,
-            asset_class=AssetClass(asset_class.upper()),
+            asset_class=_parse_asset_class(asset_class),
             exchange=exchange,
             currency=currency,
             last_trade_date_or_contract_month=contract_month,

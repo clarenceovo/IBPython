@@ -538,6 +538,15 @@ def test_mcp_lifespan_uses_dedicated_ibkr_client_id():
     assert 'model_copy(update={"ibkr_client_id": settings.ibkr_mcp_client_id})' in source
 
 
+def test_mcp_asset_class_parser_accepts_documented_enum_inputs():
+    """Verify MCP does not uppercase enum values before constructing AssetClass."""
+    source = MCP_SERVER_PATH.read_text()
+
+    assert "def _parse_asset_class" in source
+    assert "AssetClass(asset_class.upper())" not in source
+    assert '"futures": AssetClass.FUTURE.value' in source
+
+
 def test_mcp_http_config_reads_env_vars():
     """Verify _get_mcp_http_config reads from env vars with correct defaults."""
     import os

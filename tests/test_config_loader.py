@@ -41,6 +41,7 @@ def test_env_name_constants_are_canonical_names() -> None:
     assert constants.IBKR_MARKET_DEPTH_REQUEST_TIMEOUT_SECONDS_ENV == "IBKR_MARKET_DEPTH_REQUEST_TIMEOUT_SECONDS"
     assert constants.IBKR_MARKET_DEPTH_LEASE_WAIT_SECONDS_ENV == "IBKR_MARKET_DEPTH_LEASE_WAIT_SECONDS"
     assert constants.IBKR_MARKET_DEPTH_CACHE_TTL_SECONDS_ENV == "IBKR_MARKET_DEPTH_CACHE_TTL_SECONDS"
+    assert constants.MCP_IBKR_IDLE_DISCONNECT_SECONDS_ENV == "MCP_IBKR_IDLE_DISCONNECT_SECONDS"
 
 
 def test_config_loader_uses_defaults_when_env_file_is_missing() -> None:
@@ -48,6 +49,7 @@ def test_config_loader_uses_defaults_when_env_file_is_missing() -> None:
 
     assert values["ibkr_host"] == constants.DEFAULT_IBKR_HOST
     assert values["ibkr_mcp_client_id"] == constants.DEFAULT_IBKR_MCP_CLIENT_ID
+    assert values["mcp_ibkr_idle_disconnect_seconds"] == constants.DEFAULT_MCP_IBKR_IDLE_DISCONNECT_SECONDS
     assert values["redis_url"] == constants.DEFAULT_REDIS_URL
     assert values["ibkr_rest_base_url"] == constants.DEFAULT_IBKR_REST_BASE_URL
 
