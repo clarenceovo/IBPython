@@ -229,6 +229,8 @@ class IBKRMarketDataExtClient:
         self._tick_buffers: dict[tuple[str, str, str], deque[TickByTickData]] = {}
         # Active subscription handles: key = (symbol, sec_type, exchange) → ib_insync ticker handle
         self._tick_subscriptions: dict[tuple[str, str, str], Any] = {}
+        self._tick_subscription_contracts: dict[tuple[str, str, str], Any] = {}
+        self._tick_subscription_tick_types: dict[tuple[str, str, str], str] = {}
         self._tick_subscription_leases: dict[tuple[str, str, str], Any] = {}
         # Optional callback per symbol key
         self._on_tick_callbacks: dict[tuple[str, str, str], Callable[[TickByTickData], None] | None] = {}
@@ -298,14 +300,17 @@ class IBKRMarketDataExtClient:
             except Exception:
                 logger.debug("error processing tick-by-tick data for %s", symbol, exc_info=True)
 
+        async def _request_tick_by_tick() -> Any:
+            return self._ib.reqTickByTickData(
+                contract,
+                tick_type.value,
+                numberOfTicks=0,
+                ignoreSize=True,
+            )
+
         try:
             handle = await self._connection.with_retry(
-                lambda: self._ib.reqTickByTickDataAsync(
-                    contract,
-                    tick_type.value,
-                    numberOfTicks=0,
-                    ignoreSize=True,
-                ),
+                _request_tick_by_tick,
                 operation=f"tick_by_tick:{symbol}",
             )
         except Exception:
@@ -313,6 +318,8 @@ class IBKRMarketDataExtClient:
             raise
 
         self._tick_subscriptions[key] = handle
+        self._tick_subscription_contracts[key] = contract
+        self._tick_subscription_tick_types[key] = tick_type.value
         self._tick_subscription_leases[key] = lease
         logger.info(
             "started tick-by-tick subscription: symbol=%s sec_type=%s exchange=%s tick_type=%s max_ticks=%d",
@@ -329,10 +336,16 @@ class IBKRMarketDataExtClient:
         """Cancel a tick-by-tick subscription."""
         key = (symbol.upper(), sec_type.upper(), exchange.upper())
         handle = self._tick_subscriptions.pop(key, None)
+        contract = self._tick_subscription_contracts.pop(key, None)
+        tick_type_value = self._tick_subscription_tick_types.pop(key, None)
         if handle is not None and self._ib is not None:
             try:
                 await wait_for_ibkr_request(self._connection, operation=f"tick_by_tick_cancel:{symbol}")
-                self._ib.cancelTickByTickData(handle)
+                if contract is None:
+                    contract = getattr(handle, "contract", handle)
+                if tick_type_value is None:
+                    tick_type_value = getattr(handle, "tick_type", None) or getattr(handle, "tickType", TickType.ALL_LAST.value)
+                self._ib.cancelTickByTickData(contract, tick_type_value)
             except Exception:
                 logger.debug("error cancelling tick-by-tick for %s", symbol, exc_info=True)
         lease = self._tick_subscription_leases.pop(key, None)
@@ -873,6 +886,8 @@ class IBKRMarketDataExtClient:
                 logger.debug("error cancelling subscription for %s", symbol, exc_info=True)
         self._tick_buffers.clear()
         self._on_tick_callbacks.clear()
+        self._tick_subscription_contracts.clear()
+        self._tick_subscription_tick_types.clear()
 
     # ------------------------------------------------------------------
     # 10. Histogram data
@@ -889,7 +904,7 @@ class IBKRMarketDataExtClient:
     ) -> list[dict[str, Any]]:
         """Request histogram data for a contract.
 
-        Returns a list of ``{"price": float, "count": int}`` buckets.
+        Returns price/size buckets. ``count`` is included as a compatibility alias.
         """
         await self._connection.ensure_connected()
         logger.info(
@@ -903,8 +918,8 @@ class IBKRMarketDataExtClient:
         result = await self._connection.with_retry(
             lambda: self._ib.reqHistogramDataAsync(
                 contract,
-                useRTH=use_rth,
-                period=time_period,
+                use_rth,
+                time_period,
             ),
             operation=f"histogram:{symbol}",
         )
@@ -912,9 +927,13 @@ class IBKRMarketDataExtClient:
         buckets: list[dict[str, Any]] = []
         if result:
             for item in result:
+                size = getattr(item, "size", None)
+                if size is None:
+                    size = getattr(item, "count", 0)
                 buckets.append({
                     "price": float(getattr(item, "price", 0)),
-                    "count": int(getattr(item, "count", 0)),
+                    "count": int(size),
+                    "size": int(size),
                 })
 
         logger.info("request_histogram: %d buckets for %s", len(buckets), symbol)
@@ -946,25 +965,41 @@ class IBKRMarketDataExtClient:
         sec_type = _asset_class_to_sec_type(asset_class)
         contract = _build_contract(symbol, sec_type, exchange, currency)
 
-        async for bar in await self._connection.with_retry(
-            lambda: self._ib.reqRealTimeBarsAsync(
+        async def _request_realtime_bars() -> Any:
+            return self._ib.reqRealTimeBars(
                 contract,
                 5,
                 whatToShow=what_to_show,
                 useRTH=use_rth,
-            ),
+                realTimeBarsOptions=[],
+            )
+
+        bars = await self._connection.with_retry(
+            _request_realtime_bars,
             operation=f"realtime_bars:{symbol}",
-        ):
-            yield {
-                "time": getattr(bar, "time", None),
-                "open": float(getattr(bar, "open_", 0) or getattr(bar, "open", 0)),
-                "high": float(getattr(bar, "high", 0)),
-                "low": float(getattr(bar, "low", 0)),
-                "close": float(getattr(bar, "close", 0)),
-                "volume": float(getattr(bar, "volume", 0)),
-                "wap": float(getattr(bar, "wap", 0)),
-                "count": int(getattr(bar, "count", 0)),
-            }
+        )
+        seen = 0
+        try:
+            while True:
+                while seen < len(bars):
+                    bar = bars[seen]
+                    seen += 1
+                    yield {
+                        "time": getattr(bar, "time", None),
+                        "open": float(getattr(bar, "open_", 0) or getattr(bar, "open", 0)),
+                        "high": float(getattr(bar, "high", 0)),
+                        "low": float(getattr(bar, "low", 0)),
+                        "close": float(getattr(bar, "close", 0)),
+                        "volume": float(getattr(bar, "volume", 0)),
+                        "wap": float(getattr(bar, "wap", 0)),
+                        "count": int(getattr(bar, "count", 0)),
+                    }
+                await asyncio.sleep(0.25)
+        finally:
+            try:
+                self._ib.cancelRealTimeBars(bars)
+            except Exception:
+                logger.debug("error cancelling real-time bars for %s", symbol, exc_info=True)
 
     # ------------------------------------------------------------------
     # 12. Market depth exchanges
@@ -1063,7 +1098,7 @@ class IBKRMarketDataExtClient:
             instrument, location, scan_code, max_results,
         )
 
-        from ib_insync import ScannerSubscription
+        from ib_insync import ScannerSubscription, TagValue
 
         sub = ScannerSubscription()
         sub.instrument = instrument
@@ -1083,10 +1118,10 @@ class IBKRMarketDataExtClient:
         if market_cap_below is not None:
             tags.append(("marketCapBelow", str(market_cap_below)))
 
-        tag_values = [tuple(t) for t in tags] if tags else []  # type: ignore[arg-type]
+        tag_values = [TagValue(key, value) for key, value in tags]
 
         data = await self._connection.with_retry(
-            lambda: self._ib.reqScannerSubscriptionAsync(sub, tagValues=tag_values),
+            lambda: self._ib.reqScannerDataAsync(sub, [], tag_values),
             operation=f"scan_market:{instrument}:{location}:{scan_code}",
         )
 
@@ -1120,20 +1155,14 @@ class IBKRMarketDataExtClient:
         await self._connection.ensure_connected()
         logger.info("get_news_bulletins: all_messages=%s", all_messages)
 
-        bulletins = await self._connection.with_retry(
-            lambda: self._ib.reqNewsBulletinsAsync(allMessages=all_messages),
+        async def _request_news_bulletins() -> None:
+            self._ib.reqNewsBulletins(all_messages)
+
+        await self._connection.with_retry(
+            _request_news_bulletins,
             operation="news_bulletins",
         )
-
-        results: list[dict[str, Any]] = []
-        for b in bulletins:
-            results.append({
-                "msg_id": getattr(b, "msgId", None),
-                "message": getattr(b, "message", ""),
-                "exchange": getattr(b, "exchange", ""),
-                "time": str(getattr(b, "time", "")),
-            })
-        return results
+        return []
 
 
 class _PacingProxy:

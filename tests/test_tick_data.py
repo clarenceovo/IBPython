@@ -396,7 +396,7 @@ class FakeIBTickByTick:
         self.cancelled: list[Any] = []
         self._tick_handlers: list[Any] = []
 
-    async def reqTickByTickDataAsync(
+    def reqTickByTickData(
         self,
         contract: Any,
         tick_type: str,
@@ -407,8 +407,8 @@ class FakeIBTickByTick:
         self._tick_handlers.append(handle)
         return handle
 
-    def cancelTickByTickData(self, handle: Any) -> None:
-        self.cancelled.append(handle)
+    def cancelTickByTickData(self, contract: Any, tick_type: str) -> None:
+        self.cancelled.append((contract, tick_type))
 
     def isConnected(self) -> bool:
         return True

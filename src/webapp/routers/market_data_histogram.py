@@ -28,6 +28,7 @@ class HistogramRequestBody(BaseModel):
 class HistogramBucket(BaseModel):
     price: float
     count: int
+    size: int | None = None
 
 
 class HistogramResponse(BaseModel):
@@ -46,7 +47,7 @@ async def request_histogram(
     payload: HistogramRequestBody,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> HistogramResponse:
-    """Request histogram data (price/count buckets) for a contract."""
+    """Request histogram data (price/size buckets) for a contract."""
     result = await state.feed.request_histogram(
         symbol=payload.symbol,
         asset_class=payload.asset_class,

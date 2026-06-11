@@ -701,7 +701,7 @@ The REST market-data cache is process-local and short-lived. It includes per-key
 
 ## Histogram Data
 
-[IBKR Histograms](https://interactivebrokers.github.io/tws-api/histograms.html) return price/count buckets for execution analysis. This endpoint uses IBKR's `reqHistogramData` to retrieve data that can be used to analyze volume distribution across price levels.
+[IBKR Histograms](https://interactivebrokers.github.io/tws-api/histograms.html) return price/size buckets for execution analysis. This endpoint uses IBKR's `reqHistogramData` to retrieve data that can be used to analyze volume distribution across price levels.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/histogram \

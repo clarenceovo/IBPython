@@ -166,6 +166,7 @@ class FakeIB:
         self._placed_orders: list[tuple[Any, Any]] = []
         self._what_if_orders: list[tuple[Any, Any]] = []
         self._cancelled_orders: list[FakeOrder] = []
+        self._exercised_options: list[tuple[Any, int, int, str, int]] = []
         self._open_order_requests = 0
         self._connected = True
         self._next_order_id = 1001
@@ -192,6 +193,16 @@ class FakeIB:
 
     def cancelOrder(self, order: Any) -> None:
         self._cancelled_orders.append(order)
+
+    def exerciseOptions(
+        self,
+        contract: Any,
+        exerciseAction: int,
+        exerciseQuantity: int,
+        account: str,
+        override: int,
+    ) -> None:
+        self._exercised_options.append((contract, exerciseAction, exerciseQuantity, account, override))
 
     def openTrades(self) -> list[FakeTrade]:
         return list(self._open_trades)
@@ -783,6 +794,34 @@ class TestIBKROrderClientModifyOrder:
                 await client.modify_order("DU123", 0, ModifyOrderRequest(price=155.0))
 
         asyncio.run(run())
+
+
+class TestIBKROrderClientExerciseOption:
+    def test_exercise_option_ignores_manual_order_time_when_wrapper_does_not_support_it(self) -> None:
+        fake_ib = FakeIB()
+        conn = FakeConnection(fake_ib)
+        client = IBKROrderClient(conn)
+
+        result = asyncio.run(
+            client.exercise_option(
+                symbol="AAPL",
+                right="C",
+                strike=150.0,
+                expiry="20260619",
+                exercise_action=1,
+                quantity=1,
+                account="DU123",
+                manual_order_time="20260612-00:00:00",
+            )
+        )
+
+        assert result["status"] == "exercise_requested"
+        assert len(fake_ib._exercised_options) == 1
+        _, exercise_action, quantity, account, override = fake_ib._exercised_options[0]
+        assert exercise_action == 1
+        assert quantity == 1
+        assert account == "DU123"
+        assert override == 0
 
 
 class TestIBKROrderClientLoadOpenOrders:

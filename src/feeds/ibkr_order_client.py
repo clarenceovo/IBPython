@@ -13,6 +13,7 @@ client-side tracking.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import uuid as _uuid
 from typing import Any
@@ -813,14 +814,21 @@ class IBKROrderClient:
             contract = qualified[0]
 
         await wait_for_ibkr_request(self._connection, operation=f"exercise_option:{symbol}")
-        self._ib.exerciseOptions(
-            contract,
-            exerciseAction=exercise_action,
-            exerciseQuantity=quantity,
-            account=account,
-            override=override,
-            manualOrderTime=manual_order_time,
-        )
+        exercise_kwargs: dict[str, Any] = {
+            "exerciseAction": exercise_action,
+            "exerciseQuantity": quantity,
+            "account": account,
+            "override": override,
+        }
+        if "manualOrderTime" in inspect.signature(self._ib.exerciseOptions).parameters:
+            exercise_kwargs["manualOrderTime"] = manual_order_time
+        elif manual_order_time:
+            logger.warning(
+                "exercise_option: manual_order_time=%s ignored because installed ib_insync exerciseOptions() "
+                "does not expose manualOrderTime",
+                manual_order_time,
+            )
+        self._ib.exerciseOptions(contract, **exercise_kwargs)
 
         logger.info(
             "exercise_option: %s requested for %s %s %.2f %s qty=%d",
