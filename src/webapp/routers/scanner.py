@@ -5,6 +5,12 @@ from typing import Annotated
 from fastapi import APIRouter, Body, Depends
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.feeds.index_composition import (
+    IndexCompositionPayload,
+    IndexCompositionScannerRequest,
+    build_index_composition_from_scanner_rows,
+    resolve_index_composition_scanner_request,
+)
 from src.feeds.scanner import ContractScanRequest, ContractSearchRequest, ContractSearchResult
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 
@@ -40,6 +46,14 @@ CONTRACT_SCAN_EXAMPLES = {
     },
 }
 
+INDEX_COMPOSITION_SCAN_EXAMPLES = {
+    "hsi_scanner_approximation": {
+        "summary": "HSI scanner approximation",
+        "description": "Uses the default HK stock scanner preset; results are not official index constituents or weights.",
+        "value": {"index_symbol": "HSI", "max_results": 50, "use_ttl_cache": True},
+    },
+}
+
 
 class CachedContractSearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -55,6 +69,16 @@ class CachedContractScanRequest(BaseModel):
     request: ContractScanRequest
     use_ttl_cache: bool = True
     cache_ttl_seconds: float | None = Field(default=300, ge=0)
+
+
+class CachedIndexCompositionScannerRequest(IndexCompositionScannerRequest):
+    use_ttl_cache: bool = True
+    cache_ttl_seconds: float | None = Field(default=300, ge=0)
+
+    def to_composition_request(self) -> IndexCompositionScannerRequest:
+        return IndexCompositionScannerRequest.model_validate(
+            self.model_dump(exclude={"use_ttl_cache", "cache_ttl_seconds"})
+        )
 
 
 @router.post("/search", response_model=list[ContractSearchResult])
@@ -85,6 +109,26 @@ async def scan_contracts(
         from src.webapp.cache import stable_cache_key
 
         key = stable_cache_key("contract_scan", payload.request)
+        return await state.market_data_cache.get_or_set(key, load, ttl_seconds=payload.cache_ttl_seconds)
+    return await load()
+
+
+@router.post("/index-composition", response_model=IndexCompositionPayload)
+async def get_index_composition(
+    payload: Annotated[CachedIndexCompositionScannerRequest, Body(openapi_examples=INDEX_COMPOSITION_SCAN_EXAMPLES)],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> IndexCompositionPayload:
+    composition_request = payload.to_composition_request()
+    scanner_request = resolve_index_composition_scanner_request(composition_request)
+
+    async def load() -> IndexCompositionPayload:
+        rows = await state.feed.run_market_scanner(scanner_request)
+        return build_index_composition_from_scanner_rows(composition_request, scanner_request, rows)
+
+    if payload.use_ttl_cache:
+        from src.webapp.cache import stable_cache_key
+
+        key = stable_cache_key("index_composition_scanner", composition_request)
         return await state.market_data_cache.get_or_set(key, load, ttl_seconds=payload.cache_ttl_seconds)
     return await load()
 

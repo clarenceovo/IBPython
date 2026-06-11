@@ -53,6 +53,8 @@ from src.feeds.scanner import (
     ContractScanRequest,
     ContractSearchRequest,
     ContractSearchResult,
+    MarketScannerRequest,
+    MarketScannerRow,
 )
 from src.feeds.news import (
     HistoricalNewsHeadline,
@@ -667,6 +669,9 @@ class IBKRFeedClient:
     async def scan_contracts(self, request: ContractScanRequest) -> list[ContractSearchResult]:
         return await self._reference.scan_contracts(request)
 
+    async def run_market_scanner(self, request: MarketScannerRequest) -> list[MarketScannerRow]:
+        return await self._reference.run_market_scanner(request)
+
     async def subscribe_ticker(self, spec: ContractSpec) -> Any:
         return await self._reference.subscribe_ticker(spec)
 
@@ -824,6 +829,9 @@ class IBKRFeedClient:
 
     async def load_historical_ticks(self, request: "Any") -> "Any":
         return await self._marketdata_ext.load_historical_ticks(request)
+
+    async def load_histogram_data(self, request: "Any") -> "Any":
+        return await self._marketdata_ext.load_histogram_data(request)
 
     async def load_market_rule(self, price_magnitude: int) -> "Any":
         return await self._marketdata_ext.load_market_rule(price_magnitude)

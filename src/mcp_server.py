@@ -1643,6 +1643,68 @@ async def scan_contracts(
 
 
 @mcp.tool()
+async def get_index_composition(
+    ctx: Context,
+    index_symbol: str,
+    max_results: int = 50,
+    instrument: str | None = None,
+    location_code: str | None = None,
+    scan_code: str | None = None,
+    filters: list[dict[str, Any]] | None = None,
+    use_ttl_cache: bool = True,
+    cache_ttl_seconds: float | None = 300,
+) -> dict[str, Any]:
+    """Load an IBKR scanner-backed approximation of index constituents.
+
+    This is not official index membership and does not include index weights.
+    For HSI the default scanner preset is STK / STK.HK / HOT_BY_VOLUME.
+
+    Args:
+        index_symbol: Index symbol to approximate, e.g. HSI
+        max_results: Max scanner rows to return (IBKR caps scanner rows at 50)
+        instrument: Optional scanner instrument override
+        location_code: Optional scanner locationCode override
+        scan_code: Optional scanner scanCode override
+        filters: Optional IBKR scanner filters as [{"code": "...", "value": "..."}]
+        use_ttl_cache: Use local API-process TTL cache
+        cache_ttl_seconds: Cache TTL in seconds
+    """
+    state = _state(ctx)
+    from src.feeds.index_composition import (
+        IndexCompositionScannerRequest,
+        build_index_composition_from_scanner_rows,
+        resolve_index_composition_scanner_request,
+    )
+    from src.feeds.scanner import MarketScannerFilter
+
+    try:
+        composition_request = IndexCompositionScannerRequest(
+            index_symbol=index_symbol,
+            max_results=min(max_results, 50),
+            instrument=instrument,
+            location_code=location_code,
+            scan_code=scan_code,
+            filters=[MarketScannerFilter.model_validate(item) for item in (filters or [])],
+        )
+        scanner_request = resolve_index_composition_scanner_request(composition_request)
+
+        async def load():
+            rows = await state.feed.run_market_scanner(scanner_request)
+            return build_index_composition_from_scanner_rows(composition_request, scanner_request, rows)
+
+        if use_ttl_cache:
+            from src.webapp.cache import stable_cache_key
+
+            key = stable_cache_key("mcp_index_composition_scanner", composition_request)
+            payload = await state.market_data_cache.get_or_set(key, load, ttl_seconds=cache_ttl_seconds)
+        else:
+            payload = await load()
+        return payload.model_dump(mode="json")
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
 async def load_bond_yield_history(
     ctx: Context,
     symbol: str,
@@ -2641,6 +2703,7 @@ def get_server_status() -> str:
             "calculate_option_price — Calculate option price from IV via IBKR",
             "get_head_timestamp — Earliest available data date for symbol",
             "scan_contracts — Scan IBKR database for matching contracts",
+            "get_index_composition — IBKR scanner-backed index constituent approximation",
             "load_bond_yield_history — Historical bond yields from IBKR",
             "get_market_depth — Order book depth (Level 2 DOM) snapshot",
             "get_ibkr_rate_limits — IBKR rate limit/pacing status",

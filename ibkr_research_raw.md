@@ -105,7 +105,7 @@ All methods are on `IBApi.EClient` (or `self` when subclassing in Python).
 | `cancelHistoricalData` | `cancelHistoricalData(reqId: int)` | Cancel historical data subscription |
 | `reqHeadTimeStamp` | `reqHeadTimeStamp(reqId: int, contract: Contract, whatToShow: str, useRTH: bool, formatDate: int)` | Get earliest available data timestamp |
 | `cancelHeadTimeStamp` | `cancelHeadTimeStamp(reqId: int)` | Cancel head timestamp request |
-| `reqHistogramData` | `reqHistogramData(reqId: int, contract: Contract, useRTH: bool, timePeriod: str)` | Request price histogram data |
+| `reqHistogramData` | `reqHistogramData(reqId: int, contract: Contract, useRTH: bool, period: str)` | Request price histogram data |
 | `cancelHistogramData` | `cancelHistogramData(reqId: int)` | Cancel histogram request |
 | `reqHistoricalTicks` | `reqHistoricalTicks(reqId: int, contract: Contract, startDateTime: str, endDateTime: str, numberOfTicks: int, whatToShow: str, useRTH: bool, ignoreSize: bool, miscOptions: list)` | Request historical tick data. `whatToShow`: "TRADES", "BID_ASK", "MIDPOINT". |
 | `reqFundamentalData` | `reqFundamentalData(reqId: int, contract: Contract, reportType: str, fundamentalDataOptions: list)` | Request fundamental data (Reuters, etc.) |
@@ -983,12 +983,12 @@ Returns the earliest available data timestamp. Useful for checking how far back 
 ### 4.6 reqHistogramData
 
 ```python
-self.reqHistogramData(reqId, contract, useRTH, timePeriod)
+self.reqHistogramData(reqId, contract, useRTH, period)
 ```
 
 Returns price histogram showing distribution of trading volume at price levels.
 
-**Callback:** `histogramData(reqId, items)` — list of HistogramData objects (price, count)
+**Callback:** `histogramData(reqId, items)` — list of HistogramData objects (price, size)
 
 ### 4.7 reqHistoricalTicks
 

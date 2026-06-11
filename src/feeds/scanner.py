@@ -69,3 +69,49 @@ class ContractScanRequest(BaseModel):
     currency: str = Field(default="USD", min_length=1)
     primary_exchange: str | None = None
     max_results: int = Field(default=20, ge=1, le=100)
+
+
+class MarketScannerFilter(BaseModel):
+    """IBKR market scanner filter tag/value pair."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, description="IBKR scanner filter code, e.g. priceAbove.")
+    value: str | int | float | bool = Field(description="Filter value passed to IBKR as text.")
+
+
+class MarketScannerRequest(BaseModel):
+    """True IBKR market scanner request using ScannerSubscription."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    instrument: str = Field(default="STK", min_length=1, description="Scanner instrument, e.g. STK.")
+    location_code: str = Field(
+        default="STK.US.MAJOR",
+        min_length=1,
+        description="Scanner locationCode, e.g. STK.US.MAJOR or STK.HK.",
+    )
+    scan_code: str = Field(default="HOT_BY_VOLUME", min_length=1, description="Scanner scanCode.")
+    max_results: int = Field(default=20, ge=1, le=50, description="IBKR scanner rows; IBKR caps scans at 50.")
+    filters: list[MarketScannerFilter] = Field(default_factory=list)
+
+
+class MarketScannerRow(BaseModel):
+    """One ranked row returned by the IBKR market scanner."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rank: int = Field(ge=0)
+    con_id: int = Field(gt=0)
+    symbol: str
+    sec_type: str = ""
+    exchange: str = ""
+    currency: str = ""
+    primary_exchange: str = ""
+    local_symbol: str = ""
+    long_name: str = ""
+    market_name: str = ""
+    distance: str = ""
+    benchmark: str = ""
+    projection: str = ""
+    legs: str = ""

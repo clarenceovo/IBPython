@@ -12,6 +12,8 @@ from src.feeds.contracts import ContractSpec
 from src.feeds.models import AssetClass
 from src.feeds.tick_data import (
     HeadTimestampRequest,
+    HistogramDataRequest,
+    HistogramDataResponse,
     HistoricalTickRequest,
     HistoricalTickResponse,
     IVCalcRequest,
@@ -142,6 +144,20 @@ async def load_historical_ticks(
 ) -> HistoricalTickResponse:
     """Load historical tick-level data (trades, bid/ask, midpoints)."""
     return await state.feed.load_historical_ticks(payload)
+
+
+# ---------------------------------------------------------------------------
+# Price histograms
+# ---------------------------------------------------------------------------
+
+
+@router.post("/histogram", summary="Load price histogram", response_model=HistogramDataResponse)
+async def load_histogram_data(
+    payload: HistogramDataRequest,
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> HistogramDataResponse:
+    """Load price histogram data."""
+    return await state.feed.load_histogram_data(payload)
 
 
 # ---------------------------------------------------------------------------

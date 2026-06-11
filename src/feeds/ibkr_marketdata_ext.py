@@ -26,6 +26,9 @@ from src.feeds.ibkr_connection import (
 from src.feeds.models import AssetClass
 from src.feeds.tick_data import (
     HeadTimestampRequest,
+    HistogramDataPoint,
+    HistogramDataRequest,
+    HistogramDataResponse,
     HistoricalTickRequest,
     HistoricalTickResponse,
     IVCalcRequest,
@@ -147,6 +150,17 @@ def _normalize_ibkr_tick(ibkr_tick: Any, tick_type: TickType) -> TickByTickData:
         ask=None,
         exchange=getattr(ibkr_tick, "exchange", None),
         special_conditions=getattr(ibkr_tick, "specialConditions", None),
+    )
+
+
+def _normalize_histogram_data_point(item: Any) -> HistogramDataPoint:
+    """Convert an IBKR HistogramData/HistogramEntry object to our model."""
+    size = getattr(item, "size", None)
+    if size is None:
+        size = getattr(item, "count", None)
+    return HistogramDataPoint(
+        price=float(getattr(item, "price")),
+        size=float(size),
     )
 
 
@@ -590,7 +604,59 @@ class IBKRMarketDataExtClient:
         )
 
     # ------------------------------------------------------------------
-    # 4. Market rules
+    # 4. Price histograms
+    # ------------------------------------------------------------------
+
+    async def load_histogram_data(self, request: HistogramDataRequest) -> HistogramDataResponse:
+        """Load IBKR price histogram data.
+
+        IBKR documents the final argument as ``period``. ``ib_insync`` exposes
+        it as ``reqHistogramDataAsync(contract, useRTH, period)`` and does not
+        accept the raw-API-era ``timePeriod`` keyword.
+        """
+        await self._connection.ensure_connected()
+        logger.info(
+            "load_histogram_data: symbol=%s use_rth=%s period=%s",
+            request.symbol, request.use_rth, request.period,
+        )
+
+        contract = _build_contract(
+            request.symbol,
+            request.sec_type,
+            request.exchange,
+            request.currency,
+        )
+
+        try:
+            await self._connection.pacing_guard.acquire(
+                _PacingProxy(request.symbol, "HISTOGRAM"),
+            )
+            try:
+                raw_items = await self._connection.with_retry(
+                    lambda: self._ib.reqHistogramDataAsync(
+                        contract,
+                        request.use_rth,
+                        request.period,
+                    ),
+                    operation=f"histogram_data:{request.symbol}",
+                )
+            finally:
+                self._connection.pacing_guard.release()
+        except AttributeError:
+            logger.warning("reqHistogramDataAsync not available in ib_insync; returning empty")
+            raw_items = []
+
+        data = [_normalize_histogram_data_point(item) for item in raw_items or []]
+        return HistogramDataResponse(
+            symbol=request.symbol,
+            period=request.period,
+            use_rth=request.use_rth,
+            data=data,
+            total_count=len(data),
+        )
+
+    # ------------------------------------------------------------------
+    # 5. Market rules
     # ------------------------------------------------------------------
 
     async def load_market_rule(self, price_magnitude: int) -> MarketRule:
@@ -622,7 +688,7 @@ class IBKRMarketDataExtClient:
         )
 
     # ------------------------------------------------------------------
-    # 5. Smart components
+    # 6. Smart components
     # ------------------------------------------------------------------
 
     async def load_smart_components(self, exchange: str) -> list[SmartComponent]:
@@ -646,7 +712,7 @@ class IBKRMarketDataExtClient:
         return result
 
     # ------------------------------------------------------------------
-    # 6. Head timestamp
+    # 7. Head timestamp
     # ------------------------------------------------------------------
 
     async def load_head_timestamp(self, request: HeadTimestampRequest) -> datetime | None:
@@ -681,7 +747,7 @@ class IBKRMarketDataExtClient:
         return _parse_tick_timestamp(ts)
 
     # ------------------------------------------------------------------
-    # 7. Implied volatility calculation
+    # 8. Implied volatility calculation
     # ------------------------------------------------------------------
 
     async def calculate_iv(
@@ -719,7 +785,7 @@ class IBKRMarketDataExtClient:
         return vol
 
     # ------------------------------------------------------------------
-    # 8. Option price calculation
+    # 9. Option price calculation
     # ------------------------------------------------------------------
 
     async def calculate_option_price(
@@ -756,7 +822,7 @@ class IBKRMarketDataExtClient:
         return opt_price
 
     # ------------------------------------------------------------------
-    # 9. Symbol search (fuzzy matching)
+    # 10. Symbol search (fuzzy matching)
     # ------------------------------------------------------------------
 
     async def search_matching_symbols(self, pattern: str) -> list[SymbolDescription]:

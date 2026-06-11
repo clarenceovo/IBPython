@@ -41,6 +41,8 @@ from src.feeds.scanner import (
     ContractScanRequest,
     ContractSearchRequest,
     ContractSearchResult,
+    MarketScannerRequest,
+    MarketScannerRow,
 )
 from src.feeds.snapshotter import EquitySnapshotCaptureResult
 from src.transport.metrics import metrics
@@ -79,6 +81,50 @@ def _build_wsh_event_data(request: WSHEventDataRequest) -> Any:
     except ImportError as exc:
         raise RuntimeError("ib_insync is required for WSH event data requests") from exc
     return WshEventData(**request.to_wsh_event_data_kwargs())
+
+
+def _scanner_filter_value(value: str | int | float | bool) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def normalize_market_scanner_rows(scan_data: Sequence[Any]) -> list[MarketScannerRow]:
+    rows: list[MarketScannerRow] = []
+    for fallback_rank, item in enumerate(scan_data):
+        detail = getattr(item, "contractDetails", None)
+        if detail is None:
+            detail = getattr(item, "contract_details", None)
+        if detail is None:
+            detail = item
+        contract = getattr(detail, "contract", detail)
+        con_id = int(getattr(contract, "conId", 0) or 0)
+        if con_id <= 0:
+            continue
+        rows.append(
+            MarketScannerRow(
+                rank=int(getattr(item, "rank", fallback_rank) or fallback_rank),
+                con_id=con_id,
+                symbol=getattr(contract, "symbol", "") or "",
+                sec_type=getattr(contract, "secType", "") or "",
+                exchange=getattr(contract, "exchange", "") or "",
+                currency=getattr(contract, "currency", "") or "",
+                primary_exchange=(
+                    getattr(contract, "primaryExchange", "")
+                    or getattr(contract, "primaryExch", "")
+                    or getattr(detail, "primaryExchange", "")
+                    or ""
+                ),
+                local_symbol=getattr(contract, "localSymbol", "") or "",
+                long_name=getattr(detail, "longName", "") or "",
+                market_name=getattr(detail, "marketName", "") or "",
+                distance=getattr(item, "distance", "") or "",
+                benchmark=getattr(item, "benchmark", "") or "",
+                projection=getattr(item, "projection", "") or "",
+                legs=getattr(item, "legsStr", "") or getattr(item, "legs", "") or "",
+            )
+        )
+    return rows
 
 
 class IBKRReferenceFeedClient:
@@ -328,6 +374,36 @@ class IBKRReferenceFeedClient:
             primary_upper = request.primary_exchange.upper()
             results = [r for r in results if r.primary_exchange.upper() == primary_upper or r.exchange.upper() == primary_upper]
         return results[:request.max_results]
+
+    async def run_market_scanner(self, request: MarketScannerRequest) -> list[MarketScannerRow]:
+        """Run a true IBKR market scanner subscription and return the first result set."""
+        await self._connection.ensure_connected()
+
+        try:
+            from ib_insync import ScannerSubscription, TagValue
+        except ImportError as exc:
+            raise RuntimeError("ib_insync is required for market scanner requests") from exc
+
+        subscription = ScannerSubscription(
+            numberOfRows=request.max_results,
+            instrument=request.instrument,
+            locationCode=request.location_code,
+            scanCode=request.scan_code,
+        )
+        filter_options = [TagValue(item.code, _scanner_filter_value(item.value)) for item in request.filters]
+        logger.info(
+            "run_market_scanner: instrument=%s location=%s scan_code=%s max_results=%d filters=%d",
+            request.instrument,
+            request.location_code,
+            request.scan_code,
+            request.max_results,
+            len(filter_options),
+        )
+        scan_data = await self._connection.with_retry(
+            lambda: self._ib.reqScannerDataAsync(subscription, [], filter_options),
+            operation=f"market_scanner:{request.instrument}:{request.location_code}:{request.scan_code}",
+        )
+        return normalize_market_scanner_rows(scan_data)[: request.max_results]
 
     # ------------------------------------------------------------------
     # Real-time market data streaming

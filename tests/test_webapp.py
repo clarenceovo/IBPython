@@ -27,6 +27,7 @@ from src.feeds.exceptions import IBKRMarketDataLeaseTimeoutError, IBKRMarketData
 from src.feeds.models import AssetClass, FXOHLCVBar, FutureOHLCVBar, OHLCVBar, OptionOHLCVBar
 from src.feeds.news import HistoricalNewsHeadline, NewsArticle, NewsProvider
 from src.feeds.options import OptionAnalyticsSnapshot, OptionSkewSurfaceResponse
+from src.feeds.scanner import MarketScannerRow
 from src.feeds.snapshotter import EquitySnapshot, EquitySnapshotCaptureResult, FXOptionSnapshot
 from src.feeds.tick_data import HistoricalTickResponse, MarketDepthLevel, MarketDepthSnapshot, MarketRule, PriceIncrement
 from src.feeds.streaming import StreamSubscription
@@ -199,6 +200,7 @@ class FakeFeed:
         self.market_rule_requests: list[int] = []
         self.market_depth_requests: list[tuple[object, int, bool, float, float, float]] = []
         self.market_depth_exception: BaseException | None = None
+        self.market_scanner_requests: list[object] = []
         self.fx_option_snapshot_requests: list[tuple[object, ...]] = []
         self.equity_snapshot_requests: list[tuple[tuple[str, str, str, str, int], ...]] = []
         self.cancelled_equity_tickers: list[object] = []
@@ -338,6 +340,33 @@ class FakeFeed:
             bids=[MarketDepthLevel(position=0, price=100.0, size=10, market_maker="ARCA")],
             asks=[MarketDepthLevel(position=0, price=100.1, size=12, market_maker="ISLAND")],
         )
+
+    async def run_market_scanner(self, request: object) -> list[MarketScannerRow]:
+        self.market_scanner_requests.append(request)
+        return [
+            MarketScannerRow(
+                rank=0,
+                con_id=12345,
+                symbol="0005",
+                sec_type="STK",
+                exchange="SEHK",
+                currency="HKD",
+                primary_exchange="SEHK",
+                local_symbol="0005",
+                long_name="HSBC Holdings PLC",
+            ),
+            MarketScannerRow(
+                rank=1,
+                con_id=67890,
+                symbol="0700",
+                sec_type="STK",
+                exchange="SEHK",
+                currency="HKD",
+                primary_exchange="SEHK",
+                local_symbol="0700",
+                long_name="Tencent Holdings Ltd",
+            ),
+        ]
 
     async def load_head_timestamp(self, request: object) -> datetime:
         return datetime(2020, 1, 1, tzinfo=timezone.utc)
@@ -703,6 +732,7 @@ def test_webapp_registers_domain_routers() -> None:
     assert "/api/v1/snapshot/fx-options/capture" in paths
     assert "/api/v1/snapshot/fx-options/latest" in paths
     assert "/api/v1/snapshot/fx-options/query" in paths
+    assert "/api/v1/scanner/index-composition" in paths
     assert "/api/v1/account/positions" in paths
 
 
@@ -1731,6 +1761,30 @@ def test_business_universe_bars_reads_redis_index_composition() -> None:
 
     assert response.status_code == 200
     assert {bar["symbol"] for bar in response.json()} == {"AAPL", "MSFT"}
+
+
+def test_scanner_index_composition_returns_hsi_approximation_and_uses_cache() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        first = client.post("/api/v1/scanner/index-composition", json={"index_symbol": "HSI"})
+        second = client.post("/api/v1/scanner/index-composition", json={"index_symbol": "HSI"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    payload = first.json()
+    assert payload["index_symbol"] == "HSI"
+    assert payload["provider"] == "ibkr_market_scanner"
+    assert payload["is_official_composition"] is False
+    assert payload["metadata"]["scanner"]["instrument"] == "STK"
+    assert payload["metadata"]["scanner"]["location_code"] == "STK.HK"
+    assert payload["metadata"]["scanner"]["scan_code"] == "HOT_BY_VOLUME"
+    assert payload["constituents"][0]["symbol"] == "0005"
+    assert payload["constituents"][0]["weight"] is None
+    assert payload["constituents"][0]["con_id"] == 12345
+    assert payload["constituents"][0]["rank"] == 0
+    assert len(state.feed.market_scanner_requests) == 1
 
 
 def test_business_option_skew_wrapper_uses_minimal_payload() -> None:

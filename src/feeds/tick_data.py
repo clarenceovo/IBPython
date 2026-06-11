@@ -84,6 +84,40 @@ class HistoricalTickResponse(BaseModel):
     truncated: bool
 
 
+class HistogramDataPoint(BaseModel):
+    """One IBKR price histogram bucket."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    price: float = Field(ge=0)
+    size: float = Field(ge=0)
+
+
+class HistogramDataRequest(BaseModel):
+    """Request for IBKR price histogram data."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    symbol: str = Field(min_length=1)
+    sec_type: str = Field(default="STK", min_length=1)
+    exchange: str = Field(default="SMART", min_length=1)
+    currency: str = Field(default="USD", min_length=1)
+    use_rth: bool = True
+    period: str = Field(default="1 week", min_length=1)
+
+
+class HistogramDataResponse(BaseModel):
+    """Response containing IBKR price histogram data."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    symbol: str
+    period: str
+    use_rth: bool
+    data: list[HistogramDataPoint]
+    total_count: int
+
+
 class PriceIncrement(BaseModel):
     """A single price increment entry from a market rule."""
 

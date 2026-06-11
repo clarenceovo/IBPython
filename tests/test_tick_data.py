@@ -14,6 +14,9 @@ from src.feeds.contracts import ContractSpec
 from src.feeds.exceptions import IBKRMarketDataLeaseTimeoutError, IBKRMarketDataUnavailableError
 from src.feeds.tick_data import (
     HeadTimestampRequest,
+    HistogramDataPoint,
+    HistogramDataRequest,
+    HistogramDataResponse,
     HistoricalTickRequest,
     HistoricalTickResponse,
     IVCalcRequest,
@@ -31,6 +34,7 @@ from src.feeds.tick_data import (
 )
 from src.feeds.ibkr_marketdata_ext import (
     IBKRMarketDataExtClient,
+    _normalize_histogram_data_point,
     _normalize_ibkr_tick,
     _what_to_show_to_tick_type,
     _parse_tick_timestamp,
@@ -221,6 +225,19 @@ class TestHeadTimestampRequest:
         assert req.what_to_show == "TRADES"
 
 
+class TestHistogramData:
+    def test_request_defaults(self) -> None:
+        req = HistogramDataRequest(symbol="AAPL")
+        assert req.sec_type == "STK"
+        assert req.period == "1 week"
+        assert req.use_rth is True
+
+    def test_valid_point(self) -> None:
+        point = HistogramDataPoint(price=100.0, size=50)
+        assert point.price == 100.0
+        assert point.size == 50
+
+
 class TestTickSubscribeRequest:
     def test_defaults(self) -> None:
         req = TickSubscribeRequest(symbol="AAPL")
@@ -286,6 +303,16 @@ class TestHelpers:
         assert tick.bid == 99.5
         assert tick.ask == 100.5
         assert tick.price is None
+
+    def test_normalize_histogram_point_accepts_size(self) -> None:
+        point = _normalize_histogram_data_point(SimpleNamespace(price=100.25, size=42))
+        assert point.price == pytest.approx(100.25)
+        assert point.size == pytest.approx(42)
+
+    def test_normalize_histogram_point_accepts_count(self) -> None:
+        point = _normalize_histogram_data_point(SimpleNamespace(price=99.75, count=17))
+        assert point.price == pytest.approx(99.75)
+        assert point.size == pytest.approx(17)
 
 
 # ---------------------------------------------------------------------------
@@ -718,6 +745,45 @@ class TestIBKRMarketDataExtHistoricalTicks:
         assert response.total_count == 50
 
 
+class FakeIBHistogram:
+    """IB mock for histogram data."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Any, bool, str]] = []
+
+    async def reqHistogramDataAsync(self, contract: Any, useRTH: bool, period: str) -> list[SimpleNamespace]:
+        self.calls.append((contract, useRTH, period))
+        return [
+            SimpleNamespace(price=100.0, size=25),
+            SimpleNamespace(price=101.0, count=30),
+        ]
+
+
+class TestIBKRMarketDataExtHistogram:
+    def test_load_histogram_data_uses_period_argument(self) -> None:
+        fake_ib = FakeIBHistogram()
+        conn = _FakeConnection(fake_ib)
+        client = IBKRMarketDataExtClient(conn)
+
+        request = HistogramDataRequest(
+            symbol="AAPL",
+            use_rth=False,
+            period="3 days",
+        )
+        response = asyncio.run(client.load_histogram_data(request))
+
+        assert isinstance(response, HistogramDataResponse)
+        assert response.total_count == 2
+        assert response.period == "3 days"
+        assert response.use_rth is False
+        assert response.data[0].size == pytest.approx(25)
+        assert response.data[1].size == pytest.approx(30)
+        assert len(fake_ib.calls) == 1
+        _, use_rth, period = fake_ib.calls[0]
+        assert use_rth is False
+        assert period == "3 days"
+
+
 class FakeIBMarketRule:
     """IB mock for market rule."""
 
@@ -905,6 +971,7 @@ class TestFacadeDelegation:
         assert callable(getattr(client, "stop_tick_by_tick", None))
         assert callable(getattr(client, "get_latest_ticks", None))
         assert callable(getattr(client, "load_historical_ticks", None))
+        assert callable(getattr(client, "load_histogram_data", None))
         assert callable(getattr(client, "load_market_rule", None))
         assert callable(getattr(client, "load_smart_components", None))
         assert callable(getattr(client, "load_head_timestamp", None))
@@ -954,6 +1021,7 @@ class TestTickDataRouter:
         assert "/api/v1/tick-data/unsubscribe" in paths
         assert "/api/v1/tick-data/latest/{symbol}" in paths
         assert "/api/v1/tick-data/historical" in paths
+        assert "/api/v1/tick-data/histogram" in paths
         assert "/api/v1/tick-data/market-rules/{magnitude}" in paths
         assert "/api/v1/tick-data/smart-components/{exchange}" in paths
         assert "/api/v1/tick-data/head-timestamp" in paths
