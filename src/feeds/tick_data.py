@@ -269,3 +269,25 @@ class TickUnsubscribeRequest(BaseModel):
     symbol: str = Field(min_length=1)
     sec_type: str = Field(default="STK", min_length=1)
     exchange: str = Field(default="SMART", min_length=1)
+
+
+class HistogramDataPoint(BaseModel):
+    """A single price/count bucket from IBKR histogram data."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    price: float
+    count: int = Field(ge=0)
+
+
+class HistogramRequest(BaseModel):
+    """Request for IBKR histogram data."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    symbol: str = Field(min_length=1)
+    asset_class: str = Field(default="EQUITY", min_length=1)
+    exchange: str = Field(default="SMART", min_length=1)
+    currency: str = Field(default="USD", min_length=1)
+    use_rth: bool = True
+    time_period: str = Field(default="1 day", min_length=1)

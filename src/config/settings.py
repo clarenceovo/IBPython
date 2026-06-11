@@ -152,6 +152,16 @@ class Settings(BaseModel):
         gt=0,
     )
 
+    ibkr_rest_cors_origins: str = Field(
+        default=constants.DEFAULT_IBKR_REST_CORS_ORIGINS,
+        alias=constants.IBKR_REST_CORS_ORIGINS_ENV,
+    )
+    ibkr_rest_rate_limit_per_minute: int = Field(
+        default=constants.DEFAULT_IBKR_REST_RATE_LIMIT_PER_MINUTE,
+        alias=constants.IBKR_REST_RATE_LIMIT_PER_MINUTE_ENV,
+        gt=0,
+    )
+
     ibkr_api_bearer_token: str = Field(
         default=constants.DEFAULT_IBKR_API_BEARER_TOKEN,
         alias=constants.IBKR_API_BEARER_TOKEN_ENV,

@@ -21,25 +21,36 @@ class PositionPnLSnapshotRequest(AccountPnLSnapshotRequest):
     con_id: int = Field(gt=0)
 
 
-@router.get("/summary", response_model=list[AccountSummaryDTO])
+@router.get("/summary", response_model=list[AccountSummaryDTO], summary="Get account summary")
 async def load_account_summary(
     account: str = Query(default=""),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[AccountSummaryDTO]:
-    return await state.feed.load_account_summary(account)
+    results = await state.feed.load_account_summary(account)
+    return results[offset : offset + limit]
 
 
-@router.get("/positions", response_model=list[LivePositionDTO])
-async def load_live_positions(state: IBKRRestAppState = Depends(get_rest_state)) -> list[LivePositionDTO]:
-    return await state.feed.load_live_positions()
+@router.get("/positions", response_model=list[LivePositionDTO], summary="Get live positions")
+async def load_live_positions(
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> list[LivePositionDTO]:
+    results = await state.feed.load_live_positions()
+    return results[offset : offset + limit]
 
 
-@router.get("/portfolio", response_model=list[PortfolioItemDTO])
+@router.get("/portfolio", response_model=list[PortfolioItemDTO], summary="Get portfolio items")
 async def load_portfolio_items(
     account: str = Query(default=""),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[PortfolioItemDTO]:
-    return await state.feed.load_portfolio_items(account)
+    results = await state.feed.load_portfolio_items(account)
+    return results[offset : offset + limit]
 
 
 @router.post("/pnl/account", response_model=AccountPnLDTO)

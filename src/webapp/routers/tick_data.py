@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query, status
+from pydantic import BaseModel
 
 from src.feeds.contracts import ContractSpec
 from src.feeds.models import AssetClass
@@ -29,23 +30,64 @@ router = APIRouter(prefix="/tick-data", tags=["market-data"])
 
 
 # ---------------------------------------------------------------------------
+# Response models
+# ---------------------------------------------------------------------------
+
+
+class TickSubscribeResponse(BaseModel):
+    """Typed response for tick subscription."""
+
+    status: str
+    symbol: str
+    sec_type: str
+    exchange: str
+    tick_type: str
+
+
+class HeadTimestampResponse(BaseModel):
+    """Typed response for head timestamp lookup."""
+
+    symbol: str
+    what_to_show: str
+    head_timestamp: str | None
+
+
+class IVCalcResponse(BaseModel):
+    """Typed response for implied volatility calculation."""
+
+    symbol: str
+    strike: float
+    right: str
+    expiry: str
+    option_price: float
+    under_price: float
+    implied_volatility: float | None
+
+
+class OptionPriceCalcResponse(BaseModel):
+    """Typed response for option price calculation."""
+
+    symbol: str
+    strike: float
+    right: str
+    expiry: str
+    volatility: float
+    under_price: float
+    option_price: float | None
+
+
+# ---------------------------------------------------------------------------
 # Tick-by-tick streaming
 # ---------------------------------------------------------------------------
 
 
-class TickSubscribeResponse(dict):  # type: ignore[type-arg]
-    """Thin wrapper so FastAPI can serialize the response."""
-
-    pass
-
-
-@router.post("/subscribe", summary="Start tick-by-tick subscription")
+@router.post("/subscribe", summary="Start tick-by-tick subscription", status_code=status.HTTP_201_CREATED, response_model=TickSubscribeResponse)
 async def subscribe_ticks(
     payload: TickSubscribeRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> dict[str, Any]:
+) -> TickSubscribeResponse:
     """Start a tick-by-tick data subscription for a symbol."""
-    handle = await state.feed.start_tick_by_tick(
+    await state.feed.start_tick_by_tick(
         symbol=payload.symbol,
         sec_type=payload.sec_type,
         exchange=payload.exchange,
@@ -53,13 +95,13 @@ async def subscribe_ticks(
         tick_type=payload.tick_type,
         max_ticks=payload.max_ticks,
     )
-    return {
-        "status": "subscribed",
-        "symbol": payload.symbol,
-        "sec_type": payload.sec_type,
-        "exchange": payload.exchange,
-        "tick_type": payload.tick_type.value,
-    }
+    return TickSubscribeResponse(
+        status="subscribed",
+        symbol=payload.symbol,
+        sec_type=payload.sec_type,
+        exchange=payload.exchange,
+        tick_type=payload.tick_type.value,
+    )
 
 
 @router.post("/unsubscribe", summary="Stop tick-by-tick subscription")
@@ -143,7 +185,7 @@ async def get_smart_components(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/head-timestamp", summary="Get earliest data date")
+@router.get("/head-timestamp", summary="Get earliest data date", response_model=HeadTimestampResponse)
 async def get_head_timestamp(
     symbol: str = Query(min_length=1),
     sec_type: str = Query(default="STK", min_length=1),
@@ -152,7 +194,7 @@ async def get_head_timestamp(
     what_to_show: str = Query(default="TRADES", min_length=1),
     use_rth: bool = Query(default=True),
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> dict[str, Any]:
+) -> HeadTimestampResponse:
     """Get the earliest available data date for a contract."""
     request = HeadTimestampRequest(
         symbol=symbol,
@@ -163,11 +205,11 @@ async def get_head_timestamp(
         use_rth=use_rth,
     )
     ts = await state.feed.load_head_timestamp(request)
-    return {
-        "symbol": symbol,
-        "what_to_show": what_to_show,
-        "head_timestamp": ts.isoformat() if ts else None,
-    }
+    return HeadTimestampResponse(
+        symbol=symbol,
+        what_to_show=what_to_show,
+        head_timestamp=ts.isoformat() if ts else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -191,42 +233,42 @@ def _option_calc_contract_spec(payload: IVCalcRequest | OptionPriceCalcRequest) 
     )
 
 
-@router.post("/calculate/iv", summary="Calculate implied volatility")
+@router.post("/calculate/iv", summary="Calculate implied volatility", response_model=IVCalcResponse)
 async def calculate_iv(
     payload: IVCalcRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> dict[str, Any]:
+) -> IVCalcResponse:
     """Calculate implied volatility from the IBKR engine."""
     contract = await state.feed.qualify_contract(_option_calc_contract_spec(payload))
     iv = await state.feed.calculate_iv(contract, payload.option_price, payload.under_price)
-    return {
-        "symbol": payload.symbol,
-        "strike": payload.strike,
-        "right": payload.right,
-        "expiry": payload.expiry,
-        "option_price": payload.option_price,
-        "under_price": payload.under_price,
-        "implied_volatility": iv,
-    }
+    return IVCalcResponse(
+        symbol=payload.symbol,
+        strike=payload.strike,
+        right=payload.right,
+        expiry=payload.expiry,
+        option_price=payload.option_price,
+        under_price=payload.under_price,
+        implied_volatility=iv,
+    )
 
 
-@router.post("/calculate/option-price", summary="Calculate option price")
+@router.post("/calculate/option-price", summary="Calculate option price", response_model=OptionPriceCalcResponse)
 async def calculate_option_price(
     payload: OptionPriceCalcRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> dict[str, Any]:
+) -> OptionPriceCalcResponse:
     """Calculate option price from the IBKR engine."""
     contract = await state.feed.qualify_contract(_option_calc_contract_spec(payload))
     price = await state.feed.calculate_option_price(contract, payload.volatility, payload.under_price)
-    return {
-        "symbol": payload.symbol,
-        "strike": payload.strike,
-        "right": payload.right,
-        "expiry": payload.expiry,
-        "volatility": payload.volatility,
-        "under_price": payload.under_price,
-        "option_price": price,
-    }
+    return OptionPriceCalcResponse(
+        symbol=payload.symbol,
+        strike=payload.strike,
+        right=payload.right,
+        expiry=payload.expiry,
+        volatility=payload.volatility,
+        under_price=payload.under_price,
+        option_price=price,
+    )
 
 
 # ---------------------------------------------------------------------------

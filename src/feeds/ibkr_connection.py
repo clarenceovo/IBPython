@@ -468,6 +468,27 @@ class IBKRConnectionManager:
     async def _with_retry(self, call: Any, *, operation: str) -> Any:
         return await self.with_retry(call, operation=operation)
 
+    # ------------------------------------------------------------------
+    # Server time
+    # ------------------------------------------------------------------
+
+    async def get_server_time(self) -> dict[str, Any]:
+        """Request the current IBKR server time.
+
+        Uses ``reqCurrentTimeAsync()``.
+        """
+        await self.ensure_connected()
+        logger.info("get_server_time: requesting")
+
+        result = await self.with_retry(
+            lambda: self._ib.reqCurrentTimeAsync(),
+            operation="server_time",
+        )
+
+        server_time_str = str(result) if result is not None else ""
+        logger.info("get_server_time: %s", server_time_str)
+        return {"server_time": server_time_str}
+
     async def wait_for_ibkr_request(self, *, operation: str, weight: int = 1) -> None:
         if self._rate_limiter is None:
             return

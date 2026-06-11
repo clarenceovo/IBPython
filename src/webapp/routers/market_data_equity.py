@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, Query
@@ -9,7 +10,14 @@ from pydantic import Field
 
 from src.config.reference_data import resolve_index as _resolve_index
 from src.feeds.exchange_resolver import resolve_equity
-from src.feeds.models import AssetClass, OHLCVBar
+from src.feeds.models import (
+    AssetClass,
+    OHLCVBar,
+    OHLCVDataQuality,
+    OHLCVRequestMeta,
+    OHLCVResponseEnvelope,
+    compute_ohlcv_quality,
+)
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 from src.webapp.routers.market_data_shared import (
     HistoricalOHLCVLoadRequest,
@@ -335,14 +343,41 @@ INDEX_OHLCV_REQUEST_EXAMPLES = {
 }
 
 
-@router.post("/ohlcv", response_model=list[OHLCVBar])
+def _build_envelope(bars: list[OHLCVBar], request_meta: OHLCVRequestMeta, latency_ms: float) -> OHLCVResponseEnvelope:
+    """Build an OHLCVResponseEnvelope from bars, request metadata, and latency."""
+    return OHLCVResponseEnvelope(
+        bars=bars,
+        request=request_meta,
+        quality=compute_ohlcv_quality(bars),
+        latency_ms=latency_ms,
+        cache_hit=False,
+        chunk_count=1,
+        source="ibkr",
+    )
+
+
+@router.post("/ohlcv", response_model=OHLCVResponseEnvelope, summary="Load OHLCV bars with full request payload")
 async def load_ohlcv(
     payload: Annotated[HistoricalOHLCVLoadRequest, Body(openapi_examples=GENERIC_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[OHLCVBar]:
-    return await load_ohlcv_with_controls(
-        request=payload.request,
-        start_datetime=payload.request.start_datetime,
+) -> OHLCVResponseEnvelope:
+    req = payload.request
+    request_meta = OHLCVRequestMeta(
+        symbol=req.symbol,
+        asset_class=req.asset_class.value,
+        exchange=req.exchange,
+        currency=req.currency,
+        bar_size=req.bar_size,
+        what_to_show=req.what_to_show,
+        use_rth=req.use_rth,
+        start_time=req.start_datetime,
+        end_time=req.end_datetime,
+        duration=req.duration,
+    )
+    t0 = time.monotonic()
+    bars = await load_ohlcv_with_controls(
+        request=req,
+        start_datetime=req.start_datetime,
         persist=payload.persist,
         cache_latest=payload.cache_latest,
         use_ttl_cache=payload.use_ttl_cache,
@@ -350,11 +385,13 @@ async def load_ohlcv(
         cache_namespace="ohlcv",
         state=state,
     )
+    latency_ms = (time.monotonic() - t0) * 1000.0
+    return _build_envelope(bars, request_meta, latency_ms)
 
 
 @router.post(
     "/ohlcv/auto",
-    response_model=list[OHLCVBar],
+    response_model=OHLCVResponseEnvelope,
     summary="Load OHLCV with automatic asset and contract resolution",
     description=(
         "Integrated OHLCV endpoint for compact requests. It auto-detects equity, FX, index, or future, normalizes "
@@ -369,9 +406,22 @@ async def load_ohlcv(
 async def load_auto_ohlcv(
     payload: Annotated[UnifiedOHLCVLoadRequest, Body(openapi_examples=UNIFIED_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[OHLCVBar]:
+) -> OHLCVResponseEnvelope:
     request = payload.to_request()
-    return await load_ohlcv_with_controls(
+    request_meta = OHLCVRequestMeta(
+        symbol=request.symbol,
+        asset_class=request.asset_class.value,
+        exchange=request.exchange,
+        currency=request.currency,
+        bar_size=request.bar_size,
+        what_to_show=request.what_to_show,
+        use_rth=request.use_rth,
+        start_time=request.start_datetime,
+        end_time=request.end_datetime,
+        duration=request.duration,
+    )
+    t0 = time.monotonic()
+    bars = await load_ohlcv_with_controls(
         request=request,
         start_datetime=payload.starttime,
         persist=payload.persist,
@@ -381,19 +431,35 @@ async def load_auto_ohlcv(
         cache_namespace=f"ohlcv_auto_{request.asset_class.value}",
         state=state,
     )
+    latency_ms = (time.monotonic() - t0) * 1000.0
+    return _build_envelope(bars, request_meta, latency_ms)
 
 
 @router.post(
     "/ohlcv/equity",
-    response_model=list[OHLCVBar],
+    response_model=OHLCVResponseEnvelope,
     summary="Load equity OHLCV with preset asset_class",
 )
 async def load_equity_ohlcv(
     payload: Annotated[EquityOHLCVLoadRequest, Body(openapi_examples=EQUITY_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[OHLCVBar]:
-    return await load_ohlcv_with_controls(
-        request=payload.to_request(),
+) -> OHLCVResponseEnvelope:
+    req = payload.to_request()
+    request_meta = OHLCVRequestMeta(
+        symbol=req.symbol,
+        asset_class=req.asset_class.value,
+        exchange=req.exchange,
+        currency=req.currency,
+        bar_size=req.bar_size,
+        what_to_show=req.what_to_show,
+        use_rth=req.use_rth,
+        start_time=req.start_datetime,
+        end_time=req.end_datetime,
+        duration=req.duration,
+    )
+    t0 = time.monotonic()
+    bars = await load_ohlcv_with_controls(
+        request=req,
         start_datetime=payload.start_datetime,
         persist=payload.persist,
         cache_latest=payload.cache_latest,
@@ -402,19 +468,35 @@ async def load_equity_ohlcv(
         cache_namespace="ohlcv_equity",
         state=state,
     )
+    latency_ms = (time.monotonic() - t0) * 1000.0
+    return _build_envelope(bars, request_meta, latency_ms)
 
 
 @router.post(
     "/ohlcv/index",
-    response_model=list[OHLCVBar],
+    response_model=OHLCVResponseEnvelope,
     summary="Load index OHLCV with auto-resolved exchange",
 )
 async def load_index_ohlcv(
     payload: Annotated[IndexOHLCVLoadRequest, Body(openapi_examples=INDEX_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[OHLCVBar]:
-    return await load_ohlcv_with_controls(
-        request=payload.to_request(),
+) -> OHLCVResponseEnvelope:
+    req = payload.to_request()
+    request_meta = OHLCVRequestMeta(
+        symbol=req.symbol,
+        asset_class=req.asset_class.value,
+        exchange=req.exchange,
+        currency=req.currency,
+        bar_size=req.bar_size,
+        what_to_show=req.what_to_show,
+        use_rth=req.use_rth,
+        start_time=req.start_datetime,
+        end_time=req.end_datetime,
+        duration=req.duration,
+    )
+    t0 = time.monotonic()
+    bars = await load_ohlcv_with_controls(
+        request=req,
         start_datetime=payload.start_datetime,
         persist=payload.persist,
         cache_latest=payload.cache_latest,
@@ -423,6 +505,8 @@ async def load_index_ohlcv(
         cache_namespace="ohlcv_index",
         state=state,
     )
+    latency_ms = (time.monotonic() - t0) * 1000.0
+    return _build_envelope(bars, request_meta, latency_ms)
 
 
 @router.get(

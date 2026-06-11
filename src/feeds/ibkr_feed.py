@@ -842,3 +842,83 @@ class IBKRFeedClient:
 
     async def search_matching_symbols(self, pattern: str) -> "list":
         return await self._marketdata_ext.search_matching_symbols(pattern)
+
+    # ------------------------------------------------------------------
+    # Histogram, realtime bars, depth exchanges, market data type — delegated to marketdata_ext
+    # ------------------------------------------------------------------
+
+    async def request_histogram(
+        self,
+        symbol: str,
+        asset_class: str = "EQUITY",
+        exchange: str = "SMART",
+        currency: str = "USD",
+        use_rth: bool = True,
+        time_period: str = "1 day",
+    ) -> list[dict[str, Any]]:
+        """Request histogram data for a contract."""
+        return await self._marketdata_ext.request_histogram(
+            symbol, asset_class, exchange, currency, use_rth, time_period,
+        )
+
+    async def subscribe_realtime_bars(
+        self,
+        symbol: str,
+        asset_class: str = "EQUITY",
+        exchange: str = "SMART",
+        currency: str = "USD",
+        what_to_show: str = "TRADES",
+        use_rth: bool = True,
+    ):
+        """Subscribe to real-time 5-second bars."""
+        return self._marketdata_ext.subscribe_realtime_bars(
+            symbol, asset_class, exchange, currency, what_to_show, use_rth,
+        )
+
+    async def get_depth_exchanges(self) -> list[dict[str, Any]]:
+        """Return exchanges supporting L2 market depth."""
+        return await self._marketdata_ext.get_depth_exchanges()
+
+    async def set_market_data_type(self, market_data_type: int) -> dict[str, Any]:
+        """Switch the IBKR market data type."""
+        return await self._marketdata_ext.set_market_data_type(market_data_type)
+
+    # ------------------------------------------------------------------
+    # Server time — delegated to connection manager
+    # ------------------------------------------------------------------
+
+    async def get_server_time(self) -> dict[str, Any]:
+        """Request the current IBKR server time."""
+        return await self._connection.get_server_time()
+
+    # ------------------------------------------------------------------
+    # Additional order management — delegated to order client
+    # ------------------------------------------------------------------
+
+    async def cancel_all_orders(self) -> dict[str, Any]:
+        """Cancel all open orders globally."""
+        return await self._order_client.cancel_all_orders()
+
+    async def get_all_open_orders(self) -> "list":
+        """Load all open orders across all accounts."""
+        return await self._order_client.get_all_open_orders()
+
+    async def exercise_option(
+        self,
+        symbol: str,
+        right: str,
+        strike: float,
+        expiry: str,
+        exercise_action: int,
+        quantity: int,
+        account: str,
+        exchange: str = "SMART",
+        currency: str = "USD",
+        override: bool = False,
+        manual_order_time: str = "",
+    ) -> dict[str, Any]:
+        """Exercise or lapse an option position."""
+        return await self._order_client.exercise_option(
+            symbol, right, strike, expiry, exercise_action, quantity,
+            account, exchange, currency, override, manual_order_time,
+        )

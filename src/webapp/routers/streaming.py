@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from src.feeds.contracts import ContractSpec
@@ -324,7 +324,10 @@ async def stream_ticker(
     response_model=list[StreamSubscription],
     summary="List active streaming subscriptions",
 )
-async def list_active_subscriptions() -> list[StreamSubscription]:
+async def list_active_subscriptions(
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> list[StreamSubscription]:
     async with _sub_lock:
         # Clean up expired subscriptions on read
         expired_ids = [
@@ -335,12 +338,16 @@ async def list_active_subscriptions() -> list[StreamSubscription]:
             sub = _pop_subscription_locked(sid)
             if sub is not None:
                 sub.stop()
-        return list(_active_subscriptions.values())
+        all_subs = list(_active_subscriptions.values())
+        return all_subs[offset : offset + limit]
 
 
 @router.delete(
     "/subscriptions/{subscription_id}",
     summary="Stop a streaming subscription",
+    # NOTE: Returns 200 (not 204) because the response body contains the deleted
+    # subscription state. REST permits 200 with body for DELETE when the client
+    # benefits from seeing the removed resource representation.
 )
 async def stop_subscription(subscription_id: str) -> dict[str, str]:
     async with _sub_lock:

@@ -22,6 +22,7 @@ import os
 import re
 import secrets
 import sys
+import time as _time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -291,7 +292,7 @@ async def query_historical_ohlcv(
     start: str | None = None,
     end: str | None = None,
     limit: int = 5000,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Query historical OHLCV bars from QuestDB.
 
     Args:
@@ -304,13 +305,19 @@ async def query_historical_ohlcv(
         limit: Max rows to return (default 5000, max 50000)
     """
     if err := _require_questdb(ctx):
-        return [err]  # type: ignore[list-item]
+        return err
     state = _state(ctx)
     limit = min(limit, 50_000)
     start_dt = datetime.fromisoformat(start) if start else None
     end_dt = datetime.fromisoformat(end) if end else None
 
-    return await state.loader.questdb.query_historical_bars(
+    from src.feeds.models import (
+        OHLCVBar, OHLCVResponseEnvelope, OHLCVRequestMeta,
+        compute_ohlcv_quality,
+    )
+
+    t0 = _time.monotonic()
+    rows = await state.loader.questdb.query_historical_bars(
         symbol=symbol,
         asset_class=asset_class,
         bar_size=bar_size,
@@ -319,6 +326,25 @@ async def query_historical_ohlcv(
         end=end_dt,
         limit=limit,
     )
+    latency_ms = (_time.monotonic() - t0) * 1000.0
+
+    bars = [OHLCVBar.model_validate(r) if isinstance(r, dict) else r for r in rows]
+    request_meta = OHLCVRequestMeta(
+        symbol=symbol,
+        asset_class=asset_class or "unknown",
+        bar_size=bar_size or "unknown",
+        what_to_show="unknown",
+    )
+    envelope = OHLCVResponseEnvelope(
+        bars=bars,
+        request=request_meta,
+        quality=compute_ohlcv_quality(bars),
+        latency_ms=latency_ms,
+        cache_hit=False,
+        chunk_count=1,
+        source="questdb",
+    )
+    return envelope.model_dump(mode="json")
 
 
 @mcp.tool()
@@ -328,7 +354,7 @@ async def query_latest_bars(
     bar_size: str | None = None,
     contract_key: str | None = None,
     limit: int = 100,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Query latest OHLCV bars across all symbols from QuestDB.
 
     Uses QuestDB LATEST ON to get the most recent bar per symbol+contract_key.
@@ -340,13 +366,38 @@ async def query_latest_bars(
         limit: Max rows (default 100)
     """
     state = _state(ctx)
+    from src.feeds.models import (
+        OHLCVBar, OHLCVResponseEnvelope, OHLCVRequestMeta,
+        compute_ohlcv_quality,
+    )
+
     try:
-        return await state.loader.questdb.query_latest_bars(
+        t0 = _time.monotonic()
+        rows = await state.loader.questdb.query_latest_bars(
             asset_class=asset_class,
             bar_size=bar_size,
             contract_key=contract_key,
             limit=limit,
         )
+        latency_ms = (_time.monotonic() - t0) * 1000.0
+
+        bars = [OHLCVBar.model_validate(r) if isinstance(r, dict) else r for r in rows]
+        request_meta = OHLCVRequestMeta(
+            symbol="*",
+            asset_class=asset_class or "unknown",
+            bar_size=bar_size or "unknown",
+            what_to_show="unknown",
+        )
+        envelope = OHLCVResponseEnvelope(
+            bars=bars,
+            request=request_meta,
+            quality=compute_ohlcv_quality(bars),
+            latency_ms=latency_ms,
+            cache_hit=False,
+            chunk_count=1,
+            source="questdb",
+        )
+        return envelope.model_dump(mode="json")
     except Exception as e:
         return {"error": str(e)}
 
@@ -591,7 +642,7 @@ async def load_historical_ohlcv_live(
     duration: str = "1 M",
     what_to_show: str = "TRADES",
     use_rth: bool = True,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Load historical OHLCV bars directly from IBKR (not QuestDB).
 
     Use this when you need data not yet persisted, or for real-time snapshots.
@@ -608,7 +659,10 @@ async def load_historical_ohlcv_live(
     """
     state = _state(ctx)
     from src.feeds.ibkr_historical import ensure_historical_chunk_limit, plan_historical_auto_chunk
-    from src.feeds.models import OHLCVRequest
+    from src.feeds.models import (
+        OHLCVRequest,
+        OHLCVResponseEnvelope, OHLCVRequestMeta, compute_ohlcv_quality,
+    )
     from src.transport.metrics import metrics
 
     request = OHLCVRequest(
@@ -621,6 +675,8 @@ async def load_historical_ohlcv_live(
         what_to_show=what_to_show,
         use_rth=use_rth,
     )
+
+    t0 = _time.monotonic()
     auto_chunk_plan = plan_historical_auto_chunk(request)
     if auto_chunk_plan is not None:
         ensure_historical_chunk_limit(request, auto_chunk_plan, max_chunks=state.settings.ibkr_historical_max_chunks)
@@ -643,17 +699,28 @@ async def load_historical_ohlcv_live(
         )
     else:
         bars = await state.feed.load_historical_ohlcv(request, max_chunks=state.settings.ibkr_historical_max_chunks)
-    return [
-        {
-            "timestamp": bar.timestamp.isoformat(),
-            "open": bar.open,
-            "high": bar.high,
-            "low": bar.low,
-            "close": bar.close,
-            "volume": bar.volume,
-        }
-        for bar in bars
-    ]
+    latency_ms = (_time.monotonic() - t0) * 1000.0
+
+    request_meta = OHLCVRequestMeta(
+        symbol=request.symbol,
+        asset_class=request.asset_class.value,
+        exchange=request.exchange,
+        currency=request.currency,
+        bar_size=request.bar_size,
+        what_to_show=request.what_to_show,
+        use_rth=request.use_rth,
+        duration=request.duration,
+    )
+    envelope = OHLCVResponseEnvelope(
+        bars=bars,
+        request=request_meta,
+        quality=compute_ohlcv_quality(bars),
+        latency_ms=latency_ms,
+        cache_hit=False,
+        chunk_count=1,
+        source="ibkr",
+    )
+    return envelope.model_dump(mode="json")
 
 
 @mcp.tool()
@@ -1707,6 +1774,768 @@ async def get_cache_stats(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# HISTOGRAM, REALTIME BARS & MARKET DATA TYPE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+async def request_histogram(
+    ctx: Context,
+    symbol: str,
+    asset_class: str = "EQUITY",
+    exchange: str = "SMART",
+    currency: str = "USD",
+    use_rth: bool = True,
+    time_period: str = "1 day",
+) -> dict[str, Any]:
+    """Request price histogram data from IBKR.
+
+    Returns price distribution for execution analysis and microstructure research.
+
+    Args:
+        symbol: Ticker symbol
+        asset_class: EQUITY, FUTURE, FX, INDEX, BOND, OPTION (default 'EQUITY')
+        exchange: Exchange (default 'SMART')
+        currency: Currency (default 'USD')
+        use_rth: Use regular trading hours only (default True)
+        time_period: IBKR time period string (e.g. '1 day', '1 week')
+    """
+    state = _state(ctx)
+    try:
+        buckets_raw = await state.feed.request_histogram(
+            symbol=symbol,
+            asset_class=asset_class,
+            exchange=exchange,
+            currency=currency,
+            use_rth=use_rth,
+            time_period=time_period,
+        )
+        buckets = [
+            {"price": b["price"], "count": b["count"]} if isinstance(b, dict) else b
+            for b in buckets_raw
+        ]
+        return {
+            "symbol": symbol,
+            "asset_class": asset_class,
+            "exchange": exchange,
+            "currency": currency,
+            "time_period": time_period,
+            "use_rth": use_rth,
+            "buckets": buckets,
+            "total_count": len(buckets),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def subscribe_realtime_bars(
+    ctx: Context,
+    symbol: str,
+    asset_class: str = "EQUITY",
+    exchange: str = "SMART",
+    currency: str = "USD",
+    what_to_show: str = "TRADES",
+    use_rth: bool = True,
+    duration_seconds: float = 60.0,
+) -> list[dict[str, Any]]:
+    """Subscribe to 5-second real-time bars from IBKR.
+
+    Returns collected 5-second bars over the specified duration.
+    Use for intraday signal generation and execution quality analysis.
+
+    Args:
+        symbol: Ticker symbol
+        asset_class: EQUITY, FUTURE, FX, INDEX, BOND, OPTION
+        exchange: Exchange (default 'SMART')
+        currency: Currency (default 'USD')
+        what_to_show: TRADES, MIDPOINT, BID, ASK, BID_ASK (default 'TRADES')
+        use_rth: Regular trading hours only (default True)
+        duration_seconds: How long to collect bars in seconds (default 60)
+    """
+    state = _state(ctx)
+    bars: list[dict[str, Any]] = []
+    try:
+        bar_stream = await state.feed.subscribe_realtime_bars(
+            symbol=symbol,
+            asset_class=asset_class,
+            exchange=exchange,
+            currency=currency,
+            what_to_show=what_to_show,
+            use_rth=use_rth,
+        )
+        async with asyncio.timeout(duration_seconds):
+            async for raw_bar in bar_stream:
+                bar = {
+                    "symbol": symbol,
+                    "timestamp": raw_bar.get("time") if isinstance(raw_bar, dict) else getattr(raw_bar, "time", None),
+                    "open": raw_bar.get("open", 0) if isinstance(raw_bar, dict) else getattr(raw_bar, "open", 0),
+                    "high": raw_bar.get("high", 0) if isinstance(raw_bar, dict) else getattr(raw_bar, "high", 0),
+                    "low": raw_bar.get("low", 0) if isinstance(raw_bar, dict) else getattr(raw_bar, "low", 0),
+                    "close": raw_bar.get("close", 0) if isinstance(raw_bar, dict) else getattr(raw_bar, "close", 0),
+                    "volume": raw_bar.get("volume", 0) if isinstance(raw_bar, dict) else getattr(raw_bar, "volume", 0),
+                    "vwap": raw_bar.get("wap", 0) if isinstance(raw_bar, dict) else getattr(raw_bar, "wap", 0),
+                    "trade_count": raw_bar.get("count", 0) if isinstance(raw_bar, dict) else getattr(raw_bar, "count", 0),
+                }
+                bars.append(bar)
+        return bars
+    except TimeoutError:
+        return bars if bars else [{"message": f"collected {len(bars)} bars in {duration_seconds}s"}]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@mcp.tool()
+async def get_depth_exchanges(ctx: Context) -> list[dict[str, Any]]:
+    """Get available Level 2 market depth exchanges from IBKR."""
+    state = _state(ctx)
+    try:
+        return await state.feed.get_depth_exchanges()
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@mcp.tool()
+async def set_market_data_type(
+    ctx: Context,
+    market_data_type: int = 1,
+) -> dict[str, Any]:
+    """Switch IBKR market data type.
+
+    1=Live, 2=Frozen, 3=Delayed(15min), 4=DelayedFrozen.
+    Essential for pre/post-market data and when live subscriptions are unavailable.
+
+    Args:
+        market_data_type: 1=Live, 2=Frozen, 3=Delayed, 4=DelayedFrozen (default 1)
+    """
+    state = _state(ctx)
+    try:
+        return await state.feed.set_market_data_type(market_data_type)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SERVER TIME, ORDER MANAGEMENT & OPTION EXERCISE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+async def get_server_time(ctx: Context) -> dict[str, Any]:
+    """Get IBKR server time. Useful for latency measurement and clock sync."""
+    state = _state(ctx)
+    try:
+        return await state.feed.get_server_time()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def cancel_all_orders(ctx: Context) -> dict[str, Any]:
+    """Cancel ALL open orders across all accounts. Use with extreme caution."""
+    state = _state(ctx)
+    try:
+        return await state.feed.cancel_all_orders()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def get_all_open_orders(ctx: Context) -> list[dict[str, Any]]:
+    """Get all open orders across ALL API clients and TWS (not just current session).
+
+    Unlike load_open_orders which returns only current client's orders,
+    this returns orders from all API sessions and manually-placed TWS orders.
+    """
+    state = _state(ctx)
+    try:
+        orders = await state.feed.get_all_open_orders()
+        return [o.model_dump(mode="json") if hasattr(o, "model_dump") else o for o in orders]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@mcp.tool()
+async def exercise_option(
+    ctx: Context,
+    symbol: str,
+    right: str,
+    strike: float,
+    expiry: str,
+    exercise_action: int,
+    quantity: int,
+    account: str,
+    exchange: str = "SMART",
+    currency: str = "USD",
+    override: bool = False,
+) -> dict[str, Any]:
+    """Exercise or lapse an option position.
+
+    Args:
+        symbol: Underlying symbol
+        right: C/CALL or P/PUT
+        strike: Strike price
+        expiry: Expiration date YYYYMMDD
+        exercise_action: 1=exercise, 2=lapse
+        quantity: Number of contracts
+        account: IBKR account ID
+        exchange: Exchange (default 'SMART')
+        currency: Currency (default 'USD')
+        override: Override exercise restrictions (default False)
+    """
+    state = _state(ctx)
+    try:
+        return await state.feed.exercise_option(
+            symbol=symbol,
+            right=right,
+            strike=strike,
+            expiry=expiry,
+            exercise_action=exercise_action,
+            quantity=quantity,
+            account=account,
+            exchange=exchange,
+            currency=currency,
+            override=override,
+        )
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VOLATILITY, YIELD & TRADING SCHEDULE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+async def get_historical_volatility(
+    ctx: Context,
+    symbol: str,
+    asset_class: str = "EQUITY",
+    exchange: str = "SMART",
+    currency: str = "USD",
+    bar_size: str = "1 day",
+    duration: str = "1 Y",
+    use_rth: bool = True,
+) -> list[dict[str, Any]]:
+    """Get historical volatility time series from IBKR.
+
+    Uses IBKR's built-in HISTORICAL_VOLATILITY whatToShow — no manual computation needed.
+
+    Args:
+        symbol: Ticker symbol
+        asset_class: EQUITY, FUTURE, INDEX, etc (default 'EQUITY')
+        exchange: Exchange (default 'SMART')
+        currency: Currency (default 'USD')
+        bar_size: '1 min', '5 mins', '1 hour', '1 day' (default '1 day')
+        duration: IBKR duration string (default '1 Y')
+        use_rth: Regular trading hours only (default True)
+    """
+    state = _state(ctx)
+    from src.feeds.ibkr_historical import ensure_historical_chunk_limit, plan_historical_auto_chunk
+    from src.feeds.models import OHLCVRequest, normalize_bar_size
+    from src.transport.metrics import metrics
+
+    try:
+        request = OHLCVRequest(
+            symbol=symbol,
+            asset_class=_parse_asset_class(asset_class),
+            exchange=exchange,
+            currency=currency,
+            bar_size=normalize_bar_size(bar_size),
+            duration=duration,
+            what_to_show="HISTORICAL_VOLATILITY",
+            use_rth=use_rth,
+        )
+        auto_chunk_plan = plan_historical_auto_chunk(request)
+        if auto_chunk_plan is not None:
+            ensure_historical_chunk_limit(request, auto_chunk_plan, max_chunks=state.settings.ibkr_historical_max_chunks)
+            bars = await state.feed.load_historical_ohlcv_range(
+                request.model_copy(update={"end_datetime": auto_chunk_plan.end_datetime}),
+                start_datetime=auto_chunk_plan.start_datetime,
+                end_datetime=auto_chunk_plan.end_datetime,
+                max_chunks=state.settings.ibkr_historical_max_chunks,
+            )
+        else:
+            bars = await state.feed.load_historical_ohlcv(request, max_chunks=state.settings.ibkr_historical_max_chunks)
+        return [
+            {
+                "timestamp": bar.timestamp.isoformat(),
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+            }
+            for bar in bars
+        ]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@mcp.tool()
+async def get_option_implied_volatility_series(
+    ctx: Context,
+    symbol: str,
+    asset_class: str = "EQUITY",
+    exchange: str = "SMART",
+    currency: str = "USD",
+    bar_size: str = "1 day",
+    duration: str = "6 M",
+    use_rth: bool = True,
+) -> list[dict[str, Any]]:
+    """Get option implied volatility time series from IBKR.
+
+    Uses IBKR's built-in OPTION_IMPLIED_VOLATILITY whatToShow for the underlying.
+
+    Args:
+        symbol: Underlying ticker symbol
+        asset_class: EQUITY, FUTURE, INDEX (default 'EQUITY')
+        exchange: Exchange (default 'SMART')
+        currency: Currency (default 'USD')
+        bar_size: Bar size (default '1 day')
+        duration: IBKR duration string (default '6 M')
+        use_rth: Regular trading hours only (default True)
+    """
+    state = _state(ctx)
+    from src.feeds.ibkr_historical import ensure_historical_chunk_limit, plan_historical_auto_chunk
+    from src.feeds.models import OHLCVRequest, normalize_bar_size
+    from src.transport.metrics import metrics
+
+    try:
+        request = OHLCVRequest(
+            symbol=symbol,
+            asset_class=_parse_asset_class(asset_class),
+            exchange=exchange,
+            currency=currency,
+            bar_size=normalize_bar_size(bar_size),
+            duration=duration,
+            what_to_show="OPTION_IMPLIED_VOLATILITY",
+            use_rth=use_rth,
+        )
+        auto_chunk_plan = plan_historical_auto_chunk(request)
+        if auto_chunk_plan is not None:
+            ensure_historical_chunk_limit(request, auto_chunk_plan, max_chunks=state.settings.ibkr_historical_max_chunks)
+            bars = await state.feed.load_historical_ohlcv_range(
+                request.model_copy(update={"end_datetime": auto_chunk_plan.end_datetime}),
+                start_datetime=auto_chunk_plan.start_datetime,
+                end_datetime=auto_chunk_plan.end_datetime,
+                max_chunks=state.settings.ibkr_historical_max_chunks,
+            )
+        else:
+            bars = await state.feed.load_historical_ohlcv(request, max_chunks=state.settings.ibkr_historical_max_chunks)
+        return [
+            {
+                "timestamp": bar.timestamp.isoformat(),
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+            }
+            for bar in bars
+        ]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@mcp.tool()
+async def get_yield_data(
+    ctx: Context,
+    symbol: str,
+    what_to_show: str = "YIELD_LAST",
+    bar_size: str = "1 day",
+    duration: str = "1 Y",
+    exchange: str = "SMART",
+    currency: str = "USD",
+    use_rth: bool = True,
+) -> list[dict[str, Any]]:
+    """Get bond yield time series from IBKR.
+
+    Uses IBKR yield-specific whatToShow values.
+
+    Args:
+        symbol: Bond symbol or CUSIP
+        what_to_show: YIELD_ASK, YIELD_BID, YIELD_BID_ASK, YIELD_LAST (default 'YIELD_LAST')
+        bar_size: Bar size (default '1 day')
+        duration: Duration string (default '1 Y')
+        exchange: Exchange (default 'SMART')
+        currency: Currency (default 'USD')
+        use_rth: Regular trading hours (default True)
+    """
+    state = _state(ctx)
+    from src.feeds.ibkr_historical import ensure_historical_chunk_limit, plan_historical_auto_chunk
+    from src.feeds.models import OHLCVRequest, normalize_bar_size
+    from src.transport.metrics import metrics
+
+    try:
+        request = OHLCVRequest(
+            symbol=symbol,
+            asset_class=_parse_asset_class("BOND"),
+            exchange=exchange,
+            currency=currency,
+            bar_size=normalize_bar_size(bar_size),
+            duration=duration,
+            what_to_show=what_to_show,
+            use_rth=use_rth,
+        )
+        auto_chunk_plan = plan_historical_auto_chunk(request)
+        if auto_chunk_plan is not None:
+            ensure_historical_chunk_limit(request, auto_chunk_plan, max_chunks=state.settings.ibkr_historical_max_chunks)
+            bars = await state.feed.load_historical_ohlcv_range(
+                request.model_copy(update={"end_datetime": auto_chunk_plan.end_datetime}),
+                start_datetime=auto_chunk_plan.start_datetime,
+                end_datetime=auto_chunk_plan.end_datetime,
+                max_chunks=state.settings.ibkr_historical_max_chunks,
+            )
+        else:
+            bars = await state.feed.load_historical_ohlcv(request, max_chunks=state.settings.ibkr_historical_max_chunks)
+        return [
+            {
+                "timestamp": bar.timestamp.isoformat(),
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+            }
+            for bar in bars
+        ]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@mcp.tool()
+async def get_trading_schedule(
+    ctx: Context,
+    symbol: str,
+    asset_class: str = "EQUITY",
+    exchange: str = "SMART",
+    currency: str = "USD",
+    end_date: str = "",
+    num_days: int = 7,
+) -> list[dict[str, Any]]:
+    """Get trading schedule for any instrument from IBKR.
+
+    Returns session open/close times, overnight flags, and trading status.
+
+    Args:
+        symbol: Ticker symbol
+        asset_class: Asset class (default 'EQUITY')
+        exchange: Exchange (default 'SMART')
+        currency: Currency (default 'USD')
+        end_date: End date YYYYMMDD (default today)
+        num_days: Number of days to return (default 7)
+    """
+    state = _state(ctx)
+    from src.feeds.models import OHLCVRequest
+    from datetime import date as date_type
+
+    try:
+        ref_date = date_type.today()
+        if end_date:
+            ref_date = date_type.fromisoformat(end_date)
+
+        request = OHLCVRequest(
+            symbol=symbol,
+            asset_class=_parse_asset_class(asset_class),
+            exchange=exchange,
+            currency=currency,
+            bar_size="1 day",
+            duration=f"{num_days} D",
+            what_to_show="SCHEDULE",
+            use_rth=True,
+        )
+        schedule = await state.feed.load_trading_schedule(request, ref_date=ref_date, use_rth=True)
+        if isinstance(schedule, (list, tuple)):
+            return [
+                item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+                for item in schedule
+            ]
+        return [schedule.model_dump(mode="json")] if hasattr(schedule, "model_dump") else [schedule]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BRACKET ORDERS, OCA GROUPS & MARKET SCANNER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+async def place_bracket_order(
+    ctx: Context,
+    symbol: str,
+    action: str = "BUY",
+    quantity: float = 1.0,
+    limit_price: float | None = None,
+    take_profit_price: float | None = None,
+    stop_loss_price: float | None = None,
+    order_type: str = "LMT",
+    tif: str = "GTC",
+    asset_class: str = "EQUITY",
+    exchange: str = "SMART",
+    currency: str = "USD",
+    account: str = "",
+) -> dict[str, Any]:
+    """Place a bracket order (parent + take-profit + stop-loss).
+
+    Creates three linked orders: a parent entry order, an attached take-profit,
+    and an attached stop-loss. When one of the exit orders fills, the other is cancelled.
+
+    Args:
+        symbol: Ticker symbol
+        action: BUY or SELL (default 'BUY')
+        quantity: Order quantity (default 1.0)
+        limit_price: Limit price for entry order (required for LMT orders)
+        take_profit_price: Take-profit limit price
+        stop_loss_price: Stop-loss trigger price
+        order_type: MKT or LMT (default 'LMT')
+        tif: Time in force: DAY, GTC, IOC, GTD (default 'GTC')
+        asset_class: EQUITY, FUTURE, OPTION (default 'EQUITY')
+        exchange: Exchange (default 'SMART')
+        currency: Currency (default 'USD')
+        account: IBKR account ID
+    """
+    state = _state(ctx)
+    try:
+        ib = state.feed._connection.ib
+        if ib is None:
+            return {"error": "IBKR connection not available"}
+
+        # Build the contract
+        ac = _parse_asset_class(asset_class)
+        sec_type_map = {"EQUITY": "STK", "FUTURE": "FUT", "OPTION": "OPT", "FX": "CASH", "INDEX": "IND", "BOND": "BOND"}
+        sec_type = sec_type_map.get(ac.value if hasattr(ac, "value") else str(ac), "STK")
+
+        from ib_insync import Contract
+        contract = Contract(symbol=symbol, secType=sec_type, exchange=exchange, currency=currency)
+        qualified = await ib.qualifyContractsAsync(contract)
+        if not qualified:
+            return {"error": f"Could not qualify contract for {symbol}"}
+        contract = qualified[0]
+
+        # Build bracket order
+        bracket = ib.bracketOrder(
+            action=action.upper(),
+            quantity=quantity,
+            limitPrice=limit_price or 0.0,
+            takeProfitPrice=take_profit_price or 0.0,
+            stopLossPrice=stop_loss_price or 0.0,
+        )
+
+        # Override order type and TIF on parent
+        bracket.orders[0].orderType = order_type.upper()
+        bracket.orders[0].tif = tif
+
+        # Set account on all orders
+        if account:
+            for o in bracket.orders:
+                o.account = account
+
+        # Place all orders
+        trades = []
+        for o in bracket.orders:
+            trade = ib.placeOrder(contract, o)
+            trades.append(trade)
+
+        return {
+            "symbol": symbol,
+            "action": action,
+            "quantity": quantity,
+            "orders_placed": len(trades),
+            "parent_order_id": bracket.orders[0].orderId if bracket.orders else None,
+            "take_profit_order_id": bracket.orders[1].orderId if len(bracket.orders) > 1 else None,
+            "stop_loss_order_id": bracket.orders[2].orderId if len(bracket.orders) > 2 else None,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def place_oca_group(
+    ctx: Context,
+    orders: list[dict[str, Any]],
+    oca_group: str = "",
+    oca_type: int = 1,
+    account: str = "",
+) -> list[dict[str, Any]]:
+    """Place a One-Cancels-All group of orders.
+
+    When any order in the group fills, all others are automatically cancelled.
+
+    Args:
+        orders: List of order dicts, each with: symbol, action, quantity, order_type, price?, asset_class?, exchange?, currency?
+        oca_group: OCA group name (auto-generated if empty)
+        oca_type: 1=CancelAll, 2=ReduceRemaining, 3=ReducePosition (default 1)
+        account: IBKR account ID
+    """
+    state = _state(ctx)
+    try:
+        import uuid
+        from ib_insync import Contract, Order
+
+        ib = state.feed._connection.ib
+        if ib is None:
+            return [{"error": "IBKR connection not available"}]
+
+        group_name = oca_group or f"oca_{uuid.uuid4().hex[:8]}"
+        sec_type_map = {"EQUITY": "STK", "FUTURE": "FUT", "OPTION": "OPT", "FX": "CASH", "INDEX": "IND", "BOND": "BOND"}
+        results = []
+
+        for i, od in enumerate(orders):
+            sym = od.get("symbol", "")
+            act = od.get("action", "BUY").upper()
+            qty = od.get("quantity", 1)
+            ot = od.get("order_type", "LMT").upper()
+            price = od.get("price")
+            ac_str = od.get("asset_class", "EQUITY")
+            exch = od.get("exchange", "SMART")
+            curr = od.get("currency", "USD")
+
+            ac = _parse_asset_class(ac_str)
+            sec_type = sec_type_map.get(ac.value if hasattr(ac, "value") else str(ac), "STK")
+
+            contract = Contract(symbol=sym, secType=sec_type, exchange=exch, currency=curr)
+            qualified = await ib.qualifyContractsAsync(contract)
+            if not qualified:
+                results.append({"error": f"Could not qualify contract for {sym}", "symbol": sym})
+                continue
+            contract = qualified[0]
+
+            order = Order()
+            order.action = act
+            order.quantity = qty
+            order.orderType = ot
+            order.tif = "GTC"
+            order.ocaGroup = group_name
+            order.ocaType = oca_type
+            if price is not None:
+                order.lmtPrice = price
+            if account:
+                order.account = account
+
+            trade = ib.placeOrder(contract, order)
+            results.append({
+                "symbol": sym,
+                "action": act,
+                "quantity": qty,
+                "order_id": trade.order.orderId,
+                "oca_group": group_name,
+            })
+
+        return results
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@mcp.tool()
+async def scan_market(
+    ctx: Context,
+    instrument: str = "STK",
+    location: str = "STK.US",
+    scan_code: str = "TOP_PERC_GAIN",
+    above_price: float | None = None,
+    below_price: float | None = None,
+    above_volume: int | None = None,
+    market_cap_above: float | None = None,
+    market_cap_below: float | None = None,
+    max_results: int = 50,
+) -> list[dict[str, Any]]:
+    """Run an IBKR market scanner with customizable filters.
+
+    Uses IBKR's built-in scanner to find instruments matching criteria.
+
+    Args:
+        instrument: Instrument type: STK, FUT, OPT, etc (default 'STK')
+        location: Scanner location: STK.US, STK.EU, FUT.US, etc (default 'STK.US')
+        scan_code: Scanner code: TOP_PERC_GAIN, TOP_PERC_LOSS, MOST_ACTIVE, HIGH_VOLATILITY, etc
+        above_price: Minimum price filter
+        below_price: Maximum price filter
+        above_volume: Minimum volume filter
+        market_cap_above: Minimum market cap
+        market_cap_below: Maximum market cap
+        max_results: Maximum results (default 50)
+    """
+    state = _state(ctx)
+    try:
+        from ib_insync import ScannerSubscription
+
+        ib = state.feed._connection.ib
+        if ib is None:
+            return [{"error": "IBKR connection not available"}]
+
+        sub = ScannerSubscription()
+        sub.instrument = instrument
+        sub.locationCode = location
+        sub.scanCode = scan_code
+        sub.numberOfRows = max_results
+
+        tags = []
+        if above_price is not None:
+            tags.append(("priceAbove", str(above_price)))
+        if below_price is not None:
+            tags.append(("priceBelow", str(below_price)))
+        if above_volume is not None:
+            tags.append(("volumeAbove", str(above_volume)))
+        if market_cap_above is not None:
+            tags.append(("marketCapAbove", str(market_cap_above)))
+        if market_cap_below is not None:
+            tags.append(("marketCapBelow", str(market_cap_below)))
+
+        tag_values = [tuple(t) for t in tags] if tags else []
+
+        data = await ib.reqScannerSubscriptionAsync(sub, tagValues=tag_values)
+
+        results = []
+        for item in data:
+            contract = item.contractDetails.contract if hasattr(item, "contractDetails") else None
+            if contract is None:
+                continue
+            results.append({
+                "symbol": getattr(contract, "symbol", ""),
+                "sec_type": getattr(contract, "secType", ""),
+                "exchange": getattr(contract, "exchange", ""),
+                "currency": getattr(contract, "currency", ""),
+                "con_id": getattr(contract, "conId", None),
+                "local_symbol": getattr(contract, "localSymbol", ""),
+            })
+        return results
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NEWS BULLETINS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+async def get_news_bulletins(
+    ctx: Context,
+    all_messages: bool = True,
+) -> list[dict[str, Any]]:
+    """Get IBKR system news bulletins (exchange halts, margin changes, etc).
+
+    Args:
+        all_messages: Return all historical bulletins (default True)
+    """
+    state = _state(ctx)
+    try:
+        ib = state.feed._connection.ib
+        if ib is None:
+            return [{"error": "IBKR connection not available"}]
+
+        bulletins = await ib.reqNewsBulletinsAsync(allMessages=all_messages)
+
+        results = []
+        for b in bulletins:
+            results.append({
+                "msg_id": getattr(b, "msgId", None),
+                "message": getattr(b, "message", ""),
+                "exchange": getattr(b, "exchange", ""),
+                "time": str(getattr(b, "time", "")),
+            })
+        return results
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # RESOURCES — Static reference data
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1758,6 +2587,22 @@ def get_server_status() -> str:
             "get_ibkr_rate_limits — IBKR rate limit/pacing status",
             "get_scheduler_health — Scheduler health status for all jobs",
             "get_cache_stats — Market data TTL cache statistics",
+            "request_histogram — Price histogram data for execution analysis",
+            "subscribe_realtime_bars — 5-second real-time bars from IBKR",
+            "get_depth_exchanges — Level 2 market depth exchanges",
+            "set_market_data_type — Switch IBKR market data type (live/frozen/delayed)",
+            "get_server_time — IBKR server time for latency/clock sync",
+            "cancel_all_orders — Cancel ALL open orders globally",
+            "get_all_open_orders — All open orders across all API clients and TWS",
+            "exercise_option — Exercise or lapse an option position",
+            "get_historical_volatility — Historical volatility time series",
+            "get_option_implied_volatility_series — Option implied volatility time series",
+            "get_yield_data — Bond yield time series",
+            "get_trading_schedule — Trading schedule for any instrument",
+            "place_bracket_order — Bracket order (entry + take-profit + stop-loss)",
+            "place_oca_group — One-Cancels-All group of orders",
+            "scan_market — IBKR market scanner with customizable filters",
+            "get_news_bulletins — IBKR system news bulletins",
         ],
         "databases": {
             "questdb": "Time-series OHLCV, snapshots, tick data",

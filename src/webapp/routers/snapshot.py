@@ -6,7 +6,7 @@ import time as monotonic_time
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Annotated
 
@@ -453,6 +453,7 @@ async def get_all_latest_snapshots(
     "/watchlists",
     response_model=SnapshotWatchlist,
     summary="Create or update a snapshot watchlist",
+    status_code=status.HTTP_201_CREATED,
 )
 async def create_watchlist(
     payload: Annotated[WatchlistCreateRequest, Body(openapi_examples=WATCHLIST_CREATE_EXAMPLES)],

@@ -711,6 +711,133 @@ class IBKROrderClient:
         return result
 
     # ------------------------------------------------------------------
+    # Global cancel
+    # ------------------------------------------------------------------
+
+    async def cancel_all_orders(self) -> dict[str, Any]:
+        """Cancel all open orders globally via ``reqGlobalCancel()``.
+
+        **WARNING**: This cancels every open order across all accounts
+        on the connected TWS/IB Gateway instance.
+        """
+        await self._connection.ensure_connected()
+        logger.warning("cancel_all_orders: issuing global cancel for all open orders")
+
+        await wait_for_ibkr_request(self._connection, operation="global_cancel")
+        self._ib.reqGlobalCancel()
+
+        logger.info("cancel_all_orders: global cancel requested")
+        return {
+            "status": "global_cancel_requested",
+            "message": "All open orders across all accounts have been cancelled.",
+        }
+
+    # ------------------------------------------------------------------
+    # All open orders (across all accounts)
+    # ------------------------------------------------------------------
+
+    async def get_all_open_orders(self) -> list[OpenOrder]:
+        """Load all open orders across all accounts via ``reqAllOpenOrdersAsync()``.
+
+        Unlike ``load_open_orders`` which uses ``reqOpenOrdersAsync()`` (client-id
+        scoped), this method returns orders from *all* API clients.
+        """
+        await self._connection.ensure_connected()
+        logger.info("get_all_open_orders: starting")
+
+        trades = await self._with_order_retry(
+            lambda: self._ib.reqAllOpenOrdersAsync(),
+            operation="all_open_orders",
+        )
+
+        result = [normalize_open_order(trade) for trade in (trades or [])]
+        logger.info("get_all_open_orders: %d open orders loaded", len(result))
+        return result
+
+    # ------------------------------------------------------------------
+    # Option exercise / lapse
+    # ------------------------------------------------------------------
+
+    async def exercise_option(
+        self,
+        symbol: str,
+        right: str,
+        strike: float,
+        expiry: str,
+        exercise_action: int,  # 1=exercise, 2=lapse
+        quantity: int,
+        account: str,
+        exchange: str = "SMART",
+        currency: str = "USD",
+        override: bool = False,
+        manual_order_time: str = "",
+    ) -> dict[str, Any]:
+        """Exercise or lapse an option position.
+
+        Args:
+            symbol: Underlying symbol (e.g. ``"AAPL"``).
+            right: Option right (``"C"`` or ``"P"``).
+            strike: Strike price.
+            expiry: Expiry in ``YYYYMMDD`` format.
+            exercise_action: ``1`` to exercise, ``2`` to lapse.
+            quantity: Number of contracts.
+            account: IBKR account code.
+            exchange: Exchange (default ``"SMART"``).
+            currency: Currency (default ``"USD"``).
+            override: Override exercise restrictions.
+            manual_order_time: Manual order time for position transfer.
+        """
+        await self._connection.ensure_connected()
+        action_label = "exercise" if exercise_action == 1 else "lapse"
+        logger.warning(
+            "exercise_option: symbol=%s right=%s strike=%.2f expiry=%s action=%s qty=%d account=%s",
+            symbol, right, strike, expiry, action_label, quantity, account,
+        )
+
+        from ib_insync import Option as IBKROption
+        contract = IBKROption()
+        contract.symbol = symbol.upper()
+        contract.secType = "OPT"
+        contract.exchange = exchange
+        contract.currency = currency
+        contract.lastTradeDateOrContractMonth = expiry
+        contract.strike = strike
+        contract.right = right.upper()
+
+        # Qualify the contract
+        qualified = await self._connection.with_retry(
+            lambda: self._ib.qualifyContractsAsync(contract),
+            operation=f"qualify_exercise_option:{symbol}",
+        )
+        if qualified:
+            contract = qualified[0]
+
+        await wait_for_ibkr_request(self._connection, operation=f"exercise_option:{symbol}")
+        self._ib.exerciseOptions(
+            contract,
+            exerciseAction=exercise_action,
+            exerciseQuantity=quantity,
+            account=account,
+            override=override,
+            manualOrderTime=manual_order_time,
+        )
+
+        logger.info(
+            "exercise_option: %s requested for %s %s %.2f %s qty=%d",
+            action_label, symbol, right, strike, expiry, quantity,
+        )
+        return {
+            "status": "exercise_requested",
+            "symbol": symbol,
+            "right": right.upper(),
+            "strike": strike,
+            "expiry": expiry,
+            "exercise_action": action_label,
+            "quantity": quantity,
+            "account": account,
+        }
+
+    # ------------------------------------------------------------------
     # Idempotency key helpers
     # ------------------------------------------------------------------
 

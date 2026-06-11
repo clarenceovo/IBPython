@@ -162,6 +162,18 @@ CONFIG_VALUE_SPECS: tuple[ConfigValueSpec, ...] = (
         parse_bool,
     ),
     ConfigValueSpec(
+        "ibkr_rest_cors_origins",
+        constants.IBKR_REST_CORS_ORIGINS_ENV,
+        constants.DEFAULT_IBKR_REST_CORS_ORIGINS,
+        parse_str,
+    ),
+    ConfigValueSpec(
+        "ibkr_rest_rate_limit_per_minute",
+        constants.IBKR_REST_RATE_LIMIT_PER_MINUTE_ENV,
+        constants.DEFAULT_IBKR_REST_RATE_LIMIT_PER_MINUTE,
+        int,
+    ),
+    ConfigValueSpec(
         "ibkr_api_bearer_token",
         constants.IBKR_API_BEARER_TOKEN_ENV,
         constants.DEFAULT_IBKR_API_BEARER_TOKEN,
@@ -224,6 +236,8 @@ _CANONICAL_FIELD_NAME_BY_ENV_NAME = {
     "IBKR_EQUITY_SNAPSHOT_LEASE_TTL_SECONDS": "ibkr_equity_snapshot_lease_ttl_seconds",
     "IBKR_HISTORICAL_MAX_CHUNKS": "ibkr_historical_max_chunks",
     "IBPYTHON_LIVE_SMOKE": "ibpython_live_smoke",
+    "IBKR_REST_CORS_ORIGINS": "ibkr_rest_cors_origins",
+    "IBKR_REST_RATE_LIMIT_PER_MINUTE": "ibkr_rest_rate_limit_per_minute",
     "IBKR_API_BEARER_TOKEN": "ibkr_api_bearer_token",
     "IBKR_WEB_API_BASE_URL": "ibkr_web_api_base_url",
     "IBKR_WEB_API_BEARER_TOKEN": "ibkr_web_api_bearer_token",

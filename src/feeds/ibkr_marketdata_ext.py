@@ -76,6 +76,34 @@ def _asset_class_for_sec_type(sec_type: str) -> AssetClass:
     return mapping.get(sec_type.upper(), AssetClass.EQUITY)
 
 
+def _asset_class_to_sec_type(asset_class: str) -> str:
+    """Map an asset class string (or AssetClass enum value) to an IBKR secType."""
+    mapping = {
+        "EQUITY": "STK",
+        "equity": "STK",
+        AssetClass.EQUITY: "STK",
+        "OPTION": "OPT",
+        "option": "OPT",
+        AssetClass.OPTION: "OPT",
+        "FUTURE": "FUT",
+        "future": "FUT",
+        AssetClass.FUTURE: "FUT",
+        "FX": "CASH",
+        "fx": "CASH",
+        AssetClass.FX: "CASH",
+        "BOND": "BOND",
+        "bond": "BOND",
+        AssetClass.BOND: "BOND",
+        "INDEX": "IND",
+        "index": "IND",
+        AssetClass.INDEX: "IND",
+        "CRYPTO": "CRYPTO",
+        "crypto": "CRYPTO",
+        AssetClass.CRYPTO: "CRYPTO",
+    }
+    return mapping.get(asset_class, mapping.get(str(asset_class).upper(), "STK"))
+
+
 def _parse_tick_timestamp(value: Any) -> datetime:
     """Parse IBKR tick timestamp to UTC datetime."""
     if isinstance(value, datetime):
@@ -779,6 +807,143 @@ class IBKRMarketDataExtClient:
                 logger.debug("error cancelling subscription for %s", symbol, exc_info=True)
         self._tick_buffers.clear()
         self._on_tick_callbacks.clear()
+
+    # ------------------------------------------------------------------
+    # 10. Histogram data
+    # ------------------------------------------------------------------
+
+    async def request_histogram(
+        self,
+        symbol: str,
+        asset_class: str = "EQUITY",
+        exchange: str = "SMART",
+        currency: str = "USD",
+        use_rth: bool = True,
+        time_period: str = "1 day",
+    ) -> list[dict[str, Any]]:
+        """Request histogram data for a contract.
+
+        Returns a list of ``{"price": float, "count": int}`` buckets.
+        """
+        await self._connection.ensure_connected()
+        logger.info(
+            "request_histogram: symbol=%s asset_class=%s time_period=%s use_rth=%s",
+            symbol, asset_class, time_period, use_rth,
+        )
+
+        sec_type = _asset_class_to_sec_type(asset_class)
+        contract = _build_contract(symbol, sec_type, exchange, currency)
+
+        result = await self._connection.with_retry(
+            lambda: self._ib.reqHistogramDataAsync(
+                contract,
+                useRTH=use_rth,
+                timePeriod=time_period,
+            ),
+            operation=f"histogram:{symbol}",
+        )
+
+        buckets: list[dict[str, Any]] = []
+        if result:
+            for item in result:
+                buckets.append({
+                    "price": float(getattr(item, "price", 0)),
+                    "count": int(getattr(item, "count", 0)),
+                })
+
+        logger.info("request_histogram: %d buckets for %s", len(buckets), symbol)
+        return buckets
+
+    # ------------------------------------------------------------------
+    # 11. Real-time 5-second bars
+    # ------------------------------------------------------------------
+
+    async def subscribe_realtime_bars(
+        self,
+        symbol: str,
+        asset_class: str = "EQUITY",
+        exchange: str = "SMART",
+        currency: str = "USD",
+        what_to_show: str = "TRADES",
+        use_rth: bool = True,
+    ):
+        """Subscribe to real-time 5-second bars for a contract.
+
+        Yields ``dict`` with keys: time, open, high, low, close, volume, wap, count.
+        """
+        await self._connection.ensure_connected()
+        logger.info(
+            "subscribe_realtime_bars: symbol=%s asset_class=%s what_to_show=%s",
+            symbol, asset_class, what_to_show,
+        )
+
+        sec_type = _asset_class_to_sec_type(asset_class)
+        contract = _build_contract(symbol, sec_type, exchange, currency)
+
+        async for bar in await self._connection.with_retry(
+            lambda: self._ib.reqRealTimeBarsAsync(
+                contract,
+                5,
+                whatToShow=what_to_show,
+                useRTH=use_rth,
+            ),
+            operation=f"realtime_bars:{symbol}",
+        ):
+            yield {
+                "time": getattr(bar, "time", None),
+                "open": float(getattr(bar, "open_", 0) or getattr(bar, "open", 0)),
+                "high": float(getattr(bar, "high", 0)),
+                "low": float(getattr(bar, "low", 0)),
+                "close": float(getattr(bar, "close", 0)),
+                "volume": float(getattr(bar, "volume", 0)),
+                "wap": float(getattr(bar, "wap", 0)),
+                "count": int(getattr(bar, "count", 0)),
+            }
+
+    # ------------------------------------------------------------------
+    # 12. Market depth exchanges
+    # ------------------------------------------------------------------
+
+    async def get_depth_exchanges(self) -> list[dict[str, Any]]:
+        """Return exchanges supporting L2 market depth.
+
+        Uses ``reqMktDepthExchangesAsync()``.
+        """
+        await self._connection.ensure_connected()
+        logger.info("get_depth_exchanges: starting")
+
+        result = await self._connection.with_retry(
+            lambda: self._ib.reqMktDepthExchangesAsync(),
+            operation="depth_exchanges",
+        )
+
+        exchanges: list[dict[str, Any]] = []
+        if result:
+            for item in result:
+                exchanges.append({
+                    "exchange": getattr(item, "exchange", "") or "",
+                    "sec_type": getattr(item, "secType", "") or "",
+                    "listing_exchange": getattr(item, "listingExchange", "") or "",
+                })
+
+        logger.info("get_depth_exchanges: %d exchanges", len(exchanges))
+        return exchanges
+
+    # ------------------------------------------------------------------
+    # 13. Market data type switching
+    # ------------------------------------------------------------------
+
+    async def set_market_data_type(self, market_data_type: int) -> dict[str, Any]:
+        """Switch the IBKR market data type.
+
+        Values: 1=Live, 2=Delayed, 3=Delayed Frozen, 4=Delayed Off.
+        """
+        await self._connection.ensure_connected()
+        logger.info("set_market_data_type: type=%d", market_data_type)
+
+        self._ib.reqMarketDataType(market_data_type)
+
+        return {"market_data_type": market_data_type}
 
 
 class _PacingProxy:

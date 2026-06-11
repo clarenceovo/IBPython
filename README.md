@@ -119,6 +119,8 @@ Core variables:
 | `IBKR_WEB_API_COOKIE` | empty | Optional raw Cookie header for an authenticated Client Portal Gateway session |
 | `IBKR_WEB_API_VERIFY_SSL` | `false` | Verify TLS certificates for IBKR Web API calls; local CPGW commonly uses a self-signed cert |
 | `IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED` | `false` | Safety switch for live Event Contract Web API order submission |
+| `IBKR_REST_CORS_ORIGINS` | empty | Comma-separated allowed CORS origins. When set, enables CORS middleware; when empty (default), no CORS headers are sent. |
+| `IBKR_REST_RATE_LIMIT_PER_MINUTE` | `120` | Per-IP HTTP rate limit (requests per minute). Redis-backed sliding window with in-process token bucket fallback. |
 
 ## Local Commands
 
@@ -236,6 +238,10 @@ Main route groups:
 - `/api/v1/reference-data/*`: option chains, fundamentals, WSH events/economic calendar, news
 - `/api/v1/account/*`: account summary, live positions, portfolio, PnL snapshots
 - `/api/v1/orders/*`: protected order lifecycle, execution lookup, what-if preview, and order-envelope cache
+- `/api/v1/histogram`: price histogram data for execution analysis
+- `/api/v1/realtime-bars/*`: real-time 5-second bar subscriptions via SSE
+- `/api/v1/system/market-data-type`, `/api/v1/system/server-time`: IBKR market data type switching and server clock
+- `/api/v1/market-data/depth/exchanges`: L2 depth exchange list
 
 Common endpoints:
 
@@ -300,7 +306,57 @@ POST /api/v1/orders/preview
 GET  /api/v1/orders/completed
 GET  /api/v1/orders/cache/{order_uuid}
 GET  /api/v1/orders/cache
+POST /api/v1/histogram
+POST /api/v1/realtime-bars/start
+GET  /api/v1/realtime-bars/status
+DELETE /api/v1/realtime-bars/stop/{symbol}
+GET  /api/v1/realtime-bars/stream/{symbol}
+GET  /api/v1/system/server-time
+POST /api/v1/system/market-data-type
+GET  /api/v1/market-data/depth/exchanges
 ```
+
+### Status Codes
+
+Resource-creation endpoints return **201 Created**:
+
+- `POST /orders/place` → 201 (was 200)
+- `POST /tick-data/subscribe` → 201
+- `POST /snapshot/watchlists` → 201
+- `POST /event-contracts/orders/place` → 201
+
+DELETE endpoints intentionally return **200** with a response body.
+
+### Pagination
+
+List endpoints accept `limit` (default varies by endpoint) and `offset` (default 0) query parameters:
+
+- `GET /orders/open` — limit default 100, max 1000
+- `GET /orders/completed` — limit default 100, max 1000
+- `GET /orders/cache` — limit default 100, max 1000
+- `GET /account/summary` — limit default 50, max 500
+- `GET /account/positions` — limit default 50, max 500
+- `GET /account/portfolio` — limit default 50, max 500
+- `GET /streaming/subscriptions` — limit default 100, max 1000
+
+### Response Models
+
+All endpoints now return typed Pydantic response models (no more `dict[str, Any]`). Key models:
+
+- `HistogramResponse`, `HistogramBucket`
+- `RealtimeStartResponse`, `RealtimeStatusResponse`, `RealtimeStopResponse`, `RealtimeSubscriptionInfo`
+- `TickSubscribeResponse`, `HeadTimestampResponse`, `IVCalcResponse`, `OptionPriceCalcResponse`
+- `MarketDataTypeResponse`, `ServerTimeResponse`, `DepthExchangesResponse`, `DepthExchangeInfo`
+
+Health check models (`LivenessResponse`, `HealthResponse`, `ReadinessResponse`) use `extra="forbid"` for strict validation.
+
+### Router Consolidation
+
+The alerts router has been merged into the system router. Endpoints are unchanged:
+
+- `POST /system/market-data-type`
+- `GET /system/server-time`
+- `GET /market-data/depth/exchanges`
 
 ### Order Endpoint Authentication
 
@@ -348,12 +404,13 @@ curl -X POST http://localhost:8000/api/v1/orders/preview \
 
 Use `/api/v1/orders/preview` for IBKR what-if margin and commission checks. The live `/api/v1/orders/place` endpoint is the submission path and must not automatically run a what-if request for every order; clients that require pre-trade margin review should call preview explicitly before placing.
 
-Example live order placement:
+Example live order placement (returns **201 Created**):
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/orders/place \
-  -H "Authorization: Bearer ${ORDER_TOKEN}" \
+  -H "Authorization: Bearer ***" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d '{
     "symbol": "AAPL",
     "sec_type": "STK",
@@ -369,12 +426,13 @@ curl -X POST http://localhost:8000/api/v1/orders/place \
   }'
 ```
 
-Example trailing stop limit order:
+Example trailing stop limit order (returns **201 Created**):
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/orders/place \
-  -H "Authorization: Bearer ${ORDER_TOKEN}" \
+  -H "Authorization: Bearer *** \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d '{
     "symbol": "AAPL",
     "sec_type": "STK",
@@ -394,7 +452,7 @@ curl -X POST http://localhost:8000/api/v1/orders/place \
 
 Trailing stop limit payloads should expose both `trail_stop_price` and `limit_price_offset` so clients can distinguish the initial trailing stop trigger from the limit offset submitted to IBKR.
 
-Order placement writes a pending UUID-tagged envelope and submits the live order. Cancel and modify require `account_id` and reject account mismatches when IBKR exposes the order account. In-place modify is intentionally narrow: only `price`, `quantity`, and `tif` are accepted for an existing order. Cached order envelopes are stored without TTL by the order client so they can serve as an operational audit trail.
+Order placement writes a pending UUID-tagged envelope and submits the live order. Cancel and modify require `account_id` and reject account mismatches when IBKR exposes the order account. In-place modify is intentionally narrow: only `price`, `quantity`, and `tif` are accepted for an existing order. Cached order envelopes are stored without TTL by the order client so they can serve as an operational audit trail. The optional `Idempotency-Key` header on `POST /orders/place` allows safe retries — see [Idempotency](#idempotency) for details.
 
 Example OHLCV request:
 
@@ -455,6 +513,8 @@ curl -X POST http://localhost:8000/api/v1/market-data/ohlcv/bond \
 ```
 
 The asset-specific OHLCV wrappers are the business-friendly OHLCV API: callers pass minimal identifiers and the service presets `asset_class` plus common IBKR defaults. They accept the same optional controls as the generic OHLCV endpoint: `duration`, `bar_size`, `start_datetime`, `end_datetime`, `what_to_show`, `use_rth`, `persist`, `cache_latest`, `use_ttl_cache`, `cache_ttl_seconds`, and `metadata`. `persist` is accepted for backward-compatible payloads but API-side persistence is disabled; the scheduler/snapshotter owns durable writes.
+
+`what_to_show` supports 15 values: `TRADES`, `MIDPOINT`, `BID`, `ASK`, `BID_ASK`, `ADJUSTED_LAST`, `HISTORICAL_VOLATILITY`, `OPTION_IMPLIED_VOLATILITY`, `AGGTRADES`, `FEE_RATE`, `SCHEDULE`, `YIELD_ASK`, `YIELD_BID`, `YIELD_BID_ASK`, `YIELD_LAST`. `bar_size` accepts shorthand aliases that are normalized automatically: `5m` → `5 mins`, `1h` → `1 hour`, `1d` → `1 day`, `1w` → `1 week`, `1mo` → `1 month`.
 
 Commodity routes are futures-first. Commodity futures remain `asset_class="future"` and commodity futures options remain `asset_class="option"` with IBKR `secType="FOP"`. The commodity OHLCV wrapper presets common roots (`CL`/`NG` to `NYMEX`, `GC`/`SI`/`HG` to `COMEX`, and grain/oilseed roots such as `ZC`/`ZS`/`ZW`/`ZL`/`ZM` to `CBOT`) while allowing explicit exchange and currency overrides. Related IBKR-native commodity endpoints expose futures-option analytics, contract metadata, historical ticks, and historical news without adding external COT, weather, inventory, or shipping providers.
 
@@ -639,6 +699,142 @@ Query parameters:
 
 The REST market-data cache is process-local and short-lived. It includes per-key single-flight protection so concurrent duplicate requests share one IBKR call. Redis remains the distributed cache for latest bars and scheduler/rate-limit state.
 
+## Histogram Data
+
+[IBKR Histograms](https://interactivebrokers.github.io/tws-api/histograms.html) return price/count buckets for execution analysis. This endpoint uses IBKR's `reqHistogramData` to retrieve data that can be used to analyze volume distribution across price levels.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/histogram \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"AAPL","asset_class":"EQUITY","use_rth":true,"time_period":"1 day"}'
+```
+
+Request body fields:
+
+- `symbol` — instrument symbol
+- `asset_class` — asset class namespace (e.g. `EQUITY`, `FUTURE`)
+- `exchange` — exchange, defaults to `SMART`
+- `currency` — currency, defaults to `USD`
+- `use_rth` — regular trading hours only
+- `time_period` — IBKR duration string, e.g. `1 day`, `1 week`
+
+Returns an array of `{ price, count }` buckets representing volume at each price level.
+
+## Real-Time Bars
+
+[IBKR Real-Time Bars](https://interactivebrokers.github.io/tws-api/realtime_bars.html) provide 5-second OHLCV bars streamed live from IBKR. The API manages subscriptions and exposes them through SSE (Server-Sent Events).
+
+Start a real-time bar subscription:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/realtime-bars/start \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"AAPL","what_to_show":"TRADES","use_rth":true}'
+```
+
+List active subscriptions:
+
+```bash
+curl http://localhost:8000/api/v1/realtime-bars/status
+```
+
+Stop a subscription:
+
+```bash
+curl -X DELETE http://localhost:8000/api/v1/realtime-bars/stop/AAPL
+```
+
+Stream 5-second bars via SSE:
+
+```bash
+curl -N http://localhost:8000/api/v1/realtime-bars/stream/AAPL
+```
+
+Each SSE event is a JSON object with `symbol`, `timestamp`, `open`, `high`, `low`, `close`, `volume`, `wap`, and `count`. The stream stays open until the client disconnects or the subscription is stopped.
+
+## System Endpoints
+
+### Server Time
+
+Returns the IBKR server time, useful for latency measurement and clock synchronization between the API and TWS/IB Gateway:
+
+```bash
+curl http://localhost:8000/api/v1/system/server-time
+```
+
+### Market Data Type
+
+Switches the IBKR market data type for the session. This affects all subsequent market data requests. See [IBKR Market Data Type](https://interactivebrokers.github.io/tws-api/market_data_type.html) for details.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/system/market-data-type \
+  -H "Content-Type: application/json" \
+  -d '{"market_data_type": 1}'
+```
+
+Accepted values:
+
+- `1` — Live (real-time subscriptions, requires paid data entitlements)
+- `2` — Delayed (15-minute delayed data, no entitlements required)
+- `3` — DelayedFrozen (delayed data frozen at session close)
+- `4` — DelayedOff (disable delayed data, requests return errors without live entitlements)
+
+Common use cases: switch to `2` during pre/post market when live subscriptions are unavailable, or use `3` to get the last known prices from a previous session.
+
+### Depth Exchanges
+
+Returns the list of exchanges that support L2 market depth data:
+
+```bash
+curl http://localhost:8000/api/v1/market-data/depth/exchanges
+```
+
+Use this to determine which exchanges are available for `reqMktDepth` / Level 2 order book subscriptions.
+
+## Security & Middleware
+
+### Security Headers
+
+All responses include the following security headers:
+
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- `Referrer-Policy: strict-origin-when-cross-origin`
+
+### Idempotency
+
+`POST /orders/place` accepts an optional **Idempotency-Key** header. When provided:
+
+- The key and response are cached in Redis for 24 hours.
+- Replayed requests with the same key return the original cached response with an `Idempotency-Replayed: true` header.
+- This makes order submission safe to retry on network failures without risk of duplicate orders.
+
+### HTTP Rate Limiting
+
+A per-IP rate limiter middleware protects the API:
+
+- Configurable via `IBKR_REST_RATE_LIMIT_PER_MINUTE` (default 120 requests/minute).
+- Uses a Redis-backed sliding window with an in-process token bucket fallback when Redis is unavailable.
+- Excluded paths (no rate limiting): `/docs`, `/redoc`, `/openapi.json`, `/metrics`.
+- When rate-limited, the API returns **429 Too Many Requests** with a **Retry-After** header (value: 60 seconds).
+
+### CORS
+
+CORS is configurable via the `IBKR_REST_CORS_ORIGINS` environment variable (comma-separated origins):
+
+- When set, the CORS middleware is enabled for the listed origins.
+- When empty (default), no CORS headers are sent.
+- Allowed methods: GET, POST, PUT, PATCH, DELETE, OPTIONS.
+- Allowed headers: Authorization, Content-Type, X-Request-ID, Idempotency-Key.
+
+### Error Handling
+
+The API does not leak internal details in error responses:
+
+- `RuntimeError` and other unhandled exceptions return a generic `{"detail": "Internal error"}` with HTTP 500 status.
+- The full exception trace is still logged server-side for debugging.
+- Validation errors return 422 with standard FastAPI error detail.
+
 ## IBKR Rate Limits
 
 The app uses a central `IBKRRateLimitController` before IBKR socket calls. It preserves historical pacing and adds app-wide controls for global outgoing messages, active market-data subscriptions, snapshots, option analytics, FX option live capture, tick streams, PnL subscriptions, and order actions.
@@ -793,6 +989,87 @@ OrderAuth::bearer_token
 OrderCache::<order_uuid>
 ```
 
+## MCP Server
+
+The MCP (Model Context Protocol) server exposes 57 tools for IBKR market data, order management, and account operations. It connects to TWS/IB Gateway using a separate client ID (`IBKR_MCP_CLIENT_ID`, default `301`) and disconnects after a configurable idle period (`MCP_IBKR_IDLE_DISCONNECT_SECONDS`, default `120`).
+
+### Market Data
+
+- `request_historical_data` — historical OHLCV bars
+- `request_histogram` — [price histogram](https://interactivebrokers.github.io/tws-api/histograms.html) data from IBKR
+- `subscribe_realtime_bars` — [5-second real-time bars](https://interactivebrokers.github.io/tws-api/realtime_bars.html) from IBKR
+- `get_latest_bar` — latest cached bar from Redis
+- `get_depth_exchanges` — L2 market depth exchange list
+- `set_market_data_type` — switch IBKR market data type (live/frozen/delayed)
+- `get_server_time` — IBKR server time for latency/clock sync
+
+### Historical Analytics
+
+- `get_historical_volatility` — historical volatility time series (`what_to_show=HISTORICAL_VOLATILITY`)
+- `get_option_implied_volatility_series` — option implied volatility time series (`what_to_show=OPTION_IMPLIED_VOLATILITY`)
+- `get_yield_data` — bond yield time series (`YIELD_ASK`, `YIELD_BID`, `YIELD_BID_ASK`, `YIELD_LAST`)
+- `get_trading_schedule` — [trading schedule](https://interactivebrokers.github.io/tws-api/historical_timebars.html) for any instrument (`what_to_show=SCHEDULE`)
+
+### Reference Data
+
+- `get_option_chain` — option chain discovery
+- `get_fundamentals` — company fundamentals
+- `get_wsh_events` — Wall Street Horizon events
+- `get_economic_calendar` — economic calendar events
+- `get_news_bulletins` — IBKR system news bulletins
+- `get_news_providers` — available news providers
+- `get_historical_news` — historical news headlines
+
+### Account
+
+- `get_account_summary` — account summary
+- `get_positions` — live positions
+- `get_portfolio` — portfolio holdings
+- `get_account_pnl` — account PnL
+- `get_position_pnl` — position PnL
+
+### Order Management
+
+- `place_order` — place a single order
+- `place_bracket_order` — bracket order (entry + take-profit + stop-loss)
+- `place_oca_group` — One-Cancels-All group of orders
+- `cancel_order` — cancel a specific order
+- `cancel_all_orders` — cancel ALL open orders globally
+- `get_open_orders` — open orders for the current client
+- `get_all_open_orders` — all open orders across all API clients and TWS
+- `get_executions` — execution lookup
+- `preview_order` — IBKR what-if margin/commission preview
+- `exercise_option` — [exercise or lapse](https://interactivebrokers.github.io/tws-api/options.html) an option position
+
+### Scanner
+
+- `scan_market` — [IBKR market scanner](https://interactivebrokers.github.io/tws-api/scanner.html) with customizable filters
+
+### Business
+
+- `get_bond_curve` — sovereign bond curve
+- `get_bond_future_quotes` — bond futures quotes
+- `get_ctd` — cheapest-to-deliver analytics
+- `get_futures_implied_curve` — futures-implied curve
+- `get_cash_bond_curve` — cash bond curve
+- `get_curve_comparison` — cash/futures curve comparison
+- `get_fed_funds_futures_rate` — implied Fed Funds rate
+- `get_market_panel` — multi-symbol market panel
+- `get_universe_bars` — universe bar data
+- `get_returns` — period returns
+- `get_option_skew` — option skew analysis
+- `get_commodity_futures` — commodity futures panel
+- `get_symbol_news` — symbol news
+- `get_news_article` — news article body
+- `get_news_providers` — news provider list
+- `get_portfolio_risk_snapshot` — portfolio risk view
+
+### Event Contracts
+
+- `discover_event_contracts` — ForecastEx/CME Event Contract discovery
+- `get_event_contract_snapshot` — Event Contract snapshot
+- `get_event_contract_history` — Event Contract history
+
 ## Verification
 
 ```bash
@@ -805,7 +1082,7 @@ python3 -m json.tool schedulejob/reload_g10_index_composition.json >/dev/null
 Current expected test status:
 
 ```text
-380 passed
+393 passed
 ```
 
 ## Important Quant And IBKR Caveats

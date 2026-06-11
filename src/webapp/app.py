@@ -16,6 +16,7 @@ from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
 from src.webapp.middleware.correlation import CorrelationIdFilter, CorrelationIdMiddleware
 from src.webapp.middleware.request_timeout import RequestTimeoutMiddleware
 from src.webapp.middleware.body_limit import RequestBodyLimitMiddleware
+from src.webapp.middleware.security import SecurityHeadersMiddleware, RateLimiterMiddleware
 from src.webapp.routers import (
     account,
     business,
@@ -25,7 +26,9 @@ from src.webapp.routers import (
     market_data_equity,
     market_data_fx,
     market_data_futures,
+    market_data_histogram,
     market_data_options,
+    market_data_realtime,
     orders,
     reference_data,
     scanner,
@@ -206,6 +209,30 @@ def create_app(
     if resolved_settings.ibkr_api_bearer_token:
         fastapi_app.add_middleware(APIBearerAuthMiddleware, expected_token=resolved_settings.ibkr_api_bearer_token)
 
+    # HTTP rate limiter — per-IP with Redis or in-process token bucket
+    fastapi_app.add_middleware(
+        RateLimiterMiddleware,
+        redis_url=resolved_settings.redis_url,
+        redis_password=resolved_settings.redis_password,
+        rate_limit_per_minute=resolved_settings.ibkr_rest_rate_limit_per_minute,
+    )
+
+    # Security response headers on every response
+    fastapi_app.add_middleware(SecurityHeadersMiddleware)
+
+    # CORS — only added when IBKR_REST_CORS_ORIGINS is set (comma-separated origins)
+    if resolved_settings.ibkr_rest_cors_origins:
+        from starlette.middleware.cors import CORSMiddleware
+
+        cors_origins = [o.strip() for o in resolved_settings.ibkr_rest_cors_origins.split(",") if o.strip()]
+        if cors_origins:
+            fastapi_app.add_middleware(
+                CORSMiddleware,
+                allow_origins=cors_origins,
+                allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                allow_headers=["Authorization", "Content-Type", "X-Request-ID", "Idempotency-Key"],
+            )
+
     fastapi_app.include_router(business.router, prefix="/api/v1")
     fastapi_app.include_router(fixed_income.router, prefix="/api/v1")
     fastapi_app.include_router(system.router, prefix="/api/v1")
@@ -222,6 +249,9 @@ def create_app(
     fastapi_app.include_router(streaming.router, prefix="/api/v1")
     fastapi_app.include_router(snapshot.router, prefix="/api/v1")
     fastapi_app.include_router(tick_data.router, prefix="/api/v1")
+    fastapi_app.include_router(market_data_histogram.router, prefix="/api/v1")
+    fastapi_app.include_router(market_data_realtime.router, prefix="/api/v1")
+    fastapi_app.include_router(system._market_data_router, prefix="/api/v1")
 
     @fastapi_app.get("/metrics", include_in_schema=False)
     async def metrics_endpoint() -> bytes:
@@ -251,7 +281,11 @@ def create_app(
     @fastapi_app.exception_handler(IBKRPacingError)
     async def ibkr_pacing_error_handler(_request: Request, exc: IBKRPacingError) -> JSONResponse:
         logger.warning("IBKR pacing violation: %s", exc)
-        return JSONResponse(status_code=429, content={"detail": str(exc)})
+        return JSONResponse(
+            status_code=429,
+            content={"detail": str(exc)},
+            headers={"Retry-After": "60"},
+        )
 
     @fastapi_app.exception_handler(IBKROrderError)
     async def ibkr_order_error_handler(_request: Request, exc: IBKROrderError) -> JSONResponse:
@@ -280,7 +314,7 @@ def create_app(
             logger.warning("request failed: %s", msg)
             return JSONResponse(status_code=503, content={"detail": msg})
         logger.exception("unhandled RuntimeError in request: %s", exc)
-        return JSONResponse(status_code=503, content={"detail": msg})
+        return JSONResponse(status_code=500, content={"detail": "Internal error"})
 
     return fastapi_app
 

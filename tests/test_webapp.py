@@ -24,7 +24,7 @@ from src.feeds.fundamental_data import WSHEventDataReport, WSHEventDataRequest, 
 from src.feeds.fixed_income import DeliverableBasketRequest, DeliverableBondInput
 from src.feeds.index_composition import IndexCompositionPayload
 from src.feeds.exceptions import IBKRMarketDataLeaseTimeoutError, IBKRMarketDataUnavailableError
-from src.feeds.models import AssetClass, FutureOHLCVBar, OHLCVBar, OptionOHLCVBar
+from src.feeds.models import AssetClass, FXOHLCVBar, FutureOHLCVBar, OHLCVBar, OptionOHLCVBar
 from src.feeds.news import HistoricalNewsHeadline, NewsArticle, NewsProvider
 from src.feeds.options import OptionAnalyticsSnapshot, OptionSkewSurfaceResponse
 from src.feeds.snapshotter import EquitySnapshot, EquitySnapshotCaptureResult, FXOptionSnapshot
@@ -92,6 +92,25 @@ class FakeLoader:
                     source="test",
                     contract_month=getattr(request, "last_trade_date_or_contract_month"),
                     is_continuous=getattr(request, "continuous"),
+                )
+            ]
+        if getattr(request, "asset_class") is AssetClass.FX:
+            return [
+                FXOHLCVBar(
+                    symbol=symbol,
+                    asset_class=AssetClass.FX,
+                    exchange=getattr(request, "exchange"),
+                    currency=getattr(request, "currency"),
+                    timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    open=100,
+                    high=101,
+                    low=99,
+                    close=100.5,
+                    volume=1000,
+                    bar_size=getattr(request, "bar_size"),
+                    source="test",
+                    base_currency=symbol[:3],
+                    quote_currency=symbol[3:],
                 )
             ]
         return [
@@ -844,7 +863,7 @@ def test_event_contract_live_order_submits_when_enabled_confirmed_and_authorized
             },
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 201
     assert response.json()["response"]["order_status"] == "Submitted"
     assert len(state.event_contracts.order_requests) == 1
 
@@ -964,7 +983,7 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
     assert "option_sec_type" in schemas["OHLCVRequest"]["properties"]
     assert "underlying_symbol" in schemas["OptionOHLCVBar"]["properties"]
     futures_response = paths["/api/v1/market-data/ohlcv/futures"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
-    assert futures_response["items"]["$ref"] == "#/components/schemas/FutureOHLCVBar"
+    assert futures_response["$ref"] == "#/components/schemas/FutureOHLCVResponseEnvelope"
     assert "secType=FUT" in paths["/api/v1/market-data/ohlcv/auto"]["post"]["description"]
     assert "secType=CONTFUT" in paths["/api/v1/market-data/ohlcv/auto"]["post"]["description"]
     assert "Options are not accepted" in paths["/api/v1/market-data/ohlcv/auto"]["post"]["description"]
@@ -974,7 +993,7 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
     assert "secType=CONTFUT" in paths["/api/v1/market-data/ohlcv/commodities"]["post"]["description"]
     assert "secType=FOP" in paths["/api/v1/market-data/ohlcv/commodity-options"]["post"]["description"]
     fx_response = paths["/api/v1/market-data/ohlcv/fx"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
-    assert fx_response["items"]["$ref"] == "#/components/schemas/FXOHLCVBar"
+    assert fx_response["$ref"] == "#/components/schemas/FXOHLCVResponseEnvelope"
 
 
 def test_integrated_ohlcv_auto_endpoint_resolves_assets_and_contracts() -> None:
@@ -1883,7 +1902,7 @@ def test_generic_ohlcv_endpoint_supports_start_and_end_datetime_range() -> None:
         response = client.post("/api/v1/market-data/ohlcv", json=payload)
 
     assert response.status_code == 200
-    assert response.json()[0]["source"] == "range-test"
+    assert response.json()["bars"][0]["source"] == "range-test"
     assert state.loader.calls == 0
     request, start, end = state.feed.range_calls[0]
     assert getattr(request, "symbol") == "SPY"
@@ -1909,7 +1928,7 @@ def test_ohlcv_endpoint_auto_chunks_oversized_ibkr_request() -> None:
         )
 
     assert response.status_code == 200
-    assert response.json()[0]["source"] == "range-test"
+    assert response.json()["bars"][0]["source"] == "range-test"
     assert state.loader.calls == 0
     request, start, end = state.feed.range_calls[0]
     assert getattr(request, "symbol") == "SPY"
@@ -1964,7 +1983,7 @@ def test_market_data_ohlcv_endpoint_uses_ttl_cache() -> None:
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert first.json() == second.json()
+    assert first.json()["bars"] == second.json()["bars"]
     assert state.loader.calls == 1
     assert stats.json()["size"] == 1
     assert state.closed is True
@@ -2004,20 +2023,20 @@ def test_asset_specific_ohlcv_wrappers_preset_asset_class_and_contract_fields() 
     assert requests[2].asset_class is AssetClass.FUTURE
     assert requests[2].exchange == "CME"
     assert requests[2].last_trade_date_or_contract_month == "202606"
-    assert future.json()[0]["contract_month"] == "202606"
-    assert future.json()[0]["is_continuous"] is False
+    assert future.json()["bars"][0]["contract_month"] == "202606"
+    assert future.json()["bars"][0]["is_continuous"] is False
     assert requests[3].asset_class is AssetClass.FUTURE
     assert requests[3].symbol == "HSI"
     assert requests[3].exchange == "HKFE"
     assert requests[3].continuous is True
-    assert continuous_future.json()[0]["contract_month"] is None
-    assert continuous_future.json()[0]["is_continuous"] is True
+    assert continuous_future.json()["bars"][0]["contract_month"] is None
+    assert continuous_future.json()["bars"][0]["is_continuous"] is True
     assert requests[4].asset_class is AssetClass.FX
     assert requests[4].exchange == "IDEALPRO"
     assert requests[4].what_to_show == "MIDPOINT"
     assert requests[4].use_rth is False
-    assert fx.json()[0]["base_currency"] == "EUR"
-    assert fx.json()[0]["quote_currency"] == "USD"
+    assert fx.json()["bars"][0]["base_currency"] == "EUR"
+    assert fx.json()["bars"][0]["quote_currency"] == "USD"
     assert requests[5].asset_class is AssetClass.BOND
     assert requests[5].symbol == "91282CJN2"
     assert requests[5].sec_id_type == "CUSIP"
@@ -2089,7 +2108,7 @@ def test_commodity_ohlcv_and_option_wrappers_forward_fop_contract_fields() -> No
     assert option_request.option_sec_type == "FOP"
     assert option_request.underlying_symbol == "CL"
     assert option_request.right == "C"
-    assert option.json()[0]["underlying_symbol"] == "CL"
+    assert option.json()["bars"][0]["underlying_symbol"] == "CL"
     analytics_request = state.feed.option_analytics_requests[0]
     assert analytics_request.contract.sec_type == "FOP"
     assert analytics_request.contract.underlying_symbol == "CL"

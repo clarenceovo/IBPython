@@ -19,6 +19,104 @@ class AssetClass(StrEnum):
     OPTION = "option"
 
 
+class WhatToShow(StrEnum):
+    """Valid IBKR whatToShow values for historical data requests."""
+
+    TRADES = "TRADES"
+    MIDPOINT = "MIDPOINT"
+    BID = "BID"
+    ASK = "ASK"
+    BID_ASK = "BID_ASK"
+    ADJUSTED_LAST = "ADJUSTED_LAST"
+    HISTORICAL_VOLATILITY = "HISTORICAL_VOLATILITY"
+    OPTION_IMPLIED_VOLATILITY = "OPTION_IMPLIED_VOLATILITY"
+    AGGTRADES = "AGGTRADES"
+    FEE_RATE = "FEE_RATE"
+    SCHEDULE = "SCHEDULE"
+    YIELD_ASK = "YIELD_ASK"
+    YIELD_BID = "YIELD_BID"
+    YIELD_BID_ASK = "YIELD_BID_ASK"
+    YIELD_LAST = "YIELD_LAST"
+
+
+# Canonical IBKR bar sizes in ascending order of granularity.
+_VALID_IBKR_BAR_SIZES: frozenset[str] = frozenset({
+    "1 sec", "5 secs", "10 secs", "15 secs", "30 secs",
+    "1 min", "2 mins", "3 mins", "5 mins", "10 mins", "15 mins", "20 mins", "30 mins",
+    "1 hour", "2 hours", "3 hours", "4 hours", "8 hours",
+    "1 day", "1 week", "1 month",
+})
+
+# Short-form aliases → canonical IBKR bar size.
+_BAR_SIZE_ALIASES: dict[str, str] = {
+    # Compact forms: 5m, 1h, 1d, 1w
+    "1s": "1 sec",
+    "5s": "5 secs",
+    "10s": "10 secs",
+    "15s": "15 secs",
+    "30s": "30 secs",
+    "1m": "1 min",
+    "2m": "2 mins",
+    "3m": "3 mins",
+    "5m": "5 mins",
+    "10m": "10 mins",
+    "15m": "15 mins",
+    "20m": "20 mins",
+    "30m": "30 mins",
+    "1h": "1 hour",
+    "2h": "2 hours",
+    "3h": "3 hours",
+    "4h": "4 hours",
+    "8h": "8 hours",
+    "1d": "1 day",
+    "1w": "1 week",
+    "1mo": "1 month",
+    # Near-miss plural/singular normalizations
+    "1 sec": "1 sec",
+    "5 sec": "5 secs",
+    "10 sec": "10 secs",
+    "15 sec": "15 secs",
+    "30 sec": "30 secs",
+    "1 min": "1 min",
+    "2 min": "2 mins",
+    "3 min": "3 mins",
+    "5 min": "5 mins",
+    "10 min": "10 mins",
+    "15 min": "15 mins",
+    "20 min": "20 mins",
+    "30 min": "30 mins",
+    "1 hr": "1 hour",
+    "2 hr": "2 hours",
+    "3 hr": "3 hours",
+    "4 hr": "4 hours",
+    "8 hr": "8 hours",
+}
+
+
+def normalize_bar_size(value: str) -> str:
+    """Normalize a bar size string to its canonical IBKR form.
+
+    Accepts short aliases (``"5m"``, ``"1h"``, ``"1d"``), near-miss
+    plural/singular variants (``"5 min"`` → ``"5 mins"``), and already
+    canonical values (``"5 mins"``).  Returns the canonical string or
+    the trimmed original if no mapping is found (allowing forward
+    compatibility with future IBKR bar sizes).
+    """
+    if not value or not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    lower = stripped.lower()
+    # Check alias table first (case-insensitive key).
+    mapped = _BAR_SIZE_ALIASES.get(lower)
+    if mapped is not None:
+        return mapped
+    # If it's already canonical (exact match), return as-is.
+    if stripped in _VALID_IBKR_BAR_SIZES:
+        return stripped
+    # Unknown value — return trimmed original for forward compatibility.
+    return stripped
+
+
 class BaseOHLCVBar(BaseModel):
     """Base OHLCV bar with the shared price payload and UTC timestamp."""
 
@@ -93,6 +191,8 @@ class OHLCVBar(BaseOHLCVBar):
     currency: str = Field(min_length=1)
     bar_size: str = Field(min_length=1)
     source: str = Field(default="ibkr", min_length=1)
+    vwap: float | None = Field(default=None, description="Volume-weighted average price (IBKR BarData.average)")
+    trade_count: int | None = Field(default=None, description="Number of trades in bar (IBKR BarData.barCount)")
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("exchange", "currency", mode="before")
@@ -204,6 +304,77 @@ class OptionOHLCVBar(OHLCVBar):
         return self
 
 
+# ─── OHLCV Response Envelope ───────────────────────────────────────
+
+class OHLCVRequestMeta(BaseModel):
+    """Echoes the original request parameters for client-side validation."""
+    symbol: str
+    asset_class: str
+    exchange: str | None = None
+    currency: str | None = None
+    bar_size: str
+    what_to_show: str
+    use_rth: bool = False
+    start_time: datetime | None = Field(default=None, alias="start_time")
+    end_time: datetime | None = Field(default=None, alias="end_time")
+    duration: str | None = None
+    
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class OHLCVDataQuality(BaseModel):
+    """Quality metrics for the returned dataset."""
+    total_bars: int
+    bars_with_missing_volume: int = 0
+    bars_with_zero_volume: int = 0
+    bars_with_vwap: int = 0
+    bars_with_trade_count: int = 0
+    gap_count: int = 0
+    coverage_ratio: float | None = Field(default=None, description="Fraction of expected bars present")
+
+
+class OHLCVResponseEnvelope(BaseModel):
+    """
+    Unified response wrapper for all OHLCV endpoints.
+    
+    Provides bars + request echo + data quality + timing metadata.
+    """
+    bars: list[OHLCVBar]
+    request: OHLCVRequestMeta
+    quality: OHLCVDataQuality
+    latency_ms: float = Field(description="Server-side processing time in milliseconds")
+    cache_hit: bool = Field(default=False, description="Whether the response was served from cache")
+    chunk_count: int = Field(default=1, description="Number of IBKR API paginated calls made")
+    source: str = Field(default="ibkr", description="Data source identifier")
+    
+    model_config = ConfigDict(strict=True)
+
+
+class FutureOHLCVResponseEnvelope(OHLCVResponseEnvelope):
+    bars: list[FutureOHLCVBar]  # type: ignore[assignment]
+
+class FXOHLCVResponseEnvelope(OHLCVResponseEnvelope):
+    bars: list[FXOHLCVBar]  # type: ignore[assignment]
+
+class OptionOHLCVResponseEnvelope(OHLCVResponseEnvelope):
+    bars: list[OptionOHLCVBar]  # type: ignore[assignment]
+
+
+def compute_ohlcv_quality(bars: list[OHLCVBar]) -> OHLCVDataQuality:
+    """Compute data quality metrics for a list of OHLCV bars."""
+    total = len(bars)
+    if total == 0:
+        return OHLCVDataQuality(total_bars=0)
+    
+    return OHLCVDataQuality(
+        total_bars=total,
+        bars_with_missing_volume=sum(1 for b in bars if b.volume is None),
+        bars_with_zero_volume=sum(1 for b in bars if b.volume == 0),
+        bars_with_vwap=sum(1 for b in bars if b.vwap is not None),
+        bars_with_trade_count=sum(1 for b in bars if b.trade_count is not None),
+    )
+
+
 class OHLCVRequest(BaseModel):
     """Historical OHLCV request independent of the downstream provider."""
 
@@ -265,7 +436,19 @@ class OHLCVRequest(BaseModel):
             value = value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
 
-    @field_validator("bar_size", "duration", "what_to_show", "source", mode="before")
+    @field_validator("bar_size", mode="before")
+    @classmethod
+    def normalize_bar_size_value(cls, value: Any) -> str:
+        """Normalize bar_size aliases to canonical IBKR form before further validation."""
+        if value is None:
+            raise ValueError("value is required")
+        normalized = str(value).strip()
+        if not normalized:
+            raise ValueError("value cannot be empty")
+        from src.feeds.models import normalize_bar_size
+        return normalize_bar_size(normalized)
+
+    @field_validator("duration", "what_to_show", "source", mode="before")
     @classmethod
     def normalize_non_empty_text(cls, value: Any) -> str:
         if value is None:
@@ -274,6 +457,19 @@ class OHLCVRequest(BaseModel):
         if not normalized:
             raise ValueError("value cannot be empty")
         return normalized
+
+    @field_validator("what_to_show")
+    @classmethod
+    def validate_what_to_show(cls, value: str) -> str:
+        """Accept WhatToShow enum values or plain strings for backward compat."""
+        from src.feeds.models import WhatToShow
+        upper = value.upper().strip()
+        try:
+            WhatToShow(upper)
+        except ValueError:
+            # Allow unknown values for forward compatibility; just warn via debug.
+            pass
+        return upper
 
     @field_validator(
         "primary_exchange",

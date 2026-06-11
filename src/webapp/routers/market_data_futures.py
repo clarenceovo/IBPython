@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import date, datetime
 from typing import Annotated, Any
 
@@ -11,7 +12,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from src.config.reference_data import resolve_commodity_future as _resolve_commodity_future
 from src.config.reference_data import resolve_future as _resolve_future
 from src.feeds.contracts import ContractSpec
-from src.feeds.models import AssetClass, FutureOHLCVBar, OHLCVBar, OHLCVRequest, OptionOHLCVBar
+from src.feeds.models import (
+    AssetClass,
+    FutureOHLCVBar,
+    FutureOHLCVResponseEnvelope,
+    OHLCVBar,
+    OHLCVRequest,
+    OHLCVRequestMeta,
+    OptionOHLCVBar,
+    OptionOHLCVResponseEnvelope,
+    compute_ohlcv_quality,
+)
 from src.feeds.news import HistoricalNewsHeadline, HistoricalNewsRequest, NewsArticle, NewsArticleRequest
 from src.feeds.options import OptionAnalyticsRequest, OptionAnalyticsSnapshot, OptionContractSpec, OptionRight
 from src.feeds.tick_data import HeadTimestampRequest, HistoricalTickRequest, HistoricalTickResponse, MarketRule
@@ -623,7 +634,7 @@ async def _load_commodity_news(payload: CommodityNewsRequest, state: IBKRRestApp
 
 @router.post(
     "/ohlcv/futures",
-    response_model=list[FutureOHLCVBar],
+    response_model=FutureOHLCVResponseEnvelope,
     summary="Load futures OHLCV with preset asset_class",
     description=(
         "Asset-specific futures OHLCV endpoint. Dated futures build an IBKR secType=FUT contract and require "
@@ -634,9 +645,23 @@ async def _load_commodity_news(payload: CommodityNewsRequest, state: IBKRRestApp
 async def load_futures_ohlcv(
     payload: Annotated[FutureOHLCVLoadRequest, Body(openapi_examples=FUTURES_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[FutureOHLCVBar]:
-    return await load_ohlcv_with_controls(
-        request=payload.to_request(),
+) -> FutureOHLCVResponseEnvelope:
+    req = payload.to_request()
+    request_meta = OHLCVRequestMeta(
+        symbol=req.symbol,
+        asset_class=req.asset_class.value,
+        exchange=req.exchange,
+        currency=req.currency,
+        bar_size=req.bar_size,
+        what_to_show=req.what_to_show,
+        use_rth=req.use_rth,
+        start_time=req.start_datetime,
+        end_time=req.end_datetime,
+        duration=req.duration,
+    )
+    t0 = time.monotonic()
+    bars = await load_ohlcv_with_controls(
+        request=req,
         start_datetime=payload.start_datetime,
         persist=payload.persist,
         cache_latest=payload.cache_latest,
@@ -645,11 +670,21 @@ async def load_futures_ohlcv(
         cache_namespace="ohlcv_futures",
         state=state,
     )
+    latency_ms = (time.monotonic() - t0) * 1000.0
+    return FutureOHLCVResponseEnvelope(
+        bars=bars,  # type: ignore[arg-type]
+        request=request_meta,
+        quality=compute_ohlcv_quality(bars),
+        latency_ms=latency_ms,
+        cache_hit=False,
+        chunk_count=1,
+        source="ibkr",
+    )
 
 
 @router.post(
     "/ohlcv/commodities",
-    response_model=list[FutureOHLCVBar],
+    response_model=FutureOHLCVResponseEnvelope,
     summary="Load commodity futures OHLCV with commodity presets",
     description=(
         "Commodity futures OHLCV endpoint. Dated contracts build an IBKR secType=FUT contract and auto-resolve "
@@ -660,9 +695,23 @@ async def load_futures_ohlcv(
 async def load_commodity_ohlcv(
     payload: Annotated[CommodityOHLCVLoadRequest, Body(openapi_examples=COMMODITY_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[FutureOHLCVBar]:
-    return await load_ohlcv_with_controls(
-        request=payload.to_request(),
+) -> FutureOHLCVResponseEnvelope:
+    req = payload.to_request()
+    request_meta = OHLCVRequestMeta(
+        symbol=req.symbol,
+        asset_class=req.asset_class.value,
+        exchange=req.exchange,
+        currency=req.currency,
+        bar_size=req.bar_size,
+        what_to_show=req.what_to_show,
+        use_rth=req.use_rth,
+        start_time=req.start_datetime,
+        end_time=req.end_datetime,
+        duration=req.duration,
+    )
+    t0 = time.monotonic()
+    bars = await load_ohlcv_with_controls(
+        request=req,
         start_datetime=payload.start_datetime,
         persist=payload.persist,
         cache_latest=payload.cache_latest,
@@ -671,11 +720,21 @@ async def load_commodity_ohlcv(
         cache_namespace="ohlcv_commodities",
         state=state,
     )
+    latency_ms = (time.monotonic() - t0) * 1000.0
+    return FutureOHLCVResponseEnvelope(
+        bars=bars,  # type: ignore[arg-type]
+        request=request_meta,
+        quality=compute_ohlcv_quality(bars),
+        latency_ms=latency_ms,
+        cache_hit=False,
+        chunk_count=1,
+        source="ibkr",
+    )
 
 
 @router.post(
     "/ohlcv/commodity-options",
-    response_model=list[OptionOHLCVBar],
+    response_model=OptionOHLCVResponseEnvelope,
     summary="Load commodity futures option OHLCV",
     description=(
         "Commodity futures option OHLCV endpoint. It builds an IBKR secType=FOP contract. IBKR requires the "
@@ -686,9 +745,23 @@ async def load_commodity_ohlcv(
 async def load_commodity_option_ohlcv(
     payload: Annotated[CommodityOptionOHLCVLoadRequest, Body(openapi_examples=COMMODITY_OPTION_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[OptionOHLCVBar]:
-    return await load_ohlcv_with_controls(
-        request=payload.to_request(),
+) -> OptionOHLCVResponseEnvelope:
+    req = payload.to_request()
+    request_meta = OHLCVRequestMeta(
+        symbol=req.symbol,
+        asset_class=req.asset_class.value,
+        exchange=req.exchange,
+        currency=req.currency,
+        bar_size=req.bar_size,
+        what_to_show=req.what_to_show,
+        use_rth=req.use_rth,
+        start_time=req.start_datetime,
+        end_time=req.end_datetime,
+        duration=req.duration,
+    )
+    t0 = time.monotonic()
+    bars = await load_ohlcv_with_controls(
+        request=req,
         start_datetime=payload.start_datetime,
         persist=payload.persist,
         cache_latest=payload.cache_latest,
@@ -696,6 +769,16 @@ async def load_commodity_option_ohlcv(
         cache_ttl_seconds=payload.cache_ttl_seconds,
         cache_namespace="ohlcv_commodity_options",
         state=state,
+    )
+    latency_ms = (time.monotonic() - t0) * 1000.0
+    return OptionOHLCVResponseEnvelope(
+        bars=bars,  # type: ignore[arg-type]
+        request=request_meta,
+        quality=compute_ohlcv_quality(bars),
+        latency_ms=latency_ms,
+        cache_hit=False,
+        chunk_count=1,
+        source="ibkr",
     )
 
 

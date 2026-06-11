@@ -139,6 +139,7 @@ async def build_event_contract_order(
     "/orders/place",
     response_model=EventContractOrderResponse,
     summary="Submit a guarded Event Contract order through IBKR Web API",
+    status_code=status.HTTP_201_CREATED,
 )
 async def place_event_contract_order(
     payload: Annotated[EventContractOrderRequest, Body()],

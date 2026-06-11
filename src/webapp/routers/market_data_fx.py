@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import time
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends
 from pydantic import Field, field_validator
 
-from src.feeds.models import AssetClass, FXOHLCVBar, OHLCVRequest, OptionOHLCVBar
+from src.feeds.models import (
+    AssetClass,
+    FXOHLCVBar,
+    FXOHLCVResponseEnvelope,
+    OHLCVRequest,
+    OHLCVRequestMeta,
+    OptionOHLCVBar,
+    OptionOHLCVResponseEnvelope,
+    compute_ohlcv_quality,
+)
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 from src.webapp.routers.market_data_shared import MinimalOHLCVLoadControls, load_ohlcv_with_controls
 
@@ -116,15 +126,29 @@ FX_OPTION_OHLCV_REQUEST_EXAMPLES = {
 
 @router.post(
     "/ohlcv/fx",
-    response_model=list[FXOHLCVBar],
+    response_model=FXOHLCVResponseEnvelope,
     summary="Load FX OHLCV with preset asset_class",
 )
 async def load_fx_ohlcv(
     payload: Annotated[FXOHLCVLoadRequest, Body(openapi_examples=FX_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[FXOHLCVBar]:
-    return await load_ohlcv_with_controls(
-        request=payload.to_request(),
+) -> FXOHLCVResponseEnvelope:
+    req = payload.to_request()
+    request_meta = OHLCVRequestMeta(
+        symbol=req.symbol,
+        asset_class=req.asset_class.value,
+        exchange=req.exchange,
+        currency=req.currency,
+        bar_size=req.bar_size,
+        what_to_show=req.what_to_show,
+        use_rth=req.use_rth,
+        start_time=req.start_datetime,
+        end_time=req.end_datetime,
+        duration=req.duration,
+    )
+    t0 = time.monotonic()
+    bars = await load_ohlcv_with_controls(
+        request=req,
         start_datetime=payload.start_datetime,
         persist=payload.persist,
         cache_latest=payload.cache_latest,
@@ -133,19 +157,43 @@ async def load_fx_ohlcv(
         cache_namespace="ohlcv_fx",
         state=state,
     )
+    latency_ms = (time.monotonic() - t0) * 1000.0
+    return FXOHLCVResponseEnvelope(
+        bars=bars,  # type: ignore[arg-type]
+        request=request_meta,
+        quality=compute_ohlcv_quality(bars),
+        latency_ms=latency_ms,
+        cache_hit=False,
+        chunk_count=1,
+        source="ibkr",
+    )
 
 
 @router.post(
     "/ohlcv/fx-options",
-    response_model=list[OptionOHLCVBar],
+    response_model=OptionOHLCVResponseEnvelope,
     summary="Load FX option OHLCV",
 )
 async def load_fx_option_ohlcv(
     payload: Annotated[FXOptionOHLCVLoadRequest, Body(openapi_examples=FX_OPTION_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[OptionOHLCVBar]:
-    return await load_ohlcv_with_controls(
-        request=payload.to_request(),
+) -> OptionOHLCVResponseEnvelope:
+    req = payload.to_request()
+    request_meta = OHLCVRequestMeta(
+        symbol=req.symbol,
+        asset_class=req.asset_class.value,
+        exchange=req.exchange,
+        currency=req.currency,
+        bar_size=req.bar_size,
+        what_to_show=req.what_to_show,
+        use_rth=req.use_rth,
+        start_time=req.start_datetime,
+        end_time=req.end_datetime,
+        duration=req.duration,
+    )
+    t0 = time.monotonic()
+    bars = await load_ohlcv_with_controls(
+        request=req,
         start_datetime=payload.start_datetime,
         persist=payload.persist,
         cache_latest=payload.cache_latest,
@@ -153,4 +201,14 @@ async def load_fx_option_ohlcv(
         cache_ttl_seconds=payload.cache_ttl_seconds,
         cache_namespace="ohlcv_fx_options",
         state=state,
+    )
+    latency_ms = (time.monotonic() - t0) * 1000.0
+    return OptionOHLCVResponseEnvelope(
+        bars=bars,  # type: ignore[arg-type]
+        request=request_meta,
+        quality=compute_ohlcv_quality(bars),
+        latency_ms=latency_ms,
+        cache_hit=False,
+        chunk_count=1,
+        source="ibkr",
     )

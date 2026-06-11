@@ -329,6 +329,8 @@ def normalize_ibkr_bars(bars: Sequence[Any], request: OHLCVRequest) -> list[OHLC
                 volume=_normalized_ibkr_volume(getattr(bar, "volume", 0)),
                 bar_size=request.bar_size,
                 source=request.source,
+                vwap=float(getattr(bar, "average", 0) or 0) or None,
+                trade_count=int(getattr(bar, "barCount", 0) or 0) or None,
                 **(
                     {
                         "contract_month": request.last_trade_date_or_contract_month,

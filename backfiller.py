@@ -238,9 +238,13 @@ async def fetch_chunk(client: httpx.AsyncClient, request: OHLCVRequest, start: d
     except httpx.HTTPStatusError as exc:
         raise RuntimeError(f"OHLCV API returned {response.status_code}: {response.text[:500]}") from exc
     body = response.json()
-    if not isinstance(body, list):
+    if isinstance(body, dict) and "bars" in body:
+        bars_data = body["bars"]
+    elif isinstance(body, list):
+        bars_data = body
+    else:
         raise RuntimeError(f"OHLCV API returned unexpected payload type: {type(body).__name__}")
-    return [api_bar_to_ohlcv_bar(item, chunk_request) for item in body if isinstance(item, dict)]
+    return [api_bar_to_ohlcv_bar(item, chunk_request) for item in bars_data if isinstance(item, dict)]
 
 
 async def run_backfill(plan: BackfillPlan) -> BackfillStats:

@@ -128,22 +128,38 @@ async def test_fetch_chunk_disables_api_persistence_and_latest_cache() -> None:
         captured["payload"] = json.loads(request.content.decode())
         return httpx.Response(
             200,
-            json=[
-                {
+            json={
+                "bars": [
+                    {
+                        "symbol": "SPY",
+                        "asset_class": "equity",
+                        "exchange": "SMART",
+                        "currency": "USD",
+                        "timestamp": "2026-05-28T13:30:00Z",
+                        "open": 100,
+                        "high": 101,
+                        "low": 99,
+                        "close": 100.5,
+                        "volume": 1000,
+                        "bar_size": "1 min",
+                        "source": "ibkr",
+                    }
+                ],
+                "request": {
                     "symbol": "SPY",
                     "asset_class": "equity",
                     "exchange": "SMART",
                     "currency": "USD",
-                    "timestamp": "2026-05-28T13:30:00Z",
-                    "open": 100,
-                    "high": 101,
-                    "low": 99,
-                    "close": 100.5,
-                    "volume": 1000,
                     "bar_size": "1 min",
-                    "source": "ibkr",
-                }
-            ],
+                    "what_to_show": "TRADES",
+                    "use_rth": True,
+                },
+                "quality": {"total_bars": 1},
+                "latency_ms": 10.0,
+                "cache_hit": False,
+                "chunk_count": 1,
+                "source": "ibkr",
+            },
         )
 
     request = OHLCVRequest(symbol="SPY", asset_class=AssetClass.EQUITY, exchange="SMART", currency="USD")
