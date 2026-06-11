@@ -838,7 +838,7 @@ class IBKRMarketDataExtClient:
             lambda: self._ib.reqHistogramDataAsync(
                 contract,
                 useRTH=use_rth,
-                timePeriod=time_period,
+                period=time_period,
             ),
             operation=f"histogram:{symbol}",
         )
