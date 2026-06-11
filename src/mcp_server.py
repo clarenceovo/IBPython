@@ -1999,6 +1999,96 @@ async def exercise_option(
         return {"error": str(e)}
 
 
+@mcp.tool()
+async def modify_order(
+    ctx: Context,
+    order_id: int,
+    account: str,
+    price: float | None = None,
+    quantity: float | None = None,
+    tif: str | None = None,
+) -> dict[str, Any]:
+    """Modify an existing live order. Only pass fields you want to change.
+
+    Args:
+        order_id: The IBKR order ID to modify
+        account: IBKR account ID
+        price: New limit price (optional)
+        quantity: New order quantity (optional)
+        tif: New time in force (optional, e.g. DAY, GTC, IOC)
+    """
+    from src.feeds.orders import ModifyOrderRequest, TIF as TIFEnum
+
+    state = _state(ctx)
+    try:
+        tif_enum = TIFEnum(tif) if tif is not None else None
+        modifications = ModifyOrderRequest(price=price, quantity=quantity, tif=tif_enum)
+        result = await state.feed.modify_order(
+            account_id=account,
+            order_id=order_id,
+            modifications=modifications,
+        )
+        return result.model_dump(mode="json") if hasattr(result, "model_dump") else result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def preview_order(
+    ctx: Context,
+    symbol: str,
+    action: str = "BUY",
+    order_type: str = "LMT",
+    quantity: float = 1.0,
+    price: float | None = None,
+    aux_price: float | None = None,
+    tif: str = "DAY",
+    account: str | None = None,
+    sec_type: str = "STK",
+    exchange: str = "SMART",
+    currency: str = "USD",
+    outside_rth: bool = False,
+) -> dict[str, Any]:
+    """Preview an order without submitting (whatIfOrder). Returns margin and commission impact.
+
+    Args:
+        symbol: Ticker symbol
+        action: BUY or SELL (default 'BUY')
+        order_type: Order type — LMT, MKT, STP, STP_LMT, etc (default 'LMT')
+        quantity: Order quantity (default 1.0)
+        price: Limit price (required for LMT orders)
+        aux_price: Auxiliary/stop price (for stop orders)
+        tif: Time in force — DAY, GTC, IOC (default 'DAY')
+        account: IBKR account ID (optional)
+        sec_type: Security type — STK, OPT, FUT, CASH (default 'STK')
+        exchange: Exchange (default 'SMART')
+        currency: Currency (default 'USD')
+        outside_rth: Allow outside regular trading hours (default False)
+    """
+    from src.feeds.orders import OrderAction, OrderType as OrderTypeEnum, PlaceOrderRequest, TIF as TIFEnum
+
+    state = _state(ctx)
+    try:
+        request = PlaceOrderRequest(
+            symbol=symbol,
+            action=OrderAction(action.upper()),
+            order_type=OrderTypeEnum(order_type.upper()),
+            quantity=quantity,
+            price=price,
+            aux_price=aux_price,
+            tif=TIFEnum(tif.upper()),
+            account_id=account,
+            sec_type=sec_type,
+            exchange=exchange,
+            currency=currency,
+            outside_rth=outside_rth,
+        )
+        result = await state.feed.preview_order(request)
+        return result.model_dump(mode="json") if hasattr(result, "model_dump") else result
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # VOLATILITY, YIELD & TRADING SCHEDULE
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2454,50 +2544,33 @@ async def scan_market(
     """
     state = _state(ctx)
     try:
-        from ib_insync import ScannerSubscription
-
-        ib = state.feed._connection.ib
-        if ib is None:
-            return [{"error": "IBKR connection not available"}]
-
-        sub = ScannerSubscription()
-        sub.instrument = instrument
-        sub.locationCode = location
-        sub.scanCode = scan_code
-        sub.numberOfRows = max_results
-
-        tags = []
-        if above_price is not None:
-            tags.append(("priceAbove", str(above_price)))
-        if below_price is not None:
-            tags.append(("priceBelow", str(below_price)))
-        if above_volume is not None:
-            tags.append(("volumeAbove", str(above_volume)))
-        if market_cap_above is not None:
-            tags.append(("marketCapAbove", str(market_cap_above)))
-        if market_cap_below is not None:
-            tags.append(("marketCapBelow", str(market_cap_below)))
-
-        tag_values = [tuple(t) for t in tags] if tags else []
-
-        data = await ib.reqScannerSubscriptionAsync(sub, tagValues=tag_values)
-
-        results = []
-        for item in data:
-            contract = item.contractDetails.contract if hasattr(item, "contractDetails") else None
-            if contract is None:
-                continue
-            results.append({
-                "symbol": getattr(contract, "symbol", ""),
-                "sec_type": getattr(contract, "secType", ""),
-                "exchange": getattr(contract, "exchange", ""),
-                "currency": getattr(contract, "currency", ""),
-                "con_id": getattr(contract, "conId", None),
-                "local_symbol": getattr(contract, "localSymbol", ""),
-            })
-        return results
+        return await state.feed.scan_market(
+            instrument=instrument,
+            location=location,
+            scan_code=scan_code,
+            above_price=above_price,
+            below_price=below_price,
+            above_volume=above_volume,
+            market_cap_above=market_cap_above,
+            market_cap_below=market_cap_below,
+            max_results=max_results,
+        )
     except Exception as e:
         return [{"error": str(e)}]
+
+
+@mcp.tool()
+async def get_scanner_parameters(ctx: Context) -> dict[str, Any]:
+    """Get available IBKR scanner parameters (instruments, filters, locations).
+
+    Returns an XML document describing all valid scanner parameter values.
+    Required before using scan_market to know valid filter values.
+    """
+    state = _state(ctx)
+    try:
+        return await state.feed.get_scanner_parameters()
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2516,21 +2589,7 @@ async def get_news_bulletins(
     """
     state = _state(ctx)
     try:
-        ib = state.feed._connection.ib
-        if ib is None:
-            return [{"error": "IBKR connection not available"}]
-
-        bulletins = await ib.reqNewsBulletinsAsync(allMessages=all_messages)
-
-        results = []
-        for b in bulletins:
-            results.append({
-                "msg_id": getattr(b, "msgId", None),
-                "message": getattr(b, "message", ""),
-                "exchange": getattr(b, "exchange", ""),
-                "time": str(getattr(b, "time", "")),
-            })
-        return results
+        return await state.feed.get_news_bulletins(all_messages=all_messages)
     except Exception as e:
         return [{"error": str(e)}]
 
@@ -2595,6 +2654,8 @@ def get_server_status() -> str:
             "cancel_all_orders — Cancel ALL open orders globally",
             "get_all_open_orders — All open orders across all API clients and TWS",
             "exercise_option — Exercise or lapse an option position",
+            "modify_order — Modify an existing live order",
+            "preview_order — Preview order margin/commission impact (what-if)",
             "get_historical_volatility — Historical volatility time series",
             "get_option_implied_volatility_series — Option implied volatility time series",
             "get_yield_data — Bond yield time series",
@@ -2602,6 +2663,7 @@ def get_server_status() -> str:
             "place_bracket_order — Bracket order (entry + take-profit + stop-loss)",
             "place_oca_group — One-Cancels-All group of orders",
             "scan_market — IBKR market scanner with customizable filters",
+            "get_scanner_parameters — IBKR scanner parameter options",
             "get_news_bulletins — IBKR system news bulletins",
         ],
         "databases": {

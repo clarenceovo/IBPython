@@ -87,3 +87,13 @@ async def scan_contracts(
         key = stable_cache_key("contract_scan", payload.request)
         return await state.market_data_cache.get_or_set(key, load, ttl_seconds=payload.cache_ttl_seconds)
     return await load()
+
+
+@router.get("/parameters", summary="Get IBKR scanner parameters")
+async def get_scanner_parameters(state: IBKRRestAppState = Depends(get_rest_state)):
+    """Returns available scanner instruments, filters, and locations from IBKR.
+
+    Returns an XML document describing all valid scanner parameter values.
+    Required before using scan_market to know valid filter values.
+    """
+    return await state.feed.get_scanner_parameters()

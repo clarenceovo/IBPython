@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -110,3 +110,113 @@ async def load_bond_yield_history(
         key = stable_cache_key("bond_yield_history", payload.request)
         return await state.market_data_cache.get_or_set(key, load, ttl_seconds=payload.cache_ttl_seconds)
     return await load()
+
+
+# ------------------------------------------------------------------
+# Bond yield data (YIELD_ASK/BID/LAST whatToShow)
+# ------------------------------------------------------------------
+
+class BondYieldDataRequest(BaseModel):
+    """Request body for bond yield time series using IBKR yield-specific whatToShow values."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(min_length=1, examples=["91282CJN2"])
+    what_to_show: str = Field(
+        default="YIELD_LAST",
+        examples=["YIELD_ASK", "YIELD_BID", "YIELD_BID_ASK", "YIELD_LAST"],
+    )
+    bar_size: str = Field(default="1 day", examples=["1 min", "5 mins", "1 hour", "1 day"])
+    duration: str = Field(default="1 Y", examples=["1 M", "6 M", "1 Y"])
+    exchange: str = Field(default="SMART")
+    currency: str = Field(default="USD")
+    use_rth: bool = True
+    use_ttl_cache: bool = True
+    cache_ttl_seconds: float | None = Field(default=300, ge=0)
+
+
+BOND_YIELD_DATA_EXAMPLES = {
+    "treasury_yield": {
+        "summary": "Treasury yield by CUSIP",
+        "value": {
+            "symbol": "91282CJN2",
+            "what_to_show": "YIELD_LAST",
+            "bar_size": "1 day",
+            "duration": "1 Y",
+        },
+    },
+}
+
+
+@router.post(
+    "/bonds/yields",
+    summary="Get bond yield time series",
+)
+async def get_yield_data(
+    payload: Annotated[
+        BondYieldDataRequest,
+        Body(openapi_examples=BOND_YIELD_DATA_EXAMPLES),
+    ],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> list[dict[str, Any]]:
+    """Get bond yield time series from IBKR.
+
+    Uses IBKR yield-specific whatToShow values (YIELD_ASK, YIELD_BID, YIELD_BID_ASK, YIELD_LAST).
+    """
+    from src.feeds.ibkr_historical import ensure_historical_chunk_limit, plan_historical_auto_chunk
+    from src.feeds.models import AssetClass, OHLCVRequest, normalize_bar_size
+
+    try:
+        request = OHLCVRequest(
+            symbol=payload.symbol,
+            asset_class=AssetClass.BOND,
+            exchange=payload.exchange,
+            currency=payload.currency,
+            bar_size=normalize_bar_size(payload.bar_size),
+            duration=payload.duration,
+            what_to_show=payload.what_to_show,
+            use_rth=payload.use_rth,
+        )
+        auto_chunk_plan = plan_historical_auto_chunk(request)
+        if auto_chunk_plan is not None:
+            ensure_historical_chunk_limit(
+                request, auto_chunk_plan,
+                max_chunks=state.settings.ibkr_historical_max_chunks,
+            )
+            bars = await state.feed.load_historical_ohlcv_range(
+                request.model_copy(update={"end_datetime": auto_chunk_plan.end_datetime}),
+                start_datetime=auto_chunk_plan.start_datetime,
+                end_datetime=auto_chunk_plan.end_datetime,
+                max_chunks=state.settings.ibkr_historical_max_chunks,
+            )
+        else:
+            bars = await state.feed.load_historical_ohlcv(
+                request,
+                max_chunks=state.settings.ibkr_historical_max_chunks,
+            )
+
+        result = [
+            {
+                "timestamp": bar.timestamp.isoformat(),
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+            }
+            for bar in bars
+        ]
+
+        if payload.use_ttl_cache:
+            from src.webapp.cache import stable_cache_key
+
+            key = stable_cache_key("bond_yield_data", payload)
+            async def _cached_result():
+                return result
+            return await state.market_data_cache.get_or_set(
+                key, _cached_result, ttl_seconds=payload.cache_ttl_seconds,
+            )
+        return result
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))

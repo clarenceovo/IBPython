@@ -946,6 +946,130 @@ class IBKRMarketDataExtClient:
         return {"market_data_type": market_data_type}
 
 
+    # ------------------------------------------------------------------
+    # 14. Scanner parameters
+    # ------------------------------------------------------------------
+
+    async def get_scanner_parameters(self) -> dict[str, Any]:
+        """Fetch available scanner parameters from IBKR (instruments, filters, locations).
+
+        Returns an XML document describing all valid scanner parameter values.
+        Required before using :meth:`scan_market` to discover valid filter values.
+        """
+        await self._connection.ensure_connected()
+        logger.info("get_scanner_parameters: fetching scanner parameter XML")
+
+        xml = await self._connection.with_retry(
+            lambda: self._ib.reqScannerParametersAsync(),
+            operation="scanner_parameters",
+        )
+        return {"xml": xml}
+
+    # ------------------------------------------------------------------
+    # 15. Market scanner
+    # ------------------------------------------------------------------
+
+    async def scan_market(
+        self,
+        *,
+        instrument: str = "STK",
+        location: str = "STK.US",
+        scan_code: str = "TOP_PERC_GAIN",
+        above_price: float | None = None,
+        below_price: float | None = None,
+        above_volume: int | None = None,
+        market_cap_above: float | None = None,
+        market_cap_below: float | None = None,
+        max_results: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Run an IBKR market scanner with the given parameters.
+
+        Uses IBKR's built-in scanner to find instruments matching criteria.
+        Call :meth:`get_scanner_parameters` first to discover valid values for
+        *instrument*, *location*, and *scan_code*.
+
+        Returns a list of dicts with keys: symbol, sec_type, exchange, currency,
+        con_id, local_symbol.
+        """
+        await self._connection.ensure_connected()
+        logger.info(
+            "scan_market: instrument=%s location=%s scan_code=%s max_results=%d",
+            instrument, location, scan_code, max_results,
+        )
+
+        from ib_insync import ScannerSubscription
+
+        sub = ScannerSubscription()
+        sub.instrument = instrument
+        sub.locationCode = location
+        sub.scanCode = scan_code
+        sub.numberOfRows = max_results
+
+        tags: list[tuple[str, str]] = []
+        if above_price is not None:
+            tags.append(("priceAbove", str(above_price)))
+        if below_price is not None:
+            tags.append(("priceBelow", str(below_price)))
+        if above_volume is not None:
+            tags.append(("volumeAbove", str(above_volume)))
+        if market_cap_above is not None:
+            tags.append(("marketCapAbove", str(market_cap_above)))
+        if market_cap_below is not None:
+            tags.append(("marketCapBelow", str(market_cap_below)))
+
+        tag_values = [tuple(t) for t in tags] if tags else []  # type: ignore[arg-type]
+
+        data = await self._connection.with_retry(
+            lambda: self._ib.reqScannerSubscriptionAsync(sub, tagValues=tag_values),
+            operation=f"scan_market:{instrument}:{location}:{scan_code}",
+        )
+
+        results: list[dict[str, Any]] = []
+        for item in data:
+            contract = item.contractDetails.contract if hasattr(item, "contractDetails") else None
+            if contract is None:
+                continue
+            results.append({
+                "symbol": getattr(contract, "symbol", ""),
+                "sec_type": getattr(contract, "secType", ""),
+                "exchange": getattr(contract, "exchange", ""),
+                "currency": getattr(contract, "currency", ""),
+                "con_id": getattr(contract, "conId", None),
+                "local_symbol": getattr(contract, "localSymbol", ""),
+            })
+
+        logger.info("scan_market: %d results for %s/%s/%s", len(results), instrument, location, scan_code)
+        return results
+
+    # ------------------------------------------------------------------
+    # 16. News bulletins
+    # ------------------------------------------------------------------
+
+    async def get_news_bulletins(self, *, all_messages: bool = True) -> list[dict[str, Any]]:
+        """Get IBKR system news bulletins (exchange halts, margin changes, etc).
+
+        Args:
+            all_messages: Return all historical bulletins (default True).
+        """
+        await self._connection.ensure_connected()
+        logger.info("get_news_bulletins: all_messages=%s", all_messages)
+
+        bulletins = await self._connection.with_retry(
+            lambda: self._ib.reqNewsBulletinsAsync(allMessages=all_messages),
+            operation="news_bulletins",
+        )
+
+        results: list[dict[str, Any]] = []
+        for b in bulletins:
+            results.append({
+                "msg_id": getattr(b, "msgId", None),
+                "message": getattr(b, "message", ""),
+                "exchange": getattr(b, "exchange", ""),
+                "time": str(getattr(b, "time", "")),
+            })
+        return results
+
+
 class _PacingProxy:
     """Minimal OHLCVRequest-like proxy for pacing guard compatibility.
 

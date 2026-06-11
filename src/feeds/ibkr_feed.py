@@ -884,6 +884,48 @@ class IBKRFeedClient:
         return await self._marketdata_ext.set_market_data_type(market_data_type)
 
     # ------------------------------------------------------------------
+    # Scanner — delegated to marketdata ext
+    # ------------------------------------------------------------------
+
+    async def get_scanner_parameters(self) -> dict[str, Any]:
+        """Fetch available scanner parameters from IBKR."""
+        return await self._marketdata_ext.get_scanner_parameters()
+
+    async def scan_market(
+        self,
+        *,
+        instrument: str = "STK",
+        location: str = "STK.US",
+        scan_code: str = "TOP_PERC_GAIN",
+        above_price: float | None = None,
+        below_price: float | None = None,
+        above_volume: int | None = None,
+        market_cap_above: float | None = None,
+        market_cap_below: float | None = None,
+        max_results: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Run an IBKR market scanner."""
+        return await self._marketdata_ext.scan_market(
+            instrument=instrument,
+            location=location,
+            scan_code=scan_code,
+            above_price=above_price,
+            below_price=below_price,
+            above_volume=above_volume,
+            market_cap_above=market_cap_above,
+            market_cap_below=market_cap_below,
+            max_results=max_results,
+        )
+
+    # ------------------------------------------------------------------
+    # News bulletins — delegated to marketdata ext
+    # ------------------------------------------------------------------
+
+    async def get_news_bulletins(self, *, all_messages: bool = True) -> list[dict[str, Any]]:
+        """Get IBKR system news bulletins."""
+        return await self._marketdata_ext.get_news_bulletins(all_messages=all_messages)
+
+    # ------------------------------------------------------------------
     # Server time — delegated to connection manager
     # ------------------------------------------------------------------
 
