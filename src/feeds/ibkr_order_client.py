@@ -921,5 +921,7 @@ def _asset_class_from_sec_type(sec_type: str) -> AssetClass | None:
         "IND": AssetClass.INDEX,
         "BOND": AssetClass.BOND,
         "CRYPTO": AssetClass.CRYPTO,
+        "OPT": AssetClass.OPTION,
+        "FOP": AssetClass.OPTION,
     }
     return mapping.get(sec_type.strip().upper())

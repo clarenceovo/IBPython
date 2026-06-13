@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -345,5 +346,11 @@ async def load_many_ohlcv(
                 return bars
             return await state.loader.load(request, persist=False, cache_latest=payload.cache_latest)
 
-    batches = await asyncio.gather(*(load_one(request) for request in requests))
+    raw_batches = await asyncio.gather(*(load_one(request) for request in requests), return_exceptions=True)
+    batches: list[list[OHLCVBar]] = []
+    for raw in raw_batches:
+        if isinstance(raw, Exception):
+            logging.getLogger("business_shared").warning("Failed to load OHLCV batch: %s", raw)
+            continue
+        batches.append(raw)  # type: ignore[arg-type]
     return sorted([bar for batch in batches for bar in batch], key=lambda bar: (bar.symbol, bar.timestamp))

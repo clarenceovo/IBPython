@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import date, datetime, timezone
 from enum import StrEnum
 from typing import Annotated
@@ -500,10 +501,16 @@ async def _load_bond_future_quotes(payload: BondFutureQuotesRequest, state: IBKR
             bars = await state.loader.load(request, persist=False, cache_latest=payload.cache_latest)
             return quote_from_latest_bar(spec, bars)
 
-    try:
-        return list(await asyncio.gather(*(load_one(spec) for spec in futures)))
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    raw_quotes = await asyncio.gather(*(load_one(spec) for spec in futures), return_exceptions=True)
+    quotes: list[BondFutureQuote] = []
+    for spec, raw in zip(futures, raw_quotes, strict=True):
+        if isinstance(raw, Exception):
+            if isinstance(raw, ValueError):
+                raise HTTPException(status_code=422, detail=str(raw)) from raw
+            logging.getLogger("fixed_income").warning("Failed to load bond future quote: %s", raw)
+            continue
+        quotes.append(raw)  # type: ignore[arg-type]
+    return quotes
 
 
 async def _build_bond_yield_curve(payload: BondYieldCurveRequest, state: IBKRRestAppState) -> BondYieldCurveResponse:

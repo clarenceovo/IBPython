@@ -228,10 +228,10 @@ class BracketOrderRequest(BaseModel):
     action: str = Field(default="BUY", pattern="^(BUY|SELL)$")
     quantity: float = Field(default=1.0, gt=0)
     limit_price: float | None = Field(default=None, gt=0)
-    take_profit_price: float | None = Field(default=None, gt=0)
-    stop_loss_price: float | None = Field(default=None, gt=0)
+    take_profit_price: float = Field(gt=0)
+    stop_loss_price: float = Field(gt=0)
     order_type: str = Field(default="LMT", pattern="^(MKT|LMT)$")
-    tif: str = Field(default="GTC")
+    tif: str = Field(default="GTC", pattern="^(DAY|GTC|IOC|FOK|GTD|OPG)$")
     asset_class: str = Field(default="EQUITY")
     exchange: str = Field(default="SMART")
     currency: str = Field(default="USD")
@@ -297,8 +297,8 @@ async def place_bracket_order(
         action=payload.action.upper(),
         quantity=payload.quantity,
         limitPrice=payload.limit_price or 0.0,
-        takeProfitPrice=payload.take_profit_price or 0.0,
-        stopLossPrice=payload.stop_loss_price or 0.0,
+        takeProfitPrice=payload.take_profit_price,
+        stopLossPrice=payload.stop_loss_price,
     )
     bracket.orders[0].orderType = payload.order_type.upper()
     bracket.orders[0].tif = payload.tif
@@ -336,6 +336,7 @@ class OcaOrderItem(BaseModel):
     action: str = Field(default="BUY", pattern="^(BUY|SELL)$")
     quantity: float = Field(gt=0)
     order_type: str = Field(default="LMT", pattern="^(MKT|LMT)$")
+    tif: str = Field(default="GTC", pattern="^(DAY|GTC|IOC|FOK|GTD|OPG)$")
     price: float | None = Field(default=None, gt=0)
     asset_class: str = Field(default="EQUITY")
     exchange: str = Field(default="SMART")
@@ -410,9 +411,9 @@ async def place_oca_group(
 
         order = Order()
         order.action = od.action.upper()
-        order.quantity = od.quantity
+        order.totalQuantity = od.quantity
         order.orderType = od.order_type.upper()
-        order.tif = "GTC"
+        order.tif = od.tif
         order.ocaGroup = group_name
         order.ocaType = payload.oca_type
         if od.price is not None:

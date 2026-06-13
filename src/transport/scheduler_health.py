@@ -65,6 +65,7 @@ class SchedulerHealthMonitor:
         self._failure_threshold = failure_threshold
         self._notification_callback = notification_callback
         self._jobs: dict[str, JobHealthStatus] = {}
+        self._background_tasks: set = set()
 
     @property
     def failure_threshold(self) -> int:
@@ -144,9 +145,12 @@ class SchedulerHealthMonitor:
         try:
             import asyncio
             loop = asyncio.get_running_loop()
-            loop.create_task(
+            task = loop.create_task(
                 self._notification_callback(job_name, health.model_dump(mode="json"))
             )
+            # Prevent GC of fire-and-forget tasks
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
         except RuntimeError:
             logger.debug("no event loop for notification callback; skipping alert for job=%s", job_name)
         except Exception:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import date
 from typing import Annotated
 
@@ -125,7 +126,13 @@ async def get_commodity_futures(
                 bar=bars[-1] if bars else None,
             )
 
-        points = await asyncio.gather(*(load_contract(index, month) for index, month in enumerate(contract_months)))
+        raw_points = await asyncio.gather(*(load_contract(index, month) for index, month in enumerate(contract_months)), return_exceptions=True)
+        points: list[CommodityFuturePoint] = []
+        for raw in raw_points:
+            if isinstance(raw, Exception):
+                logging.getLogger("business_futures").warning("Failed to load commodity future: %s", raw)
+                continue
+            points.append(raw)  # type: ignore[arg-type]
         return CommodityFuturesResponse(symbol=root, as_of_date=payload.as_of_date, contracts=tuple(points))
 
     if payload.use_ttl_cache:

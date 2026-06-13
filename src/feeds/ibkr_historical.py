@@ -121,9 +121,9 @@ def _select_contract_from_details(details: Sequence[Any], spec: ContractSpec, re
 
 # IBKR maximum duration per bar_size for a single reqHistoricalData call.
 _IBKR_MAX_DURATION_BY_BAR_SIZE: dict[str, str] = {
-    "1 sec": "1800 S",
+    "1 secs": "1800 S",
     "5 secs": "3600 S",
-    "10 secs": "7200 S",
+    "10 secs": "14400 S",
     "15 secs": "14400 S",
     "30 secs": "28800 S",
     "1 min": "1 D",
@@ -246,7 +246,7 @@ def _format_ibkr_end_datetime(value: datetime | None) -> str:
         return ""
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).strftime("%Y%m%d %H:%M:%S UTC")
+    return value.astimezone(timezone.utc).strftime("%Y%m%d-%H:%M:%S UTC")
 
 
 def _expired_future_end_datetime(contract: Any, request: OHLCVRequest) -> datetime | None:

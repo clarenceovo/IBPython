@@ -173,6 +173,7 @@ class AsyncTelegramLogHandler(logging.Handler):
         self._min_interval = min_interval
         self._last_sent: dict[str, float] = {}
         self._session: Any = None  # aiohttp.ClientSession
+        self._background_tasks: set = set()
 
         if fmt is None:
             fmt = "<b>%(levelname)s</b> [%(name)s]\n%(message)s"
@@ -231,7 +232,10 @@ class AsyncTelegramLogHandler(logging.Handler):
             import asyncio
 
             loop = asyncio.get_running_loop()
-            loop.create_task(self._async_send(text))
+            task = loop.create_task(self._async_send(text))
+            # Prevent GC of fire-and-forget task
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
         except RuntimeError:
             # No running loop — use sync fallback
             TelegramLogHandler(

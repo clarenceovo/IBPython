@@ -35,6 +35,8 @@ class TIF(StrEnum):
     GTC = "GTC"
     OPG = "OPG"
     IOC = "IOC"
+    FOK = "FOK"
+    DTC = "DTC"
     GTD = "GTD"
 
 
@@ -72,6 +74,11 @@ class PlaceOrderRequest(BaseModel):
     sec_id_type: str | None = None
     sec_id: str | None = None
     con_id: int | None = Field(default=None, gt=0)
+    # Option-specific contract fields
+    strike: float | None = Field(default=None, gt=0)
+    right: str | None = Field(default=None, description="Option right: C/CALL or P/PUT")
+    option_expiry: str | None = Field(default=None, description="Option expiry YYYYMMDD for OPT/FOP contracts")
+    underlying_symbol: str | None = Field(default=None, description="Underlying symbol for option contracts")
     action: OrderAction
     order_type: OrderType
     quantity: float = Field(gt=0)
@@ -402,7 +409,8 @@ def normalize_open_order(trade: Any) -> OpenOrder:
         price=_safe_float(getattr(order, "lmtPrice", None) or getattr(order, "auxPrice", None)),
         status=str(getattr(order_status, "status", "")),
         tif=getattr(order, "tif", ""),
-        create_time=getattr(order, "goodTillDate", None),
+        create_time=getattr(order_status, "lastFillTime", None)
+        or getattr(order_status, "completedTime", None),
     )
 
 

@@ -41,7 +41,7 @@ class WhatToShow(StrEnum):
 
 # Canonical IBKR bar sizes in ascending order of granularity.
 _VALID_IBKR_BAR_SIZES: frozenset[str] = frozenset({
-    "1 sec", "5 secs", "10 secs", "15 secs", "30 secs",
+    "1 secs", "5 secs", "10 secs", "15 secs", "30 secs",
     "1 min", "2 mins", "3 mins", "5 mins", "10 mins", "15 mins", "20 mins", "30 mins",
     "1 hour", "2 hours", "3 hours", "4 hours", "8 hours",
     "1 day", "1 week", "1 month",
@@ -50,7 +50,7 @@ _VALID_IBKR_BAR_SIZES: frozenset[str] = frozenset({
 # Short-form aliases → canonical IBKR bar size.
 _BAR_SIZE_ALIASES: dict[str, str] = {
     # Compact forms: 5m, 1h, 1d, 1w
-    "1s": "1 sec",
+    "1s": "1 secs",
     "5s": "5 secs",
     "10s": "10 secs",
     "15s": "15 secs",
@@ -72,7 +72,7 @@ _BAR_SIZE_ALIASES: dict[str, str] = {
     "1w": "1 week",
     "1mo": "1 month",
     # Near-miss plural/singular normalizations
-    "1 sec": "1 sec",
+    "1 secs": "1 secs",
     "5 sec": "5 secs",
     "10 sec": "10 secs",
     "15 sec": "15 secs",
@@ -314,7 +314,7 @@ class OHLCVRequestMeta(BaseModel):
     currency: str | None = None
     bar_size: str
     what_to_show: str
-    use_rth: bool = False
+    use_rth: bool = True
     start_time: datetime | None = Field(default=None, alias="start_time")
     end_time: datetime | None = Field(default=None, alias="end_time")
     duration: str | None = None
@@ -540,7 +540,33 @@ class OHLCVRequest(BaseModel):
             ]
             if missing:
                 raise ValueError(f"option OHLCV requests require {', '.join(missing)}")
+        # Validate whatToShow is appropriate for the asset class
+        self._validate_what_to_show_for_asset_class()
         return self
+
+    def _validate_what_to_show_for_asset_class(self) -> None:
+        """Warn (not raise) if whatToShow is not typically valid for the requested asset class.
+
+        This is a soft validation — invalid combinations will fail at the IBKR API level,
+        but this gives the user early feedback.
+        """
+        wts = self.what_to_show.upper().strip()
+        ac = self.asset_class
+        # Asset-class-specific whatToShow constraints from IBKR documentation
+        _BOND_ONLY = {"YIELD_ASK", "YIELD_BID", "YIELD_BID_ASK", "YIELD_LAST"}
+        _CRYPTO_ONLY = {"AGGTRADES"}
+        if ac is AssetClass.BOND and wts not in _BOND_ONLY and wts not in {"TRADES", "MIDPOINT", "BID", "ASK", "BID_ASK"}:
+            pass  # Bonds support both yield and price types
+        if ac is not AssetClass.BOND and wts in _BOND_ONLY:
+            import logging
+            logging.getLogger(__name__).warning(
+                "whatToShow=%s is typically only valid for bonds, not %s", wts, ac.value
+            )
+        if ac is not AssetClass.CRYPTO and wts in _CRYPTO_ONLY:
+            import logging
+            logging.getLogger(__name__).warning(
+                "whatToShow=%s is typically only valid for crypto, not %s", wts, ac.value
+            )
 
 
 def ohlcv_contract_identity(bar: Any) -> dict[str, Any]:

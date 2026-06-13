@@ -605,7 +605,9 @@ class TestIBKRMarketDataExtMarketDepth:
         assert snapshot.asks[0].price == pytest.approx(100.1)
         assert fake_ib.requests[0][1] == 5
         assert fake_ib.requests[0][2] is True
-        assert fake_ib.cancelled == [(contract, True)]
+        # cancelMktDepth now receives the ticker object (not the contract)
+        assert len(fake_ib.cancelled) == 1
+        assert fake_ib.cancelled[0][1] is True
 
     def test_load_market_depth_snapshot_empty_book_is_unavailable(self) -> None:
         fake_ib = FakeIBEmptyMarketDepth()
@@ -622,7 +624,9 @@ class TestIBKRMarketDataExtMarketDepth:
                 )
             )
 
-        assert fake_ib.cancelled == [(contract, False)]
+        # cancelMktDepth now receives the ticker object (not the contract)
+        assert len(fake_ib.cancelled) == 1
+        assert fake_ib.cancelled[0][1] is False
 
     def test_load_market_depth_snapshot_lease_timeout_is_backpressure(self) -> None:
         fake_ib = FakeIBMarketDepth()
@@ -858,17 +862,37 @@ class TestIBKRMarketDataExtHeadTimestamp:
 
 
 class FakeIBImpliedVol:
-    """IB mock for IV/option price calculations."""
+    """IB mock for IV/option price calculations.
+
+    Mimics ib_insync's TickOptionComputation NamedTuple return shape:
+    (reqId, tickAttrib, impliedVol, delta, optPrice, pvDividend, gamma, vega, theta, undPrice)
+    """
 
     async def calculateImpliedVolatilityAsync(
         self, contract: Any, *, optionPrice: float, underPrice: float
-    ) -> tuple[float, str]:
-        return (0.25, "")
+    ) -> Any:
+        from collections import namedtuple
+        TickOptionComputation = namedtuple(
+            "TickOptionComputation",
+            ["reqId", "tickAttrib", "impliedVol", "delta", "optPrice", "pvDividend", "gamma", "vega", "theta", "undPrice"],
+        )
+        return TickOptionComputation(
+            reqId=1, tickAttrib=None, impliedVol=0.25, delta=0.5,
+            optPrice=0.0, pvDividend=0.0, gamma=0.0, vega=0.0, theta=0.0, undPrice=195.0,
+        )
 
     async def calculateOptionPriceAsync(
         self, contract: Any, *, volatility: float, underPrice: float
-    ) -> tuple[float, str]:
-        return (5.50, "")
+    ) -> Any:
+        from collections import namedtuple
+        TickOptionComputation = namedtuple(
+            "TickOptionComputation",
+            ["reqId", "tickAttrib", "impliedVol", "delta", "optPrice", "pvDividend", "gamma", "vega", "theta", "undPrice"],
+        )
+        return TickOptionComputation(
+            reqId=1, tickAttrib=None, impliedVol=0.25, delta=0.5,
+            optPrice=5.50, pvDividend=0.0, gamma=0.0, vega=0.0, theta=0.0, undPrice=195.0,
+        )
 
 
 class TestIBKRMarketDataExtIVCalc:

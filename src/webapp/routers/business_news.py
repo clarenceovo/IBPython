@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -254,5 +255,11 @@ async def _load_articles_for_headlines(
             article = await state.feed.load_news_article(request)
             return (headline.provider_code, headline.article_id), article
 
-    pairs = await asyncio.gather(*(load_one(headline) for headline in headlines))
+    raw_pairs = await asyncio.gather(*(load_one(headline) for headline in headlines), return_exceptions=True)
+    pairs: list[tuple[tuple[str, str], NewsArticle]] = []
+    for headline, raw in zip(headlines, raw_pairs, strict=True):
+        if isinstance(raw, Exception):
+            logging.getLogger("business_news").warning("Failed to load article %s/%s: %s", headline.provider_code, headline.article_id, raw)
+            continue
+        pairs.append(raw)  # type: ignore[arg-type]
     return dict(pairs)

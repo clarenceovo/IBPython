@@ -163,15 +163,36 @@ def _normalize_histogram_data_point(item: Any) -> HistogramDataPoint:
         size=float(size),
     )
 
+def _bar_to_tick_what_to_show(what_to_show: str) -> str:
+    """Convert bar-data whatToShow values to tick-data whatToShow values.
+
+    IBKR historical ticks (reqHistoricalTicks) expects: 'Trades', 'Midpoint', 'Bid Ask'
+    (mixed case, space not underscore), NOT the bar-data values 'TRADES', 'MIDPOINT', 'BID_ASK'.
+    """
+    mapping = {
+        "TRADES": "Trades",
+        "MIDPOINT": "Midpoint",
+        "BID_ASK": "Bid Ask",
+        # Allow passthrough if already in tick format
+        "Trades": "Trades",
+        "Midpoint": "Midpoint",
+        "Bid Ask": "Bid Ask",
+    }
+    return mapping.get(what_to_show, what_to_show)
+
 
 def _what_to_show_to_tick_type(what_to_show: str) -> TickType:
     """Map historical tick whatToShow to the closest TickType."""
     mapping = {
         "TRADES": TickType.ALL_LAST,
+        "Trades": TickType.ALL_LAST,
         "BID_ASK": TickType.BID_ASK,
+        "BID ASK": TickType.BID_ASK,
+        "Bid Ask": TickType.BID_ASK,
         "MIDPOINT": TickType.MIDPOINT,
+        "Midpoint": TickType.MIDPOINT,
     }
-    return mapping.get(what_to_show.upper(), TickType.ALL_LAST)
+    return mapping.get(what_to_show, mapping.get(what_to_show.upper(), TickType.ALL_LAST))
 
 
 def _finite_float(value: Any) -> float | None:
@@ -516,7 +537,7 @@ class IBKRMarketDataExtClient:
             if subscribed:
                 try:
                     await asyncio.wait_for(
-                        self._cancel_market_depth(contract, spec.symbol, is_smart_depth=is_smart_depth),
+                        self._cancel_market_depth(ticker, spec.symbol, is_smart_depth=is_smart_depth),
                         timeout=1.0,
                     )
                 except Exception:
@@ -528,9 +549,9 @@ class IBKRMarketDataExtClient:
                 metrics.market_depth_cleanup_failures_total.inc({"operation": "release_lease"})
                 logger.debug("error releasing market depth lease for %s", spec.symbol, exc_info=True)
 
-    async def _cancel_market_depth(self, contract: Any, symbol: str, *, is_smart_depth: bool) -> None:
+    async def _cancel_market_depth(self, ticker: Any, symbol: str, *, is_smart_depth: bool) -> None:
         await wait_for_ibkr_request(self._connection, operation=f"market_depth:{symbol}:cancelMktDepth")
-        self._ib.cancelMktDepth(contract, isSmartDepth=is_smart_depth)
+        self._ib.cancelMktDepth(ticker, isSmartDepth=is_smart_depth)
 
     # ------------------------------------------------------------------
     # 3. Historical ticks
@@ -571,10 +592,10 @@ class IBKRMarketDataExtClient:
                     raw_ticks = await self._connection.with_retry(
                         lambda: self._ib.reqHistoricalTicksAsync(
                             contract,
-                            startDateTime=start_date.strftime("%Y%m%d %H:%M:%S UTC"),
-                            endDateTime=end_date.strftime("%Y%m%d %H:%M:%S UTC"),
+                            startDateTime=start_date.strftime("%Y%m%d-%H:%M:%S UTC"),
+                            endDateTime=end_date.strftime("%Y%m%d-%H:%M:%S UTC"),
                             numberOfTicks=max_per_call,
-                            whatToShow=request.what_to_show,
+                            whatToShow=_bar_to_tick_what_to_show(request.what_to_show),
                             useRth=request.use_rth,
                             ignoreSize=True,
                         ),
@@ -790,11 +811,15 @@ class IBKRMarketDataExtClient:
             ),
             operation="calculate_iv",
         )
-        # ib_insync returns (vol, err) tuple or just vol depending on version
-        if isinstance(iv, tuple):
-            vol = float(iv[0]) if iv[0] is not None else 0.0
-        else:
-            vol = float(iv) if iv is not None else 0.0
+        # ib_insync returns TickOptionComputation NamedTuple: (reqId, tickAttrib, impliedVol, delta, optPrice, pvDividend, gamma, vega, theta, undPrice)
+        # Extract impliedVol via attribute access for robustness across ib_insync versions
+        vol = None
+        if hasattr(iv, "impliedVol"):
+            vol = float(iv.impliedVol) if iv.impliedVol is not None else None
+        elif isinstance(iv, (tuple, list)) and len(iv) > 2:
+            vol = float(iv[2]) if iv[2] is not None else None
+        if vol is None:
+            vol = 0.0
         return vol
 
     # ------------------------------------------------------------------
@@ -828,10 +853,15 @@ class IBKRMarketDataExtClient:
             ),
             operation="calculate_option_price",
         )
-        if isinstance(price, tuple):
-            opt_price = float(price[0]) if price[0] is not None else 0.0
-        else:
-            opt_price = float(price) if price is not None else 0.0
+        # ib_insync returns TickOptionComputation NamedTuple: (reqId, tickAttrib, impliedVol, delta, optPrice, pvDividend, gamma, vega, theta, undPrice)
+        # Extract optPrice via attribute access for robustness
+        opt_price = None
+        if hasattr(price, "optPrice"):
+            opt_price = float(price.optPrice) if price.optPrice is not None else None
+        elif isinstance(price, (tuple, list)) and len(price) > 4:
+            opt_price = float(price[4]) if price[4] is not None else None
+        if opt_price is None:
+            opt_price = 0.0
         return opt_price
 
     # ------------------------------------------------------------------
@@ -1121,7 +1151,7 @@ class IBKRMarketDataExtClient:
         tag_values = [TagValue(key, value) for key, value in tags]
 
         data = await self._connection.with_retry(
-            lambda: self._ib.reqScannerDataAsync(sub, [], tag_values),
+            lambda: self._ib.reqScannerSubscriptionAsync(sub, scannerSubscriptionFilterOptions=tag_values),
             operation=f"scan_market:{instrument}:{location}:{scan_code}",
         )
 
@@ -1156,7 +1186,7 @@ class IBKRMarketDataExtClient:
         logger.info("get_news_bulletins: all_messages=%s", all_messages)
 
         async def _request_news_bulletins() -> None:
-            self._ib.reqNewsBulletins(all_messages)
+            self._ib.reqNewsBulletins(allMsgs=all_messages)
 
         await self._connection.with_retry(
             _request_news_bulletins,

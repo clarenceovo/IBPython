@@ -51,7 +51,7 @@ def test_tool_count():
             for d in node.decorator_list
         )
     ]
-    assert len(tools) == 60, f"Expected 60 MCP tools, found {len(tools)}: {tools}"
+    assert len(tools) == 61, f"Expected 61 MCP tools, found {len(tools)}: {tools}"
 
 
 def test_resource_count():

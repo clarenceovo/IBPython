@@ -297,7 +297,7 @@ async def _ibkr_connection_status_with_timeout(state: IBKRRestAppState) -> str |
     """IBKR connection status for readiness probe, bounded by timeout."""
     try:
         return await asyncio.wait_for(
-            asyncio.get_event_loop().run_in_executor(None, _ibkr_connection_status, state),
+            asyncio.to_thread(_ibkr_connection_status, state),
             timeout=_READINESS_CHECK_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:

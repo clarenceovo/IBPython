@@ -403,7 +403,7 @@ class IBKRConnectionManager:
         try:
             import asyncio
             loop = asyncio.get_running_loop()
-            loop.create_task(
+            task = loop.create_task(
                 self._notification_callback(
                     event="ibkr_connection_dead",
                     host=self.host,
@@ -413,6 +413,9 @@ class IBKRConnectionManager:
                     last_ibkr_error=self._last_ibkr_error,
                 )
             )
+            # Prevent GC of fire-and-forget task
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
         except RuntimeError:
             logger.debug("no event loop for connection dead notification")
         except Exception:

@@ -206,7 +206,7 @@ class IBKRReferenceFeedClient:
         logger.info("load_wsh_metadata: starting")
         t0 = monotonic_time.monotonic()
         raw_json = await self._connection.with_retry(
-            lambda: self._ib.getWshMetaDataAsync(),
+            lambda: self._ib.getWshMetaDataAsync(singleJsonEvent=True),
             operation="wsh_metadata",
         )
         self._wsh_metadata_loaded = True
@@ -286,7 +286,7 @@ class IBKRReferenceFeedClient:
         await self._connection.ensure_connected()
         logger.info("load_news_article: provider=%s article_id=%s", request.provider_code, request.article_id)
         article = await self._connection.with_retry(
-            lambda: self._ib.reqNewsArticleAsync(request.provider_code, request.article_id, []),
+            lambda: self._ib.reqNewsArticleAsync(request.article_id, request.provider_code),
             operation=f"news_article:{request.provider_code}:{request.article_id}",
         )
         return normalize_news_article(article, request)

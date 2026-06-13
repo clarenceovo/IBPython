@@ -203,6 +203,7 @@ async def get_yield_data(
                 "low": bar.low,
                 "close": bar.close,
                 "volume": bar.volume,
+                "average_yield": bar.vwap,
             }
             for bar in bars
         ]

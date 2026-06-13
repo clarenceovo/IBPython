@@ -100,6 +100,7 @@ async def get_historical_volatility(
                 "low": bar.low,
                 "close": bar.close,
                 "volume": bar.volume,
+                "volatility": bar.vwap,
             }
             for bar in bars
         ]
@@ -190,6 +191,7 @@ async def get_option_iv_series(
                 "low": bar.low,
                 "close": bar.close,
                 "volume": bar.volume,
+                "implied_volatility": bar.vwap,
             }
             for bar in bars
         ]

@@ -154,7 +154,15 @@ class OHLCVSnapshotJobHandler:
             async with semaphore:
                 return await self._run_symbol(job, params, symbol, now_local)
 
-        results = await asyncio.gather(*(run_one(symbol) for symbol in params.symbols))
+        raw_results = await asyncio.gather(*(run_one(symbol) for symbol in params.symbols), return_exceptions=True)
+        # Normalize: convert exceptions into error dicts so downstream aggregation works uniformly
+        results: list[dict[str, Any]] = []
+        for symbol, raw in zip(params.symbols, raw_results, strict=True):
+            if isinstance(raw, Exception):
+                logger.warning("job=%s symbol=%s failed: %s", job.name, getattr(symbol, "symbol", symbol), raw)
+                results.append({"status": "failed", "bars_captured": 0, "bars_expected": 0, "failure_category": "exception"})
+            else:
+                results.append(raw)  # type: ignore[arg-type]
         success_count = sum(1 for result in results if result["status"] == "success")
         skipped_count = sum(1 for result in results if result["status"] == "skipped_holiday")
         failed_count = sum(1 for result in results if result["status"] == "failed")

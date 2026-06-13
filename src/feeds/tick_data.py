@@ -57,7 +57,7 @@ class HistoricalTickRequest(BaseModel):
     currency: str = Field(default="USD", min_length=1)
     start_date: datetime
     end_date: datetime
-    what_to_show: str = Field(default="TRADES", min_length=1)  # TRADES, BID_ASK, MIDPOINT
+    what_to_show: str = Field(default="TRADES", min_length=1)  # Bar-data style; auto-converted to tick format for reqHistoricalTicksAsync
     use_rth: bool = True
     max_ticks: int = Field(default=10_000, ge=1, le=100_000)
 
