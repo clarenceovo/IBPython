@@ -70,7 +70,8 @@ class FutureOHLCVLoadRequest(MinimalOHLCVLoadControls):
         default=False,
         description=(
             "Request an IBKR continuous futures historical series with secType=CONTFUT. "
-            "Use this instead of last_trade_date_or_contract_month, local_symbol, or con_id."
+            "Use this instead of last_trade_date_or_contract_month, local_symbol, or con_id. "
+            "IBKR only supports this as a latest-bars request; do not send start_datetime or end_datetime."
         ),
     )
     multiplier: str | None = Field(
@@ -134,7 +135,8 @@ class CommodityOHLCVLoadRequest(MinimalOHLCVLoadControls):
         default=False,
         description=(
             "Request an IBKR continuous commodity futures historical series with secType=CONTFUT. "
-            "Use this instead of last_trade_date_or_contract_month, local_symbol, or con_id."
+            "Use this instead of last_trade_date_or_contract_month, local_symbol, or con_id. "
+            "IBKR only supports this as a latest-bars request; do not send start_datetime or end_datetime."
         ),
     )
     multiplier: str | None = Field(default=None, examples=["1000"], description="Optional IBKR contract multiplier.")
@@ -425,6 +427,16 @@ FUTURES_OHLCV_REQUEST_EXAMPLES = {
         "summary": "Hang Seng TECH Index future",
         "description": "HKEX Hang Seng TECH Index futures use product code HTI. Use HKFE/HKD for IBKR routing.",
         "value": {"symbol": "HTI", "exchange": "HKFE", "currency": "HKD", "last_trade_date_or_contract_month": "202606", "duration": "1 D", "bar_size": "1 min", "what_to_show": "TRADES"},
+    },
+    "hstech_hkfe_bounded_by_local_symbol": {
+        "summary": "Hang Seng TECH bounded window",
+        "description": "For explicit historical windows, use a dated FUT contract such as localSymbol=HTIM6; do not use continuous=true.",
+        "value": {"symbol": "HTI", "exchange": "HKFE", "currency": "HKD", "local_symbol": "HTIM6", "start_datetime": "2026-06-16T01:15:00Z", "end_datetime": "2026-06-16T08:00:00Z", "bar_size": "1 min", "what_to_show": "TRADES", "use_rth": False},
+    },
+    "hstech_hkfe_continuous_latest": {
+        "summary": "Hang Seng TECH continuous latest bars",
+        "description": "Continuous HTI uses IBKR secType=CONTFUT. Leave start_datetime and end_datetime unset; IBKR rejects explicit end times for CONTFUT.",
+        "value": {"symbol": "HTI", "exchange": "HKFE", "currency": "HKD", "continuous": True, "duration": "1 D", "bar_size": "1 min", "what_to_show": "TRADES", "use_rth": False},
     },
     "n225m_ose_by_contract_month": {
         "summary": "Nikkei 225 Mini future",

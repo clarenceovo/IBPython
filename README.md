@@ -519,6 +519,57 @@ The asset-specific OHLCV wrappers are the business-friendly OHLCV API: callers p
 
 Commodity routes are futures-first. Commodity futures remain `asset_class="future"` and commodity futures options remain `asset_class="option"` with IBKR `secType="FOP"`. The commodity OHLCV wrapper presets common roots (`CL`/`NG` to `NYMEX`, `GC`/`SI`/`HG` to `COMEX`, and grain/oilseed roots such as `ZC`/`ZS`/`ZW`/`ZL`/`ZM` to `CBOT`) while allowing explicit exchange and currency overrides. Related IBKR-native commodity endpoints expose futures-option analytics, contract metadata, historical ticks, and historical news without adding external COT, weather, inventory, or shipping providers.
 
+IBKR continuous futures (`secType="CONTFUT"`) are latest-bars historical series only. Send `continuous=true` with `duration`, but do not send `start_datetime` or `end_datetime`; IBKR rejects explicit end times for continuous futures with error `10339`. For explicit historical windows, request a dated `FUT` contract by `last_trade_date_or_contract_month`, `local_symbol`, or `con_id`.
+
+Example HSTECH continuous latest bars:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/market-data/ohlcv/futures \
+  -H "Content-Type: application/json" \
+  -d '{
+    "symbol": "HTI",
+    "exchange": "HKFE",
+    "currency": "HKD",
+    "continuous": true,
+    "duration": "1 D",
+    "bar_size": "1 min",
+    "what_to_show": "TRADES",
+    "use_rth": false
+  }'
+```
+
+Example HSTECH bounded historical window using a dated contract:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/market-data/ohlcv/futures \
+  -H "Content-Type: application/json" \
+  -d '{
+    "symbol": "HTI",
+    "exchange": "HKFE",
+    "currency": "HKD",
+    "local_symbol": "HTIM6",
+    "start_datetime": "2026-06-16T01:15:00Z",
+    "end_datetime": "2026-06-16T08:00:00Z",
+    "bar_size": "1 min",
+    "what_to_show": "TRADES",
+    "use_rth": false
+  }'
+```
+
+Invalid HSTECH continuous bounded window:
+
+```json
+{
+  "symbol": "HTI",
+  "exchange": "HKFE",
+  "currency": "HKD",
+  "continuous": true,
+  "start_datetime": "2026-06-16T01:15:00Z",
+  "end_datetime": "2026-06-16T08:00:00Z",
+  "bar_size": "1 min"
+}
+```
+
 FX option routes use pair-style inputs. For example, `EURUSD` maps to `option_sec_type="OPT"`, `underlying_symbol="EUR"`, and `currency="USD"` unless `currency`, `local_symbol`, or `con_id` is supplied to disambiguate an IBKR contract. Historical FX option bars return `OptionOHLCVBar`. Live FX option collection uses short-lived market-data subscriptions and stores latest snapshots in Redis. Durable FX option snapshot persistence belongs to the scheduler/snapshotter layer, not the API process.
 
 Example FX option live snapshot:

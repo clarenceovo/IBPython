@@ -976,6 +976,10 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
     assert futures_examples["hstech_hkfe_by_contract_month"]["value"]["symbol"] == "HTI"
     assert futures_examples["hstech_hkfe_by_contract_month"]["value"]["exchange"] == "HKFE"
     assert futures_examples["hstech_hkfe_by_contract_month"]["value"]["currency"] == "HKD"
+    assert futures_examples["hstech_hkfe_bounded_by_local_symbol"]["value"]["local_symbol"] == "HTIM6"
+    assert "continuous" not in futures_examples["hstech_hkfe_bounded_by_local_symbol"]["value"]
+    assert futures_examples["hstech_hkfe_continuous_latest"]["value"]["continuous"] is True
+    assert "end_datetime" not in futures_examples["hstech_hkfe_continuous_latest"]["value"]
     assert futures_examples["nq_cme_by_contract_month"]["value"]["symbol"] == "NQ"
     assert futures_examples["nq_cme_continuous"]["value"]["continuous"] is True
     assert futures_examples["emd_cme_by_contract_month"]["value"]["symbol"] == "EMD"
