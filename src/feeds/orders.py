@@ -263,6 +263,124 @@ class CancelOrderResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Multi-leg order helpers
+# ---------------------------------------------------------------------------
+
+class BracketOrderRequest(BaseModel):
+    """Request body for placing a bracket order."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    symbol: str = Field(min_length=1)
+    action: OrderAction = OrderAction.BUY
+    quantity: float = Field(default=1.0, gt=0)
+    limit_price: float | None = Field(default=None, gt=0)
+    take_profit_price: float = Field(gt=0)
+    stop_loss_price: float = Field(gt=0)
+    order_type: OrderType = OrderType.LIMIT
+    tif: TIF = TIF.GTC
+    asset_class: str = Field(default="EQUITY", min_length=1)
+    exchange: str = Field(default="SMART", min_length=1)
+    currency: str = Field(default="USD", min_length=1)
+    account: str = ""
+
+    @field_validator("symbol", "asset_class", "exchange", "currency", "account", mode="before")
+    @classmethod
+    def normalize_text(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip().upper()
+
+    @model_validator(mode="after")
+    def validate_bracket(self) -> "BracketOrderRequest":
+        if self.order_type not in {OrderType.MARKET, OrderType.LIMIT}:
+            raise ValueError("bracket order_type must be MKT or LMT")
+        if self.order_type is OrderType.LIMIT and self.limit_price is None:
+            raise ValueError("limit_price is required for LMT bracket orders")
+        return self
+
+
+class BracketOrderResponse(BaseModel):
+    """Response from placing a bracket order."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    action: OrderAction
+    quantity: float
+    orders_placed: int
+    parent_order_id: int | None = None
+    take_profit_order_id: int | None = None
+    stop_loss_order_id: int | None = None
+    order_uuid: str | None = None
+
+
+class OcaOrderItem(BaseModel):
+    """Single order within an OCA group."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    symbol: str = Field(min_length=1)
+    action: OrderAction = OrderAction.BUY
+    quantity: float = Field(gt=0)
+    order_type: OrderType = OrderType.LIMIT
+    tif: TIF = TIF.GTC
+    price: float | None = Field(default=None, gt=0)
+    asset_class: str = Field(default="EQUITY", min_length=1)
+    exchange: str = Field(default="SMART", min_length=1)
+    currency: str = Field(default="USD", min_length=1)
+
+    @field_validator("symbol", "asset_class", "exchange", "currency", mode="before")
+    @classmethod
+    def normalize_text(cls, value: Any) -> str:
+        if value is None:
+            raise ValueError("value is required")
+        normalized = str(value).strip().upper()
+        if not normalized:
+            raise ValueError("value cannot be empty")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_oca_order(self) -> "OcaOrderItem":
+        if self.order_type not in {OrderType.MARKET, OrderType.LIMIT}:
+            raise ValueError("OCA order_type must be MKT or LMT")
+        if self.order_type is OrderType.LIMIT and self.price is None:
+            raise ValueError("price is required for LMT OCA orders")
+        return self
+
+
+class OcaGroupRequest(BaseModel):
+    """Request body for placing an OCA (One-Cancels-All) order group."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    orders: list[OcaOrderItem] = Field(min_length=2)
+    oca_group: str = Field(default="")
+    oca_type: int = Field(default=1, ge=1, le=3)
+    account: str = Field(default="")
+
+    @field_validator("oca_group", "account", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+
+class OcaOrderResponse(BaseModel):
+    """Single submitted OCA order response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    action: OrderAction
+    quantity: float
+    order_id: int
+    oca_group: str
+    order_uuid: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # Open orders
 # ---------------------------------------------------------------------------
 

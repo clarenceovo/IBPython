@@ -2,23 +2,24 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import secrets
-import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Response, Security, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field
 
 from src.feeds.orders import (
+    BracketOrderRequest,
+    BracketOrderResponse,
     CachedOrderLookup,
     CancelOrderResponse,
     CompletedOrder,
     ExecutionRequest,
     ExecutionResponse,
     ModifyOrderRequest,
+    OcaGroupRequest,
+    OcaOrderResponse,
     OpenOrder,
     OrderEnvelope,
     OrderResponse,
@@ -84,7 +85,6 @@ async def require_order_bearer_token(
 @router.post("/place", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
 async def place_order(
     request: PlaceOrderRequest,
-    response: Response,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     state: IBKRRestAppState = Depends(require_order_bearer_token),
 ) -> OrderResponse:
@@ -96,22 +96,8 @@ async def place_order(
     Supports idempotent requests via the `Idempotency-Key` header.
     If the same key is reused within 24h, the cached response is returned.
     """
-    # Idempotency: replay cached response if available
     if idempotency_key is not None:
-        cache_key = f"Idempotency::{idempotency_key}"
-        cached_raw = await state.redis.get_raw(cache_key)
-        if cached_raw is not None:
-            logger.info("Replaying idempotent order response: key=%s", idempotency_key)
-            cached_data = json.loads(cached_raw if isinstance(cached_raw, str) else cached_raw.decode("utf-8"))
-            response.headers["Idempotency-Replayed"] = "true"
-            return OrderResponse.model_validate(cached_data)
-        result = await state.feed.place_order(request)
-        # Cache the response in Redis with a 24h TTL
-        try:
-            await state.redis.set_raw(cache_key, result.model_dump_json(), ex=86400)
-        except Exception:
-            logger.warning("failed to cache idempotency response for key=%s", idempotency_key, exc_info=True)
-        return result
+        request = request.model_copy(update={"idempotency_key": idempotency_key})
     return await state.feed.place_order(request)
 
 
@@ -219,25 +205,6 @@ async def list_cached_orders(
 # Bracket orders
 # ------------------------------------------------------------------
 
-class BracketOrderRequest(BaseModel):
-    """Request body for placing a bracket order (parent + take-profit + stop-loss)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    symbol: str = Field(min_length=1)
-    action: str = Field(default="BUY", pattern="^(BUY|SELL)$")
-    quantity: float = Field(default=1.0, gt=0)
-    limit_price: float | None = Field(default=None, gt=0)
-    take_profit_price: float = Field(gt=0)
-    stop_loss_price: float = Field(gt=0)
-    order_type: str = Field(default="LMT", pattern="^(MKT|LMT)$")
-    tif: str = Field(default="GTC", pattern="^(DAY|GTC|IOC|FOK|GTD|OPG)$")
-    asset_class: str = Field(default="EQUITY")
-    exchange: str = Field(default="SMART")
-    currency: str = Field(default="USD")
-    account: str = Field(default="")
-
-
 BRACKET_ORDER_EXAMPLES = {
     "aapl_bracket": {
         "summary": "AAPL bracket order",
@@ -255,104 +222,22 @@ BRACKET_ORDER_EXAMPLES = {
 }
 
 
-@router.post("/bracket", status_code=status.HTTP_201_CREATED, summary="Place a bracket order")
+@router.post("/bracket", response_model=BracketOrderResponse, status_code=status.HTTP_201_CREATED, summary="Place a bracket order")
 async def place_bracket_order(
     payload: Annotated[BracketOrderRequest, Body(openapi_examples=BRACKET_ORDER_EXAMPLES)],  # noqa: F821
     state: IBKRRestAppState = Depends(require_order_bearer_token),
-) -> dict:
+) -> BracketOrderResponse:
     """Place a bracket order (parent + take-profit + stop-loss).
 
     Creates three linked orders: a parent entry order, an attached take-profit,
     and an attached stop-loss. When one of the exit orders fills, the other is cancelled.
     """
-    from src.feeds.models import AssetClass
-
-    asset_class_map = {
-        "equity": "STK", "futures": "FUT", "future": "FUT",
-        "option": "OPT", "fx": "CASH", "index": "IND", "bond": "BOND",
-    }
-    sec_type = asset_class_map.get(payload.asset_class.lower(), "STK")
-
-    try:
-        from ib_insync import Contract
-    except ImportError:
-        raise HTTPException(status_code=503, detail="ib_insync not available")
-
-    ib = state.feed._connection.ib
-    if ib is None:
-        raise HTTPException(status_code=503, detail="IBKR connection not available")
-
-    contract = Contract(
-        symbol=payload.symbol,
-        secType=sec_type,
-        exchange=payload.exchange,
-        currency=payload.currency,
-    )
-    qualified = await ib.qualifyContractsAsync(contract)
-    if not qualified:
-        raise HTTPException(status_code=400, detail=f"Could not qualify contract for {payload.symbol}")
-    contract = qualified[0]
-
-    bracket = ib.bracketOrder(
-        action=payload.action.upper(),
-        quantity=payload.quantity,
-        limitPrice=payload.limit_price or 0.0,
-        takeProfitPrice=payload.take_profit_price,
-        stopLossPrice=payload.stop_loss_price,
-    )
-    bracket.orders[0].orderType = payload.order_type.upper()
-    bracket.orders[0].tif = payload.tif
-
-    if payload.account:
-        for o in bracket.orders:
-            o.account = payload.account
-
-    trades = []
-    for o in bracket.orders:
-        trade = ib.placeOrder(contract, o)
-        trades.append(trade)
-
-    return {
-        "symbol": payload.symbol,
-        "action": payload.action,
-        "quantity": payload.quantity,
-        "orders_placed": len(trades),
-        "parent_order_id": bracket.orders[0].orderId if bracket.orders else None,
-        "take_profit_order_id": bracket.orders[1].orderId if len(bracket.orders) > 1 else None,
-        "stop_loss_order_id": bracket.orders[2].orderId if len(bracket.orders) > 2 else None,
-    }
+    return await state.feed.place_bracket_order(payload)
 
 
 # ------------------------------------------------------------------
 # OCA (One-Cancels-All) groups
 # ------------------------------------------------------------------
-
-class OcaOrderItem(BaseModel):
-    """Single order within an OCA group."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    symbol: str = Field(min_length=1)
-    action: str = Field(default="BUY", pattern="^(BUY|SELL)$")
-    quantity: float = Field(gt=0)
-    order_type: str = Field(default="LMT", pattern="^(MKT|LMT)$")
-    tif: str = Field(default="GTC", pattern="^(DAY|GTC|IOC|FOK|GTD|OPG)$")
-    price: float | None = Field(default=None, gt=0)
-    asset_class: str = Field(default="EQUITY")
-    exchange: str = Field(default="SMART")
-    currency: str = Field(default="USD")
-
-
-class OcaGroupRequest(BaseModel):
-    """Request body for placing an OCA (One-Cancels-All) order group."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    orders: list[OcaOrderItem] = Field(min_length=2)
-    oca_group: str = Field(default="")
-    oca_type: int = Field(default=1, ge=1, le=3)
-    account: str = Field(default="")
-
 
 OCA_GROUP_EXAMPLES = {
     "oca_two_legs": {
@@ -368,66 +253,14 @@ OCA_GROUP_EXAMPLES = {
 }
 
 
-@router.post("/oca", status_code=status.HTTP_201_CREATED, summary="Place an OCA order group")
+@router.post("/oca", response_model=list[OcaOrderResponse], status_code=status.HTTP_201_CREATED, summary="Place an OCA order group")
 async def place_oca_group(
     payload: Annotated[OcaGroupRequest, Body(openapi_examples=OCA_GROUP_EXAMPLES)],  # noqa: F821
     state: IBKRRestAppState = Depends(require_order_bearer_token),
-) -> list[dict]:
+) -> list[OcaOrderResponse]:
     """Place a One-Cancels-All group of orders.
 
     When any order in the group fills, all others are automatically cancelled.
     Requires at least 2 orders.
     """
-    try:
-        from ib_insync import Contract, Order
-    except ImportError:
-        raise HTTPException(status_code=503, detail="ib_insync not available")
-
-    ib = state.feed._connection.ib
-    if ib is None:
-        raise HTTPException(status_code=503, detail="IBKR connection not available")
-
-    group_name = payload.oca_group or f"oca_{uuid.uuid4().hex[:8]}"
-    asset_class_map = {
-        "equity": "STK", "futures": "FUT", "future": "FUT",
-        "option": "OPT", "fx": "CASH", "index": "IND", "bond": "BOND",
-    }
-    results: list[dict] = []
-
-    for od in payload.orders:
-        sec_type = asset_class_map.get(od.asset_class.lower(), "STK")
-
-        contract = Contract(
-            symbol=od.symbol,
-            secType=sec_type,
-            exchange=od.exchange,
-            currency=od.currency,
-        )
-        qualified = await ib.qualifyContractsAsync(contract)
-        if not qualified:
-            results.append({"error": f"Could not qualify contract for {od.symbol}", "symbol": od.symbol})
-            continue
-        contract = qualified[0]
-
-        order = Order()
-        order.action = od.action.upper()
-        order.totalQuantity = od.quantity
-        order.orderType = od.order_type.upper()
-        order.tif = od.tif
-        order.ocaGroup = group_name
-        order.ocaType = payload.oca_type
-        if od.price is not None:
-            order.lmtPrice = od.price
-        if payload.account:
-            order.account = payload.account
-
-        trade = ib.placeOrder(contract, order)
-        results.append({
-            "symbol": od.symbol,
-            "action": od.action.upper(),
-            "quantity": od.quantity,
-            "order_id": trade.order.orderId,
-            "oca_group": group_name,
-        })
-
-    return results
+    return await state.feed.place_oca_group(payload)

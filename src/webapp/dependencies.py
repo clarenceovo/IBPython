@@ -50,6 +50,9 @@ class IBKRRestAppState:
             ("IBKR feed", self.feed.disconnect),
             ("Redis transport", self.redis.close),
         ]
+        event_contracts_close = getattr(self.event_contracts, "close", None)
+        if callable(event_contracts_close):
+            closers.insert(0, ("IBKR Web API client", event_contracts_close))
         for name, closer in closers:
             try:
                 logger.info("REST app shutdown: closing %s", name)

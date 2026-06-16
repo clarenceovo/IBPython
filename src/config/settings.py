@@ -161,6 +161,10 @@ class Settings(BaseModel):
         alias=constants.IBKR_REST_RATE_LIMIT_PER_MINUTE_ENV,
         gt=0,
     )
+    ibkr_rest_trusted_proxies: str = Field(
+        default=constants.DEFAULT_IBKR_REST_TRUSTED_PROXIES,
+        alias=constants.IBKR_REST_TRUSTED_PROXIES_ENV,
+    )
 
     ibkr_api_bearer_token: str = Field(
         default=constants.DEFAULT_IBKR_API_BEARER_TOKEN,

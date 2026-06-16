@@ -170,14 +170,31 @@ class FakeIB:
         self._open_order_requests = 0
         self._connected = True
         self._next_order_id = 1001
+        self._qualification_fail_symbols: set[str] = set()
 
     def isConnected(self) -> bool:
         return self._connected
 
     def qualifyContractsAsync(self, contract: Any) -> Any:
         async def _qual() -> list[Any]:
+            if getattr(contract, "symbol", "") in self._qualification_fail_symbols:
+                return []
             return [contract]
         return _qual()
+
+    def bracketOrder(
+        self,
+        *,
+        action: str,
+        quantity: float,
+        limitPrice: float,
+        takeProfitPrice: float,
+        stopLossPrice: float,
+    ) -> Any:
+        parent = FakeOrder(action=action, orderType="LMT", totalQuantity=quantity, lmtPrice=limitPrice)
+        take_profit = FakeOrder(action="SELL" if action == "BUY" else "BUY", orderType="LMT", totalQuantity=quantity, lmtPrice=takeProfitPrice)
+        stop_loss = FakeOrder(action="SELL" if action == "BUY" else "BUY", orderType="STP", totalQuantity=quantity, auxPrice=stopLossPrice)
+        return SimpleNamespace(orders=[parent, take_profit, stop_loss])
 
     def placeOrder(self, contract: Any, order: Any) -> FakeTrade:
         if getattr(order, "orderId", 0) in (None, 0):
@@ -1060,6 +1077,10 @@ class TestOrdersRouter:
                 return await self._order_client.preview_order(request)
             async def load_completed_orders(self) -> list[CompletedOrder]:
                 return await self._order_client.load_completed_orders()
+            async def place_bracket_order(self, request):
+                return await self._order_client.place_bracket_order(request)
+            async def place_oca_group(self, request):
+                return await self._order_client.place_oca_group(request)
 
         order_client = IBKROrderClient(fake_conn)
         feed = OrderFakeFeed(order_client)
@@ -1091,7 +1112,7 @@ class TestOrdersRouter:
                 "quantity": 100,
                 "price": 150.0,
             }, headers=self.AUTH_HEADERS)
-            assert response.status_code == 200
+            assert response.status_code == 201
             data = response.json()
             assert "order_id" in data
             assert data["status"] in ("submitted", "pending")
@@ -1106,7 +1127,7 @@ class TestOrdersRouter:
                 "quantity": 100,
                 "price": 150.0,
             }, headers=self.AUTH_HEADERS)
-            assert response.status_code == 200
+            assert response.status_code == 201
             assert len(fake_ib._placed_orders) == 1
             assert fake_ib._what_if_orders == []
 
@@ -1152,6 +1173,49 @@ class TestOrdersRouter:
             assert response.status_code == 200
             data = response.json()
             assert data["total_count"] == 2
+
+    def test_bracket_order_endpoint_delegates_to_order_client(self) -> None:
+        app, fake_ib = self._make_app()
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/orders/bracket",
+                json={
+                    "symbol": "AAPL",
+                    "action": "BUY",
+                    "quantity": 10,
+                    "limit_price": 150.0,
+                    "take_profit_price": 160.0,
+                    "stop_loss_price": 145.0,
+                    "order_type": "LMT",
+                    "tif": "GTC",
+                },
+                headers=self.AUTH_HEADERS,
+            )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["orders_placed"] == 3
+        assert data["parent_order_id"] is not None
+        assert len(fake_ib._placed_orders) == 3
+        assert {getattr(order, "orderRef", "") for _, order in fake_ib._placed_orders} != {""}
+
+    def test_oca_group_rejects_before_any_leg_is_placed_when_qualification_fails(self) -> None:
+        app, fake_ib = self._make_app()
+        fake_ib._qualification_fail_symbols.add("MSFT")
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/orders/oca",
+                json={
+                    "orders": [
+                        {"symbol": "AAPL", "action": "BUY", "quantity": 10, "order_type": "LMT", "price": 150.0},
+                        {"symbol": "MSFT", "action": "BUY", "quantity": 10, "order_type": "LMT", "price": 300.0},
+                    ],
+                    "oca_type": 1,
+                },
+                headers=self.AUTH_HEADERS,
+            )
+        assert response.status_code == 502
+        assert "OCA group rejected before submission" in response.json()["detail"]
+        assert fake_ib._placed_orders == []
 
     def test_cancel_order_endpoint(self) -> None:
         app, fake_ib = self._make_app()

@@ -121,6 +121,7 @@ Core variables:
 | `IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED` | `false` | Safety switch for live Event Contract Web API order submission |
 | `IBKR_REST_CORS_ORIGINS` | empty | Comma-separated allowed CORS origins. When set, enables CORS middleware; when empty (default), no CORS headers are sent. |
 | `IBKR_REST_RATE_LIMIT_PER_MINUTE` | `120` | Per-IP HTTP rate limit (requests per minute). Redis-backed sliding window with in-process token bucket fallback. |
+| `IBKR_REST_TRUSTED_PROXIES` | empty | Comma-separated proxy IPs/CIDRs whose `X-Forwarded-For` / `X-Real-IP` headers may be trusted for rate limiting. Empty means forwarded headers are ignored. |
 
 ## Local Commands
 
@@ -512,7 +513,7 @@ curl -X POST http://localhost:8000/api/v1/market-data/ohlcv/bond \
   -d '{"sec_id_type":"CUSIP","sec_id":"91282CJN2"}'
 ```
 
-The asset-specific OHLCV wrappers are the business-friendly OHLCV API: callers pass minimal identifiers and the service presets `asset_class` plus common IBKR defaults. They accept the same optional controls as the generic OHLCV endpoint: `duration`, `bar_size`, `start_datetime`, `end_datetime`, `what_to_show`, `use_rth`, `persist`, `cache_latest`, `use_ttl_cache`, `cache_ttl_seconds`, and `metadata`. `persist` is accepted for backward-compatible payloads but API-side persistence is disabled; the scheduler/snapshotter owns durable writes.
+The asset-specific OHLCV wrappers are the business-friendly OHLCV API: callers pass minimal identifiers and the service presets `asset_class` plus common IBKR defaults. They accept the same optional controls as the generic OHLCV endpoint: `duration`, `bar_size`, `start_datetime`, `end_datetime`, `what_to_show`, `use_rth`, `persist`, `cache_latest`, `use_ttl_cache`, `cache_ttl_seconds`, and `metadata`. API-side persistence is disabled; requests with `persist=true` return `501`, and the scheduler/snapshotter owns durable writes.
 
 `what_to_show` supports 15 values: `TRADES`, `MIDPOINT`, `BID`, `ASK`, `BID_ASK`, `ADJUSTED_LAST`, `HISTORICAL_VOLATILITY`, `OPTION_IMPLIED_VOLATILITY`, `AGGTRADES`, `FEE_RATE`, `SCHEDULE`, `YIELD_ASK`, `YIELD_BID`, `YIELD_BID_ASK`, `YIELD_LAST`. `bar_size` accepts shorthand aliases that are normalized automatically: `5m` → `5 mins`, `1h` → `1 hour`, `1d` → `1 day`, `1w` → `1 week`, `1mo` → `1 month`.
 
@@ -530,7 +531,7 @@ curl -X POST http://localhost:8000/api/v1/snapshot/fx-options/capture \
       {"symbol":"EURUSD","expiry":"20260619","strike":1.10,"right":"C","exchange":"SMART"}
     ],
     "snapshot_wait_seconds": 2.0,
-    "persist": true,
+    "persist": false,
     "cache_latest": true
   }'
 ```
@@ -815,6 +816,7 @@ A per-IP rate limiter middleware protects the API:
 
 - Configurable via `IBKR_REST_RATE_LIMIT_PER_MINUTE` (default 120 requests/minute).
 - Uses a Redis-backed sliding window with an in-process token bucket fallback when Redis is unavailable.
+- `X-Forwarded-For` and `X-Real-IP` are honored only when the immediate peer is in `IBKR_REST_TRUSTED_PROXIES`.
 - Excluded paths (no rate limiting): `/docs`, `/redoc`, `/openapi.json`, `/metrics`.
 - When rate-limited, the API returns **429 Too Many Requests** with a **Retry-After** header (value: 60 seconds).
 

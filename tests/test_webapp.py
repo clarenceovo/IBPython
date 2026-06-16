@@ -2195,7 +2195,7 @@ def test_fx_option_ohlcv_wrapper_and_snapshot_collection() -> None:
                     }
                 ],
                 "snapshot_wait_seconds": 0.01,
-                "persist": True,
+                "persist": False,
                 "cache_latest": True,
             },
         )
@@ -2228,7 +2228,7 @@ def test_equity_snapshot_capture_preserves_symbol_identity_and_cleans_up_tickers
     with TestClient(app) as client:
         response = client.post(
             "/api/v1/snapshot/capture",
-            json={"symbols": ["AAPL", "MSFT"], "persist": True, "cache_latest": True},
+            json={"symbols": ["AAPL", "MSFT"], "persist": False, "cache_latest": True},
         )
 
     assert response.status_code == 200
@@ -2240,6 +2240,44 @@ def test_equity_snapshot_capture_preserves_symbol_identity_and_cleans_up_tickers
     assert body["snapshots"][0]["symbol"] == "MSFT"
     assert state.redis.equity_snapshots["MSFT"].symbol == "MSFT"
     assert len(state.feed.cancelled_equity_tickers) == 1
+
+
+def test_snapshot_capture_rejects_api_persistence_requests() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/snapshot/capture",
+            json={"symbols": ["AAPL"], "persist": True},
+        )
+
+    assert response.status_code == 501
+    assert "API snapshot persistence is disabled" in response.json()["detail"]
+
+
+def test_fx_option_snapshot_capture_rejects_api_persistence_requests() -> None:
+    state = FakeState()
+    app = create_app(settings=state.settings, state=state)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/snapshot/fx-options/capture",
+            json={
+                "contracts": [
+                    {
+                        "symbol": "EURUSD",
+                        "expiry": "20260619",
+                        "strike": 1.10,
+                        "right": "C",
+                    }
+                ],
+                "persist": True,
+            },
+        )
+
+    assert response.status_code == 501
+    assert "API FX option snapshot persistence is disabled" in response.json()["detail"]
 
 
 def test_commodity_metadata_ticks_news_and_business_front_forward_contracts() -> None:
@@ -2494,3 +2532,29 @@ def test_api_bearer_auth_enabled_rejects_empty_token() -> None:
         )
 
     assert response.status_code == 401
+
+
+def test_rate_limiter_ignores_forwarded_ip_from_untrusted_peer() -> None:
+    from src.webapp.middleware.security import RateLimiterMiddleware
+
+    limiter = RateLimiterMiddleware(lambda scope, receive, send: None, trusted_proxies="")
+    scope = {
+        "type": "http",
+        "client": ("127.0.0.1", 12345),
+        "headers": [(b"x-forwarded-for", b"203.0.113.10")],
+    }
+
+    assert limiter._get_client_ip(scope) == "127.0.0.1"
+
+
+def test_rate_limiter_honors_forwarded_ip_from_trusted_peer() -> None:
+    from src.webapp.middleware.security import RateLimiterMiddleware
+
+    limiter = RateLimiterMiddleware(lambda scope, receive, send: None, trusted_proxies="127.0.0.1/32")
+    scope = {
+        "type": "http",
+        "client": ("127.0.0.1", 12345),
+        "headers": [(b"x-forwarded-for", b"203.0.113.10, 10.0.0.10")],
+    }
+
+    assert limiter._get_client_ip(scope) == "203.0.113.10"

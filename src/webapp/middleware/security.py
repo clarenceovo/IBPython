@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from ipaddress import ip_address, ip_network
 from typing import Any, Callable, Awaitable
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,7 @@ class RateLimiterMiddleware:
         redis_url: str = "",
         redis_password: str = "",
         rate_limit_per_minute: int = 120,
+        trusted_proxies: str = "",
     ) -> None:
         self.app = app
         self._rate_limit_per_minute = rate_limit_per_minute
@@ -96,11 +98,38 @@ class RateLimiterMiddleware:
         self._redis: Any = None  # lazy-init async Redis client
         self._buckets: dict[str, _TokenBucket] = {}
         self._refill_rate = rate_limit_per_minute / 60.0  # tokens per second
+        self._trusted_proxy_networks = self._parse_trusted_proxies(trusted_proxies)
 
     # -- IP extraction -------------------------------------------------------
 
     @staticmethod
-    def _get_client_ip(scope: dict[str, Any]) -> str:
+    def _parse_trusted_proxies(value: str) -> tuple[Any, ...]:
+        networks = []
+        for item in value.split(","):
+            text = item.strip()
+            if not text:
+                continue
+            try:
+                networks.append(ip_network(text, strict=False))
+            except ValueError:
+                logger.warning("Ignoring invalid trusted proxy entry: %s", text)
+        return tuple(networks)
+
+    def _is_trusted_proxy(self, peer_ip: str) -> bool:
+        if not self._trusted_proxy_networks:
+            return False
+        try:
+            parsed = ip_address(peer_ip)
+        except ValueError:
+            return False
+        return any(parsed in network for network in self._trusted_proxy_networks)
+
+    def _get_client_ip(self, scope: dict[str, Any]) -> str:
+        client = scope.get("client")
+        peer_ip = client[0] if client else "unknown"
+        if not self._is_trusted_proxy(peer_ip):
+            return peer_ip
+
         headers = dict(scope.get("headers", []))
         # X-Forwarded-For: client, proxy1, proxy2
         xff = headers.get(b"x-forwarded-for")
@@ -113,13 +142,14 @@ class RateLimiterMiddleware:
             ip = xri.decode("latin-1").strip()
             if ip:
                 return ip
-        # Direct ASGI client
-        client = scope.get("client")
-        if client:
-            return client[0]
-        return "unknown"
+        return peer_ip
 
     # -- Redis helpers -------------------------------------------------------
+
+    async def close(self) -> None:
+        if self._redis is not None:
+            await self._redis.aclose()
+            self._redis = None
 
     async def _get_redis(self) -> Any:
         if self._redis is not None:

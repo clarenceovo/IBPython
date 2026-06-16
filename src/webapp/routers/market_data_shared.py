@@ -475,6 +475,12 @@ async def load_ohlcv_with_controls(
     cache_namespace: str,
     state: IBKRRestAppState,
 ) -> list[OHLCVBar]:
+    if persist:
+        raise HTTPException(
+            status_code=501,
+            detail="API OHLCV persistence is disabled; use the scheduler/backfiller persistence path",
+        )
+
     auto_chunk_plan = None
     if start_datetime is None:
         auto_chunk_plan = plan_historical_auto_chunk(request)
@@ -529,8 +535,6 @@ async def load_ohlcv_with_controls(
         except HistoricalRequestTooLargeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        if persist:
-            logger.info("FastAPI OHLCV persist requested for %s but API persistence is disabled; scheduler owns storage", request.symbol)
         if cache_latest and bars:
             await state.loader.cache_latest_bar(bars[-1])
 
@@ -540,8 +544,6 @@ async def load_ohlcv_with_controls(
 
     # Single-chunk fetch (original behavior).
     async def load() -> list[OHLCVBar]:
-        if persist:
-            logger.info("FastAPI OHLCV persist requested for %s but API persistence is disabled; scheduler owns storage", request.symbol)
         return await state.loader.load(
             request,
             persist=False,

@@ -462,6 +462,31 @@ class IBKRWebAPIClient:
         self.verify_ssl = verify_ssl
         self.timeout_seconds = timeout_seconds
         self._transport = transport
+        self._client: httpx.AsyncClient | None = None
+
+    def _headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {"Accept": "application/json"}
+        if self.bearer_token:
+            headers["Authorization"] = f"Bearer {self.bearer_token}"
+        if self.cookie:
+            headers["Cookie"] = self.cookie
+        return headers
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                base_url=self.base_url,
+                headers=self._headers(),
+                verify=self.verify_ssl,
+                timeout=self.timeout_seconds,
+                transport=self._transport,
+            )
+        return self._client
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def load_category_tree(self) -> list[EventContractCategoryNode]:
         payload = await self._request("GET", "/trsrv/event/category-tree")
@@ -562,19 +587,7 @@ class IBKRWebAPIClient:
         params: Mapping[str, Any] | None = None,
         json: Any | None = None,
     ) -> Any:
-        headers: dict[str, str] = {"Accept": "application/json"}
-        if self.bearer_token:
-            headers["Authorization"] = f"Bearer {self.bearer_token}"
-        if self.cookie:
-            headers["Cookie"] = self.cookie
-        async with httpx.AsyncClient(
-            base_url=self.base_url,
-            headers=headers,
-            verify=self.verify_ssl,
-            timeout=self.timeout_seconds,
-            transport=self._transport,
-        ) as client:
-            response = await client.request(method, path, params=params, json=json)
+        response = await self._get_client().request(method, path, params=params, json=json)
         response.raise_for_status()
         if not response.content:
             return {}

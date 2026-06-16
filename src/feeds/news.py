@@ -59,7 +59,7 @@ class HistoricalNewsRequest(BaseModel):
 
     @property
     def provider_codes_param(self) -> str:
-        return ",".join(self.provider_codes)
+        return "+".join(self.provider_codes)
 
 
 class HistoricalNewsHeadline(BaseModel):

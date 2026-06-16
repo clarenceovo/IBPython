@@ -16,6 +16,7 @@ import asyncio
 import inspect
 import logging
 import uuid as _uuid
+from types import SimpleNamespace
 from typing import Any
 
 from src.feeds.ibkr_connection import IBKRConnectionManager, wait_for_ibkr_request
@@ -23,6 +24,8 @@ from src.feeds.contracts import ContractSpec, build_ibkr_contract
 from src.feeds.models import AssetClass
 from src.feeds.exceptions import IBKROrderError
 from src.feeds.orders import (
+    BracketOrderRequest,
+    BracketOrderResponse,
     CachedOrderLookup,
     CancelOrderResponse,
     CompletedOrder,
@@ -30,6 +33,8 @@ from src.feeds.orders import (
     ExecutionRequest,
     ExecutionResponse,
     ModifyOrderRequest,
+    OcaGroupRequest,
+    OcaOrderResponse,
     OpenOrder,
     OrderAction,
     OrderEnvelope,
@@ -155,23 +160,42 @@ class IBKROrderClient:
         """Build an ib_insync Contract from a PlaceOrderRequest."""
         asset_class = _asset_class_from_sec_type(request.sec_type)
         if asset_class is not None:
-            return build_ibkr_contract(
-                ContractSpec(
-                    symbol=request.symbol,
-                    asset_class=asset_class,
-                    exchange=request.exchange,
-                    currency=request.currency,
-                    primary_exchange=request.primary_exchange,
-                    last_trade_date_or_contract_month=request.last_trade_date_or_contract_month,
-                    multiplier=request.multiplier,
-                    local_symbol=request.local_symbol,
-                    sec_id_type=request.sec_id_type,
-                    sec_id=request.sec_id,
-                    con_id=request.con_id,
-                )
+            spec = ContractSpec(
+                symbol=request.symbol,
+                asset_class=asset_class,
+                exchange=request.exchange,
+                currency=request.currency,
+                primary_exchange=request.primary_exchange,
+                last_trade_date_or_contract_month=request.last_trade_date_or_contract_month,
+                multiplier=request.multiplier,
+                local_symbol=request.local_symbol,
+                sec_id_type=request.sec_id_type,
+                sec_id=request.sec_id,
+                con_id=request.con_id,
             )
-        from ib_insync import Contract
-        contract = Contract()
+            try:
+                return build_ibkr_contract(spec)
+            except RuntimeError:
+                logger.debug("ib_insync Contract unavailable; using simple contract namespace", exc_info=True)
+                return SimpleNamespace(
+                    symbol=spec.symbol,
+                    secType=request.sec_type,
+                    exchange=spec.exchange,
+                    currency=spec.currency,
+                    primaryExchange=spec.primary_exchange or "",
+                    lastTradeDateOrContractMonth=spec.last_trade_date_or_contract_month or "",
+                    multiplier=spec.multiplier or "",
+                    localSymbol=spec.local_symbol or "",
+                    secIdType=spec.sec_id_type or "",
+                    secId=spec.sec_id or "",
+                    conId=spec.con_id or 0,
+                )
+        try:
+            from ib_insync import Contract
+            contract = Contract()
+        except ImportError:
+            logger.debug("ib_insync Contract unavailable; using simple contract namespace", exc_info=True)
+            contract = SimpleNamespace()
         contract.symbol = request.symbol
         contract.secType = request.sec_type
         contract.exchange = request.exchange
@@ -180,8 +204,12 @@ class IBKROrderClient:
 
     def _build_ibkr_order(self, request: PlaceOrderRequest, *, what_if: bool = False) -> Any:
         """Build an ib_insync Order from a PlaceOrderRequest."""
-        from ib_insync import Order
-        order = Order()
+        try:
+            from ib_insync import Order
+            order = Order()
+        except ImportError:
+            logger.debug("ib_insync Order unavailable; using simple order namespace", exc_info=True)
+            order = SimpleNamespace()
         order.action = request.action.value
         order.orderType = request.order_type.value
         order.totalQuantity = request.quantity
@@ -668,9 +696,12 @@ class IBKROrderClient:
             request.symbol,
             request.since,
         )
-        from ib_insync import ExecutionFilter
-
-        exec_filter = ExecutionFilter()
+        try:
+            from ib_insync import ExecutionFilter
+            exec_filter = ExecutionFilter()
+        except ImportError:
+            logger.debug("ib_insync ExecutionFilter unavailable; using simple namespace", exc_info=True)
+            exec_filter = SimpleNamespace()
         if request.account_id:
             exec_filter.acctCode = request.account_id
         if request.symbol:
@@ -710,6 +741,216 @@ class IBKROrderClient:
         result = [normalize_completed_order(trade) for trade in (trades or [])]
         logger.info("load_completed_orders: %d completed orders loaded", len(result))
         return result
+
+    # ------------------------------------------------------------------
+    # Bracket and OCA orders
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sec_type_from_asset_class(value: str) -> str:
+        mapping = {
+            "EQUITY": "STK",
+            "STOCK": "STK",
+            "STK": "STK",
+            "FUTURES": "FUT",
+            "FUTURE": "FUT",
+            "FUT": "FUT",
+            "OPTION": "OPT",
+            "OPT": "OPT",
+            "FX": "CASH",
+            "CASH": "CASH",
+            "INDEX": "IND",
+            "IND": "IND",
+            "BOND": "BOND",
+        }
+        return mapping.get(value.strip().upper(), "STK")
+
+    @classmethod
+    def _simple_contract(cls, *, symbol: str, asset_class: str, exchange: str, currency: str) -> Any:
+        sec_type = cls._sec_type_from_asset_class(asset_class)
+        try:
+            from ib_insync import Contract
+            return Contract(
+                symbol=symbol,
+                secType=sec_type,
+                exchange=exchange,
+                currency=currency,
+            )
+        except ImportError:
+            logger.debug("ib_insync Contract unavailable; using simple contract namespace", exc_info=True)
+            return SimpleNamespace(symbol=symbol, secType=sec_type, exchange=exchange, currency=currency, conId=0)
+
+    async def place_bracket_order(self, request: BracketOrderRequest) -> BracketOrderResponse:
+        """Place a parent order with attached take-profit and stop-loss orders."""
+        await self._connection.ensure_connected()
+        order_uuid = str(_uuid.uuid4())
+        logger.info(
+            "place_bracket_order: uuid=%s symbol=%s action=%s qty=%s",
+            order_uuid,
+            request.symbol,
+            request.action.value,
+            request.quantity,
+        )
+
+        envelope = OrderEnvelope(
+            order_uuid=order_uuid,
+            action="bracket",
+            request=request.model_dump(mode="json"),
+            account_id=request.account or None,
+            metadata={"symbol": request.symbol, "action": request.action.value, "order_type": request.order_type.value},
+        )
+        await self._cache_envelope(envelope, ttl_seconds=0)
+
+        contract = self._simple_contract(
+            symbol=request.symbol,
+            asset_class=request.asset_class,
+            exchange=request.exchange,
+            currency=request.currency,
+        )
+        qualified = await self._connection.with_retry(
+            lambda: self._ib.qualifyContractsAsync(contract),
+            operation=f"qualify_bracket_contract:{request.symbol}",
+        )
+        if not qualified:
+            raise IBKROrderError(f"Could not qualify contract for {request.symbol}")
+        contract = qualified[0]
+
+        bracket = self._ib.bracketOrder(
+            action=request.action.value,
+            quantity=request.quantity,
+            limitPrice=request.limit_price or 0.0,
+            takeProfitPrice=request.take_profit_price,
+            stopLossPrice=request.stop_loss_price,
+        )
+        if not getattr(bracket, "orders", None) or len(bracket.orders) < 3:
+            raise IBKROrderError("IBKR did not build the expected three-leg bracket order")
+
+        bracket.orders[0].orderType = request.order_type.value
+        bracket.orders[0].tif = request.tif.value
+        if request.account:
+            for order in bracket.orders:
+                order.account = request.account
+                order.acctCode = request.account
+        for order in bracket.orders:
+            order.orderRef = order_uuid
+
+        trades = []
+        try:
+            for index, order in enumerate(bracket.orders):
+                await wait_for_ibkr_request(self._connection, operation=f"place_bracket_order:{request.symbol}:{index}")
+                trades.append(self._ib.placeOrder(contract, order))
+        except Exception:
+            envelope.status = OrderStatus.INACTIVE
+            envelope.response = {"error": "bracket order submission failed"}
+            await self._cache_envelope(envelope, ttl_seconds=0)
+            raise
+
+        response = BracketOrderResponse(
+            symbol=request.symbol,
+            action=request.action,
+            quantity=request.quantity,
+            orders_placed=len(trades),
+            parent_order_id=getattr(bracket.orders[0], "orderId", None),
+            take_profit_order_id=getattr(bracket.orders[1], "orderId", None),
+            stop_loss_order_id=getattr(bracket.orders[2], "orderId", None),
+            order_uuid=order_uuid,
+        )
+        envelope.ibkr_order_id = response.parent_order_id
+        envelope.status = OrderStatus.SUBMITTED
+        envelope.response = response.model_dump(mode="json")
+        await self._cache_envelope(envelope, ttl_seconds=0)
+        return response
+
+    async def place_oca_group(self, request: OcaGroupRequest) -> list[OcaOrderResponse]:
+        """Place an OCA group after qualifying every leg up front."""
+        await self._connection.ensure_connected()
+        order_uuid = str(_uuid.uuid4())
+        group_name = request.oca_group or f"oca_{_uuid.uuid4().hex[:8]}"
+        logger.info("place_oca_group: uuid=%s group=%s orders=%d", order_uuid, group_name, len(request.orders))
+
+        envelope = OrderEnvelope(
+            order_uuid=order_uuid,
+            action="oca",
+            request=request.model_dump(mode="json"),
+            account_id=request.account or None,
+            metadata={"oca_group": group_name, "orders": len(request.orders)},
+        )
+        await self._cache_envelope(envelope, ttl_seconds=0)
+
+        qualified_contracts: list[Any] = []
+        qualification_errors: list[str] = []
+        for item in request.orders:
+            contract = self._simple_contract(
+                symbol=item.symbol,
+                asset_class=item.asset_class,
+                exchange=item.exchange,
+                currency=item.currency,
+            )
+            try:
+                qualified = await self._connection.with_retry(
+                    lambda c=contract, s=item.symbol: self._ib.qualifyContractsAsync(c),
+                    operation=f"qualify_oca_contract:{item.symbol}",
+                )
+            except Exception as exc:
+                qualification_errors.append(f"{item.symbol}: {exc}")
+                continue
+            if not qualified:
+                qualification_errors.append(f"{item.symbol}: could not qualify contract")
+                continue
+            qualified_contracts.append(qualified[0])
+
+        if qualification_errors:
+            envelope.status = OrderStatus.INACTIVE
+            envelope.response = {"errors": qualification_errors}
+            await self._cache_envelope(envelope, ttl_seconds=0)
+            raise IBKROrderError("OCA group rejected before submission: " + "; ".join(qualification_errors))
+
+        try:
+            from ib_insync import Order
+        except ImportError:
+            logger.debug("ib_insync Order unavailable; using simple order namespace", exc_info=True)
+            Order = SimpleNamespace
+
+        responses: list[OcaOrderResponse] = []
+        try:
+            for item, contract in zip(request.orders, qualified_contracts, strict=True):
+                order = Order()
+                order.action = item.action.value
+                order.totalQuantity = item.quantity
+                order.orderType = item.order_type.value
+                order.tif = item.tif.value
+                order.ocaGroup = group_name
+                order.ocaType = request.oca_type
+                order.orderRef = order_uuid
+                if item.price is not None:
+                    order.lmtPrice = item.price
+                if request.account:
+                    order.account = request.account
+                    order.acctCode = request.account
+
+                await wait_for_ibkr_request(self._connection, operation=f"place_oca_order:{item.symbol}")
+                trade = self._ib.placeOrder(contract, order)
+                responses.append(
+                    OcaOrderResponse(
+                        symbol=item.symbol,
+                        action=item.action,
+                        quantity=item.quantity,
+                        order_id=getattr(trade.order, "orderId", getattr(order, "orderId", 0)) or 0,
+                        oca_group=group_name,
+                        order_uuid=order_uuid,
+                    )
+                )
+        except Exception:
+            envelope.status = OrderStatus.INACTIVE
+            envelope.response = {"error": "OCA group submission failed after qualification"}
+            await self._cache_envelope(envelope, ttl_seconds=0)
+            raise
+
+        envelope.ibkr_order_id = responses[0].order_id if responses else None
+        envelope.status = OrderStatus.SUBMITTED
+        envelope.response = {"orders": [item.model_dump(mode="json") for item in responses]}
+        await self._cache_envelope(envelope, ttl_seconds=0)
+        return responses
 
     # ------------------------------------------------------------------
     # Global cancel
@@ -795,8 +1036,12 @@ class IBKROrderClient:
             symbol, right, strike, expiry, action_label, quantity, account,
         )
 
-        from ib_insync import Option as IBKROption
-        contract = IBKROption()
+        try:
+            from ib_insync import Option as IBKROption
+            contract = IBKROption()
+        except ImportError:
+            logger.debug("ib_insync Option unavailable; using simple option namespace", exc_info=True)
+            contract = SimpleNamespace()
         contract.symbol = symbol.upper()
         contract.secType = "OPT"
         contract.exchange = exchange

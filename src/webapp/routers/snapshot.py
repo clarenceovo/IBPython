@@ -131,7 +131,7 @@ class FXOptionCaptureRequest(BaseModel):
     contracts: list[FXOptionContractRequest] = Field(min_length=1)
     snapshot_wait_seconds: float = Field(default=2.0, gt=0, le=30)
     generic_ticks: tuple[str, ...] = DEFAULT_OPTION_ANALYTICS_GENERIC_TICKS
-    persist: bool = True
+    persist: bool = Field(default=False, description="Deprecated: API snapshot persistence is disabled; use the scheduler snapshotter")
     cache_latest: bool = True
 
 
@@ -195,7 +195,7 @@ FX_OPTION_CAPTURE_EXAMPLES = {
                 }
             ],
             "snapshot_wait_seconds": 2.0,
-            "persist": True,
+            "persist": False,
             "cache_latest": True,
         },
     }
@@ -220,6 +220,12 @@ async def capture_snapshots(
     payload: Annotated[CaptureSnapshotsRequest, Body(openapi_examples=CAPTURE_SNAPSHOTS_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> SnapshotResult:
+    if payload.persist:
+        raise HTTPException(
+            status_code=501,
+            detail="API snapshot persistence is disabled; use the scheduler snapshotter",
+        )
+
     t0 = monotonic_time.monotonic()
     snapshots: list[EquitySnapshot] = []
     failed: list[str] = []
@@ -276,9 +282,6 @@ async def capture_snapshots(
             if resolved.symbol not in captured_symbols and resolved.symbol not in failed:
                 failed.append(resolved.symbol)
 
-        if payload.persist:
-            logger.info("FastAPI snapshot persist requested, but API persistence is disabled; scheduler owns QuestDB writes")
-
         # Cache latest in Redis
         if payload.cache_latest and snapshots and state.redis is not None:
             for snap in snapshots:
@@ -322,6 +325,12 @@ async def capture_fx_option_snapshots(
     payload: Annotated[FXOptionCaptureRequest, Body(openapi_examples=FX_OPTION_CAPTURE_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> FXOptionCaptureResult:
+    if payload.persist:
+        raise HTTPException(
+            status_code=501,
+            detail="API FX option snapshot persistence is disabled; use the scheduler snapshotter",
+        )
+
     symbols: list[str] = []
     contracts: list[OptionContractSpec] = []
     for item in payload.contracts:
@@ -336,10 +345,6 @@ async def capture_fx_option_snapshots(
         snapshot_wait_seconds=payload.snapshot_wait_seconds,
     )
 
-    persisted = 0
-    if payload.persist:
-        logger.info("FastAPI FX option snapshot persist requested, but API persistence is disabled; scheduler owns QuestDB writes")
-
     cached = 0
     if payload.cache_latest and snapshots and state.redis is not None:
         for snapshot in snapshots:
@@ -349,7 +354,7 @@ async def capture_fx_option_snapshots(
     return FXOptionCaptureResult(
         requested=len(payload.contracts),
         captured=len(snapshots),
-        persisted=persisted,
+        persisted=0,
         cached=cached,
         snapshots=snapshots,
     )

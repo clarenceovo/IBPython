@@ -135,12 +135,16 @@ from src.feeds.ibkr_reference_feed import (
 )
 from src.feeds.ibkr_order_client import IBKROrderClient
 from src.feeds.orders import (
+    BracketOrderRequest,
+    BracketOrderResponse,
     CachedOrderLookup,
     CancelOrderResponse,
     CompletedOrder,
     ExecutionRequest,
     ExecutionResponse,
     ModifyOrderRequest,
+    OcaGroupRequest,
+    OcaOrderResponse,
     OpenOrder,
     OrderEnvelope,
     OrderResponse,
@@ -738,6 +742,14 @@ class IBKRFeedClient:
     async def list_cached_orders(self) -> list[OrderEnvelope]:
         """List all cached order envelopes from Redis."""
         return await self._order_client.list_cached_orders()
+
+    async def place_bracket_order(self, request: BracketOrderRequest) -> BracketOrderResponse:
+        """Place a bracket order."""
+        return await self._order_client.place_bracket_order(request)
+
+    async def place_oca_group(self, request: OcaGroupRequest) -> list[OcaOrderResponse]:
+        """Place an OCA order group."""
+        return await self._order_client.place_oca_group(request)
 
     # ------------------------------------------------------------------
     # IBKR event handlers — delegated to connection manager

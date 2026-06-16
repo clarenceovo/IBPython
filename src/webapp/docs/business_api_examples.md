@@ -573,7 +573,8 @@ Content-Type: application/json
 ```
 
 The rate limit is configurable via the `IBKR_REST_RATE_LIMIT_PER_MINUTE`
-environment variable (see Configuration section below).
+environment variable (see Configuration section below). Forwarded client IP
+headers are honored only for peers listed in `IBKR_REST_TRUSTED_PROXIES`.
 
 ## Reference: CORS Configuration
 
@@ -652,12 +653,16 @@ Key environment variables for the REST API server:
 - **`IBKR_REST_CORS_ORIGINS`** — Comma-separated list of allowed CORS origins.
   Default: empty (CORS disabled).
 - **`IBKR_REST_RATE_LIMIT_PER_MINUTE`** — Maximum number of requests per client
-  per minute before the server returns 429. Default: `60`.
+  per minute before the server returns 429. Default: `120`.
+- **`IBKR_REST_TRUSTED_PROXIES`** — Comma-separated proxy IPs/CIDRs whose
+  `X-Forwarded-For` / `X-Real-IP` headers are trusted for rate limiting.
+  Default: empty, which ignores forwarded IP headers.
 
 ```bash
 # Example .env
 IBKR_REST_CORS_ORIGINS=https://dashboard.example.com
 IBKR_REST_RATE_LIMIT_PER_MINUTE=120
+IBKR_REST_TRUSTED_PROXIES=10.0.0.0/8,127.0.0.1
 ```
 
 ---

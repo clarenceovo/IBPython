@@ -216,6 +216,7 @@ def create_app(
         redis_url=resolved_settings.redis_url,
         redis_password=resolved_settings.redis_password,
         rate_limit_per_minute=resolved_settings.ibkr_rest_rate_limit_per_minute,
+        trusted_proxies=resolved_settings.ibkr_rest_trusted_proxies,
     )
 
     # Security response headers on every response
