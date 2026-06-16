@@ -12,7 +12,11 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from src.config.reference_data import is_known_index, resolve_future, resolve_index
 from src.feeds.exchange_resolver import resolve_equity
-from src.feeds.ibkr_historical import HistoricalRequestTooLargeError, ensure_historical_chunk_limit, plan_historical_auto_chunk
+from src.feeds.ibkr_historical import (
+    HistoricalRequestTooLargeError,
+    ensure_historical_chunk_limit,
+    plan_historical_auto_chunk,
+)
 from src.feeds.models import AssetClass, OHLCVBar, OHLCVRequest
 from src.transport.metrics import metrics
 from src.webapp.cache import stable_cache_key
@@ -40,8 +44,9 @@ class UnifiedOHLCVLoadRequest(BaseModel):
         json_schema_extra={
             "description": (
                 "Compact OHLCV request that auto-resolves equity, FX, index, and futures contracts. "
-                "Futures are selected when continuous, contract_month, local_symbol, or con_id is provided. "
-                "continuous=true uses IBKR secType=CONTFUT for historical data only. "
+                "Futures are selected when contract_month, local_symbol, or con_id is provided. "
+                "Bounded continuous futures windows are rejected because IBKR CONTFUT historical data "
+                "does not allow explicit start/end windows. "
                 "Options are intentionally excluded because IBKR OPT/FOP contracts require expiry, strike, and right; "
                 "use the option-specific endpoints for those requests."
             )
@@ -85,7 +90,8 @@ class UnifiedOHLCVLoadRequest(BaseModel):
         default=False,
         description=(
             "Request IBKR continuous futures historical bars using secType=CONTFUT. "
-            "Use this instead of contract_month/local_symbol/con_id. It is historical-data only, not tradable."
+            "The auto endpoint requires bounded start/end windows, so continuous=true is rejected here; "
+            "use the futures endpoint with duration and no start/end time for latest continuous bars."
         ),
     )
     asset_class: AssetClass | None = Field(
@@ -479,6 +485,17 @@ async def load_ohlcv_with_controls(
         raise HTTPException(
             status_code=501,
             detail="API OHLCV persistence is disabled; use the scheduler/backfiller persistence path",
+        )
+    if request.asset_class is AssetClass.FUTURE and request.continuous and (
+        start_datetime is not None or request.start_datetime is not None or request.end_datetime is not None
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "IBKR continuous futures (CONTFUT) historical data does not support bounded start/end windows. "
+                "Request latest bars with duration and no start/end time, or use a dated futures contract "
+                "with contract_month, local_symbol, or con_id for historical ranges."
+            ),
         )
 
     auto_chunk_plan = None

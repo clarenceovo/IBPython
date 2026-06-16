@@ -54,6 +54,10 @@ class HistoricalRequestTooLargeError(ValueError):
         )
 
 
+class HistoricalRequestUnsupportedError(ValueError):
+    """Raised when IBKR does not support the requested historical data shape."""
+
+
 def _contract_details_contract(detail: Any) -> Any:
     return getattr(detail, "contract", detail)
 
@@ -259,6 +263,26 @@ def _expired_future_end_datetime(contract: Any, request: OHLCVRequest) -> dateti
     if last_trade_date >= date.today():
         return None
     return datetime.combine(last_trade_date + timedelta(days=1), time.min, tzinfo=timezone.utc)
+
+
+def _ibkr_historical_end_datetime(contract: Any, request: OHLCVRequest) -> str:
+    if request.asset_class is AssetClass.FUTURE and request.continuous:
+        if request.end_datetime is not None:
+            raise HistoricalRequestUnsupportedError(
+                "IBKR continuous futures (CONTFUT) historical data does not allow end_datetime. "
+                "Request latest bars with duration and no start/end time, or use a dated futures contract "
+                "with contract_month, local_symbol, or con_id for bounded historical windows."
+            )
+        return ""
+
+    effective_end_datetime = request.end_datetime or _expired_future_end_datetime(contract, request)
+    if effective_end_datetime is not request.end_datetime and effective_end_datetime is not None:
+        logger.info(
+            "load_historical_ohlcv: clipping expired future %s end_datetime to %s",
+            request.symbol,
+            effective_end_datetime.isoformat(),
+        )
+    return _format_ibkr_end_datetime(effective_end_datetime)
 
 
 def _parse_ibkr_timestamp(value: Any) -> datetime:
@@ -494,6 +518,12 @@ class IBKRHistoricalClient:
         max_chunks: int = constants.DEFAULT_IBKR_HISTORICAL_MAX_CHUNKS,
     ) -> list[OHLCVBar]:
         """Paginated historical OHLCV fetch across a date range."""
+        if request.asset_class is AssetClass.FUTURE and request.continuous:
+            raise HistoricalRequestUnsupportedError(
+                "IBKR continuous futures (CONTFUT) historical data does not support bounded range loads. "
+                "Request latest bars with duration and no start/end time, or use a dated futures contract "
+                "with contract_month, local_symbol, or con_id for historical ranges."
+            )
         if end_datetime is None:
             end_datetime = datetime.now(timezone.utc)
         if start_datetime.tzinfo is None:
@@ -634,14 +664,7 @@ class IBKRHistoricalClient:
         logger.info("load_historical_ohlcv: symbol=%s bar_size=%s duration=%s", request.symbol, request.bar_size, request.duration)
         t0 = monotonic_time.monotonic()
         contract = await self.qualify_contract(ContractSpec.from_ohlcv_request(request))
-        effective_end_datetime = request.end_datetime or _expired_future_end_datetime(contract, request)
-        if effective_end_datetime is not request.end_datetime and effective_end_datetime is not None:
-            logger.info(
-                "load_historical_ohlcv: clipping expired future %s end_datetime to %s",
-                request.symbol,
-                effective_end_datetime.isoformat(),
-            )
-        end_datetime = _format_ibkr_end_datetime(effective_end_datetime)
+        end_datetime = _ibkr_historical_end_datetime(contract, request)
 
         try:
             await self._connection.pacing_guard.acquire(request)

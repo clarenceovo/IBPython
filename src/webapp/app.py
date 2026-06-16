@@ -38,7 +38,7 @@ from src.webapp.routers import (
     system,
     tick_data,
 )
-from src.feeds.ibkr_historical import HistoricalRequestTooLargeError
+from src.feeds.ibkr_historical import HistoricalRequestTooLargeError, HistoricalRequestUnsupportedError
 from src.feeds.exceptions import (
     IBKRConnectionError,
     IBKRCircuitOpenError,
@@ -298,6 +298,11 @@ def create_app(
     @fastapi_app.exception_handler(HistoricalRequestTooLargeError)
     async def historical_request_too_large_handler(_request: Request, exc: HistoricalRequestTooLargeError) -> JSONResponse:
         logger.warning("historical OHLCV request rejected: %s", exc)
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    @fastapi_app.exception_handler(HistoricalRequestUnsupportedError)
+    async def historical_request_unsupported_handler(_request: Request, exc: HistoricalRequestUnsupportedError) -> JSONResponse:
+        logger.warning("historical OHLCV request unsupported: %s", exc)
         return JSONResponse(status_code=422, content={"detail": str(exc)})
 
     @fastapi_app.exception_handler(QuestDBWriteError)

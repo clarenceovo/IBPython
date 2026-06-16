@@ -158,17 +158,6 @@ UNIFIED_OHLCV_REQUEST_EXAMPLES = {
             "interval": "1m",
         },
     },
-    "hsi_continuous_future_auto": {
-        "summary": "HSI continuous future auto-resolved",
-        "description": "continuous=true resolves HSI as an IBKR CONTFUT historical series on HKFE/HKD.",
-        "value": {
-            "symbol": "HSI",
-            "continuous": True,
-            "starttime": "2026-06-01T01:15:00Z",
-            "endtime": "2026-06-01T08:00:00Z",
-            "interval": "1m",
-        },
-    },
     "hsi_index_auto": {
         "summary": "HSI index auto-resolved",
         "description": "Without contract_month, HSI resolves as an index on HKFE/HKD.",
@@ -218,17 +207,6 @@ UNIFIED_OHLCV_REQUEST_EXAMPLES = {
         "value": {
             "symbol": "DJI",
             "contract_month": "202606",
-            "starttime": "2026-06-01T13:30:00Z",
-            "endtime": "2026-06-01T20:00:00Z",
-            "interval": "1m",
-        },
-    },
-    "dji_continuous_future_auto": {
-        "summary": "DJI continuous Dow future auto-resolved",
-        "description": "DJI plus continuous=true resolves to the YM continuous historical futures series on CBOT/USD.",
-        "value": {
-            "symbol": "DJI",
-            "continuous": True,
             "starttime": "2026-06-01T13:30:00Z",
             "endtime": "2026-06-01T20:00:00Z",
             "interval": "1m",
@@ -397,9 +375,10 @@ async def load_ohlcv(
         "Integrated OHLCV endpoint for compact requests. It auto-detects equity, FX, index, or future, normalizes "
         "compact intervals such as 1m and 1h, then forwards to the same IBKR historical loader used by the "
         "asset-specific endpoints. Dated futures are built as IBKR secType=FUT contracts and must include "
-        "contract_month, local_symbol, or con_id. continuous=true builds an IBKR secType=CONTFUT contract for "
-        "historical data only. Options are not accepted here because IBKR OPT/FOP contracts also require strike "
-        "and right; use /market-data/ohlcv/"
+        "contract_month, local_symbol, or con_id. Bounded continuous futures windows are rejected because IBKR "
+        "secType=CONTFUT historical data does not allow explicit start/end windows; use /market-data/ohlcv/futures "
+        "with duration and no start/end time for latest continuous bars. Options are not accepted here because "
+        "IBKR OPT/FOP contracts also require strike and right; use /market-data/ohlcv/"
         "commodity-options, /market-data/ohlcv/fx-options, or the option analytics/skew endpoints instead."
     ),
 )

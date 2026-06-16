@@ -953,12 +953,12 @@ def test_ohlcv_wrapper_swagger_examples_are_minimal_and_asset_specific() -> None
     assert generic_examples["spy_equity_full_request"]["value"]["request"]["asset_class"] == "equity"
     assert auto_examples["tsla_equity_auto"]["value"]["interval"] == "5m"
     assert auto_examples["hsi_future_auto"]["value"]["contract_month"] == "202606"
-    assert auto_examples["hsi_continuous_future_auto"]["value"]["continuous"] is True
+    assert "hsi_continuous_future_auto" not in auto_examples
     assert auto_examples["es_future_auto"]["value"]["symbol"] == "ES"
     assert auto_examples["nq_future_auto"]["value"]["symbol"] == "NQ"
     assert auto_examples["emd_future_auto"]["value"]["symbol"] == "EMD"
     assert auto_examples["dji_future_auto"]["value"]["symbol"] == "DJI"
-    assert auto_examples["dji_continuous_future_auto"]["value"]["continuous"] is True
+    assert "dji_continuous_future_auto" not in auto_examples
     assert "contract_month" not in auto_examples["hsi_index_auto"]["value"]
     assert auto_examples["mhi_future_auto"]["value"]["symbol"] == "MHI"
     assert auto_examples["le_commodity_future_auto"]["value"]["symbol"] == "LE"
@@ -1080,7 +1080,8 @@ def test_integrated_ohlcv_auto_endpoint_resolves_assets_and_contracts() -> None:
 
     assert equity.status_code == 200
     assert future.status_code == 200
-    assert continuous_future.status_code == 200
+    assert continuous_future.status_code == 422
+    assert "CONTFUT" in continuous_future.json()["detail"]
     assert commodity_future.status_code == 200
     assert cfe_future.status_code == 200
     assert dow_future.status_code == 200
@@ -1100,31 +1101,24 @@ def test_integrated_ohlcv_auto_endpoint_resolves_assets_and_contracts() -> None:
     assert requests[1].last_trade_date_or_contract_month == "202606"
     assert requests[1].use_rth is False
     assert requests[2].asset_class is AssetClass.FUTURE
-    assert requests[2].symbol == "HSI"
-    assert requests[2].exchange == "HKFE"
-    assert requests[2].currency == "HKD"
-    assert requests[2].continuous is True
-    assert requests[2].last_trade_date_or_contract_month is None
-    assert requests[2].use_rth is False
+    assert requests[2].symbol == "LE"
+    assert requests[2].exchange == "CME"
     assert requests[3].asset_class is AssetClass.FUTURE
-    assert requests[3].symbol == "LE"
-    assert requests[3].exchange == "CME"
+    assert requests[3].symbol == "VX"
+    assert requests[3].exchange == "CFE"
     assert requests[4].asset_class is AssetClass.FUTURE
-    assert requests[4].symbol == "VX"
-    assert requests[4].exchange == "CFE"
-    assert requests[5].asset_class is AssetClass.FUTURE
-    assert requests[5].symbol == "YM"
-    assert requests[5].exchange == "CBOT"
+    assert requests[4].symbol == "YM"
+    assert requests[4].exchange == "CBOT"
+    assert requests[4].currency == "USD"
+    assert requests[5].asset_class is AssetClass.FX
+    assert requests[5].exchange == "IDEALPRO"
     assert requests[5].currency == "USD"
-    assert requests[6].asset_class is AssetClass.FX
-    assert requests[6].exchange == "IDEALPRO"
-    assert requests[6].currency == "USD"
-    assert requests[6].what_to_show == "MIDPOINT"
-    assert requests[6].bar_size == "1 hour"
-    assert requests[7].asset_class is AssetClass.INDEX
-    assert requests[7].symbol == "HSI"
-    assert requests[7].exchange == "HKFE"
-    assert requests[7].currency == "HKD"
+    assert requests[5].what_to_show == "MIDPOINT"
+    assert requests[5].bar_size == "1 hour"
+    assert requests[6].asset_class is AssetClass.INDEX
+    assert requests[6].symbol == "HSI"
+    assert requests[6].exchange == "HKFE"
+    assert requests[6].currency == "HKD"
 
 
 def test_latest_bar_endpoint_documents_and_forwards_query_params() -> None:
