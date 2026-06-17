@@ -305,15 +305,11 @@ class IBKROptionsFeedClient:
             raise error
         generic_tick_list = request.generic_tick_list
         use_snapshot = not generic_tick_list
-        if generic_tick_list and request.regulatory_snapshot:
-            logger.warning(
-                "load_option_analytics: regulatory_snapshot ignored because IBKR snapshot market data "
-                "does not support generic ticks; using short-lived streaming subscription"
-            )
         logger.debug(
-            "load_option_analytics market data mode: snapshot=%s generic_ticks=%s",
+            "load_option_analytics market data mode: snapshot=%s generic_ticks=%s regulatory_snapshot=%s",
             use_snapshot,
             generic_tick_list or "none",
+            request.regulatory_snapshot,
         )
         operation = f"option_analytics:{request.contract.underlying_symbol}:{request.contract.expiry}"
         lease = await acquire_market_data_line(
@@ -328,7 +324,7 @@ class IBKROptionsFeedClient:
                 contract,
                 genericTickList=generic_tick_list,
                 snapshot=use_snapshot,
-                regulatorySnapshot=request.regulatory_snapshot if use_snapshot else False,
+                regulatorySnapshot=request.regulatory_snapshot,
                 mktDataOptions=[],
             )
         except Exception:

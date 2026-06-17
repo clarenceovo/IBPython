@@ -598,6 +598,7 @@ class IBKRMarketDataExtClient:
                             whatToShow=_bar_to_tick_what_to_show(request.what_to_show),
                             useRth=request.use_rth,
                             ignoreSize=True,
+                            miscOptions=[],
                         ),
                         operation=f"historical_ticks:{request.symbol}",
                     )
@@ -647,6 +648,8 @@ class IBKRMarketDataExtClient:
         IBKR documents the final argument as ``period``. ``ib_insync`` exposes
         it as ``reqHistogramDataAsync(contract, useRTH, period)`` and does not
         accept the raw-API-era ``timePeriod`` keyword.
+
+        Note: period format should be like "1 day", "1 week", "1 month", etc.
         """
         await self._connection.ensure_connected()
         logger.info(
@@ -767,7 +770,7 @@ class IBKRMarketDataExtClient:
                     contract,
                     whatToShow=request.what_to_show,
                     useRTH=request.use_rth,
-                    formatDate=2,
+                    formatDate=1,
                 ),
                 operation=f"head_timestamp:{request.symbol}",
             )
@@ -935,6 +938,9 @@ class IBKRMarketDataExtClient:
         """Request histogram data for a contract.
 
         Returns price/size buckets. ``count`` is included as a compatibility alias.
+
+        Args:
+            time_period: Period string like "1 day", "1 week", "1 month"
         """
         await self._connection.ensure_connected()
         logger.info(
@@ -996,9 +1002,10 @@ class IBKRMarketDataExtClient:
         contract = _build_contract(symbol, sec_type, exchange, currency)
 
         async def _request_realtime_bars() -> Any:
+            # IBKR only supports barSize=5 for real-time bars (5-second bars)
             return self._ib.reqRealTimeBars(
                 contract,
-                5,
+                5,  # barSize: IBKR only supports 5 for 5-second real-time bars
                 whatToShow=what_to_show,
                 useRTH=use_rth,
                 realTimeBarsOptions=[],

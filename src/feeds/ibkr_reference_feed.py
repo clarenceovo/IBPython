@@ -286,7 +286,7 @@ class IBKRReferenceFeedClient:
         await self._connection.ensure_connected()
         logger.info("load_news_article: provider=%s article_id=%s", request.provider_code, request.article_id)
         article = await self._connection.with_retry(
-            lambda: self._ib.reqNewsArticleAsync(request.article_id, request.provider_code),
+            lambda: self._ib.reqNewsArticleAsync(request.provider_code, request.article_id),
             operation=f"news_article:{request.provider_code}:{request.article_id}",
         )
         return normalize_news_article(article, request)
@@ -421,7 +421,13 @@ class IBKRReferenceFeedClient:
         )
         await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
         try:
-            ticker = self._ib.reqMktData(contract, "", False, False)
+            ticker = self._ib.reqMktData(
+                contract,
+                genericTickList="",
+                snapshot=False,
+                regulatorySnapshot=False,
+                mktDataOptions=[],
+            )
         except Exception:
             await lease.release()
             raise
@@ -479,7 +485,13 @@ class IBKRReferenceFeedClient:
                 )
                 await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
                 try:
-                    ticker = self._ib.reqMktData(contract, "", True, False)
+                    ticker = self._ib.reqMktData(
+                        contract,
+                        genericTickList="",
+                        snapshot=True,
+                        regulatorySnapshot=False,
+                        mktDataOptions=[],
+                    )
                 except Exception:
                     await lease.release()
                     raise
