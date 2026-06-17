@@ -261,25 +261,29 @@ def create_app(
         """Expose Prometheus-compatible metrics in text format."""
         return metrics.expose().encode("utf-8")
 
-    @fastapi_app.exception_handler(IBKRConnectionError)
-    async def ibkr_connection_error_handler(_request: Request, exc: IBKRConnectionError) -> JSONResponse:
-        logger.warning("IBKR connection error: %s", exc)
-        return JSONResponse(status_code=503, content={"detail": str(exc)})
+    # Simple exception→status mappings: one handler factory covers them all.
+    _exc_map = {
+        IBKRConnectionError: (503, logging.WARNING),
+        IBKRCircuitOpenError: (503, logging.WARNING),
+        IBKRContractResolutionError: (422, logging.WARNING),
+        IBKRMarketDataUnavailableError: (503, logging.WARNING),
+        IBKROrderError: (502, logging.WARNING),
+        HistoricalRequestTooLargeError: (422, logging.WARNING),
+        HistoricalRequestUnsupportedError: (422, logging.WARNING),
+        QuestDBWriteError: (503, logging.ERROR),
+        QuestDBConnectionError: (503, logging.ERROR),
+    }
 
-    @fastapi_app.exception_handler(IBKRCircuitOpenError)
-    async def ibkr_circuit_open_error_handler(_request: Request, exc: IBKRCircuitOpenError) -> JSONResponse:
-        logger.warning("IBKR circuit breaker open: %s", exc)
-        return JSONResponse(status_code=503, content={"detail": str(exc)})
+    def _make_handler(status_code: int, level: int):
+        async def _handler(_request: Request, exc: Exception) -> JSONResponse:
+            logger.log(level, "%s: %s", type(exc).__name__, exc)
+            return JSONResponse(status_code=status_code, content={"detail": str(exc)})
+        return _handler
 
-    @fastapi_app.exception_handler(IBKRContractResolutionError)
-    async def ibkr_contract_resolution_error_handler(_request: Request, exc: IBKRContractResolutionError) -> JSONResponse:
-        logger.warning("IBKR contract resolution error: %s", exc)
-        return JSONResponse(status_code=422, content={"detail": str(exc)})
+    for exc_type, (status, level) in _exc_map.items():
+        fastapi_app.add_exception_handler(exc_type, _make_handler(status, level))
 
-    @fastapi_app.exception_handler(IBKRMarketDataUnavailableError)
-    async def ibkr_market_data_unavailable_handler(_request: Request, exc: IBKRMarketDataUnavailableError) -> JSONResponse:
-        logger.warning("IBKR market data unavailable: %s", exc)
-        return JSONResponse(status_code=503, content={"detail": str(exc)})
+    # Handlers with special response logic stay explicit.
 
     @fastapi_app.exception_handler(IBKRPacingError)
     async def ibkr_pacing_error_handler(_request: Request, exc: IBKRPacingError) -> JSONResponse:
@@ -289,31 +293,6 @@ def create_app(
             content={"detail": str(exc)},
             headers={"Retry-After": "60"},
         )
-
-    @fastapi_app.exception_handler(IBKROrderError)
-    async def ibkr_order_error_handler(_request: Request, exc: IBKROrderError) -> JSONResponse:
-        logger.warning("IBKR order error: %s", exc)
-        return JSONResponse(status_code=502, content={"detail": str(exc)})
-
-    @fastapi_app.exception_handler(HistoricalRequestTooLargeError)
-    async def historical_request_too_large_handler(_request: Request, exc: HistoricalRequestTooLargeError) -> JSONResponse:
-        logger.warning("historical OHLCV request rejected: %s", exc)
-        return JSONResponse(status_code=422, content={"detail": str(exc)})
-
-    @fastapi_app.exception_handler(HistoricalRequestUnsupportedError)
-    async def historical_request_unsupported_handler(_request: Request, exc: HistoricalRequestUnsupportedError) -> JSONResponse:
-        logger.warning("historical OHLCV request unsupported: %s", exc)
-        return JSONResponse(status_code=422, content={"detail": str(exc)})
-
-    @fastapi_app.exception_handler(QuestDBWriteError)
-    async def questdb_write_error_handler(_request: Request, exc: QuestDBWriteError) -> JSONResponse:
-        logger.error("QuestDB write error: %s", exc)
-        return JSONResponse(status_code=503, content={"detail": str(exc)})
-
-    @fastapi_app.exception_handler(QuestDBConnectionError)
-    async def questdb_connection_error_handler(_request: Request, exc: QuestDBConnectionError) -> JSONResponse:
-        logger.error("QuestDB connection error: %s", exc)
-        return JSONResponse(status_code=503, content={"detail": str(exc)})
 
     @fastapi_app.exception_handler(RuntimeError)
     async def runtime_error_handler(_request: Request, exc: RuntimeError) -> JSONResponse:

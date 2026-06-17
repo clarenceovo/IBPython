@@ -1,18 +1,38 @@
 from __future__ import annotations
 
+import os
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.config import config_constant as constants
-from src.config.config_loader import ConfigLoader
 
 
-class Settings(BaseModel):
-    """Validated application settings loaded through ConfigLoader."""
+@contextmanager
+def _scoped_environ(environ: dict[str, str] | None = None):
+    """Temporarily replace os.environ — for test isolation."""
+    old = dict(os.environ)
+    os.environ.clear()
+    if environ:
+        os.environ.update(environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(old)
 
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+class Settings(BaseSettings):
+    """Validated application settings loaded from env vars and ``.env`` file."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+        populate_by_name=True,
+    )
 
     ibkr_host: str = Field(default=constants.DEFAULT_IBKR_HOST, alias=constants.IBKR_HOST_ENV)
     ibkr_port: int = Field(default=constants.DEFAULT_IBKR_PORT, alias=constants.IBKR_PORT_ENV)
@@ -211,16 +231,27 @@ class Settings(BaseModel):
         alias=constants.TELEGRAM_LOG_LEVEL_ENV,
     )
 
+    @field_validator("market_data_db_backend", mode="before")
+    @classmethod
+    def _lowercase_backend(cls, v: Any) -> Any:
+        return str(v).lower() if v else v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_blank_env_values(cls, data: Any) -> Any:
+        """Treat blank env values as unset — use field defaults instead."""
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if v != ""}
+        return data
+
     def __init__(self, **data: Any) -> None:
-        env_file = data.pop("_env_file", ".env")
         include_os_environ = data.pop("_include_os_environ", True)
-        environ = data.pop("_environ", None)
-        loaded_values = ConfigLoader(
-            env_file=env_file,
-            include_os_environ=include_os_environ,
-            environ=environ,
-        ).load(overrides=data)
-        super().__init__(**loaded_values)
+        custom_environ = data.pop("_environ", None)
+        if not include_os_environ or custom_environ is not None:
+            with _scoped_environ(custom_environ):
+                super().__init__(**data)
+        else:
+            super().__init__(**data)
 
     @property
     def questdb_dsn(self) -> str:
