@@ -414,6 +414,49 @@ when requesting Level II data.
 {"exchanges": ["SMART", "ISLAND", "ARCA", "NYSE", "BATS", "DRCTEDGE", "BEX", "EDGEA", "CHX", "NSDQ"]}
 ```
 
+## Equity Reference
+
+Shortable shares and dividend estimates use bounded streaming subscriptions
+(IBKR generic ticks 236 and 456) with a deadline. Null fields mean unavailable,
+not zero; `status` reports `available`, `partial`, or `unavailable`.
+
+<!-- openapi-example: marketData.loadEquityShortability aapl_shortable -->
+### AAPL shortable shares
+Only `symbol` is required; suffixes such as `0700.HK` resolve exchange and
+currency automatically. `timeout_seconds` accepts values up to 20.
+
+```json
+{
+  "symbol": "AAPL",
+  "timeout_seconds": 10
+}
+```
+
+<!-- openapi-example: marketData.loadEquityShortability unavailable_deadline -->
+### Deadline expiry
+When no ticks arrive before the deadline, counts stay null and `timed_out`
+is true. Zero is preserved as a valid observation.
+
+```json
+{
+  "symbol": "GME",
+  "exchange": "NYSE",
+  "timeout_seconds": 5
+}
+```
+
+<!-- openapi-example: marketData.loadEquityDividends aapl_dividends -->
+### AAPL dividends
+Past/next twelve-month dividend totals plus next dividend date and amount.
+Partial data (some fields observed) returns `status: partial` with HTTP 200.
+
+```json
+{
+  "symbol": "AAPL",
+  "timeout_seconds": 10
+}
+```
+
 ## Reference: WhatToShow Values
 
 All endpoints that accept a `what_to_show` parameter support these 15 values:

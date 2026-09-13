@@ -20,6 +20,7 @@ from src.feeds.models import (
     compute_ohlcv_quality,
 )
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
+from src.webapp.openapi_markdown import markdown_openapi_examples
 from src.webapp.routers.market_data_shared import (
     HistoricalOHLCVLoadRequest,
     MinimalOHLCVLoadControls,
@@ -530,7 +531,10 @@ async def get_latest_bar(
 
 @router.post("/equity/shortability", response_model=ShortabilityResponse)
 async def load_equity_shortability(
-    request: EquityReferenceRequest,
+    request: Annotated[
+        EquityReferenceRequest,
+        Body(openapi_examples=markdown_openapi_examples("marketData.loadEquityShortability")),
+    ],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> ShortabilityResponse:
     """Indicative short availability; a bounded subscription, not a share reservation."""
@@ -539,7 +543,10 @@ async def load_equity_shortability(
 
 @router.post("/equity/dividends", response_model=DividendsResponse)
 async def load_equity_dividends(
-    request: EquityReferenceRequest,
+    request: Annotated[
+        EquityReferenceRequest,
+        Body(openapi_examples=markdown_openapi_examples("marketData.loadEquityDividends")),
+    ],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> DividendsResponse:
     """Dividend estimates; unavailable fields remain null when the deadline expires."""

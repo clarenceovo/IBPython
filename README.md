@@ -234,8 +234,8 @@ Main route groups:
 - `/api/v1/business/*`: research-friendly wrappers for curves, news, market panels, returns, option skew, commodity futures, and portfolio risk
 - `/api/v1/business/event-contracts/*`: ForecastEx/CME Event Contract discovery, snapshots, history, websocket message helpers, and guarded Web API order tickets
 - `/api/v1/business/fixed-income/*`: bond futures quotes, CTD analytics, futures-implied curves, and cash/futures curve comparison
-- `/api/v1/system/*`: health, readiness, rate-limit diagnostics, and TTL cache controls
-- `/api/v1/market-data/*`: OHLCV, latest Redis bars, option analytics, commodity futures/options, bond yield history
+- `/api/v1/system/*`: health, readiness, rate-limit diagnostics, TTL cache controls, and gateway capability reporting
+- `/api/v1/market-data/*`: OHLCV, latest Redis bars, option analytics, commodity futures/options, bond yield history, equity shortability/dividends reference
 - `/api/v1/reference-data/*`: option chains, deprecated fundamentals (410), WSH events/economic calendar, news
 - `/api/v1/account/*`: account summary, live positions, portfolio, PnL snapshots
 - `/api/v1/orders/*`: protected order lifecycle, execution lookup, what-if preview, and order-envelope cache
@@ -313,10 +313,10 @@ POST /api/v1/realtime-bars/start
 GET  /api/v1/realtime-bars/status
 DELETE /api/v1/realtime-bars/stop/{symbol}
 GET  /api/v1/realtime-bars/stream/{symbol}
-GET  /api/v1/system/server-time
-GET  /api/v1/system/capabilities
 POST /api/v1/market-data/equity/shortability
 POST /api/v1/market-data/equity/dividends
+GET  /api/v1/system/server-time
+GET  /api/v1/system/capabilities
 POST /api/v1/system/market-data-type
 GET  /api/v1/market-data/depth/exchanges
 ```
@@ -332,11 +332,16 @@ Resource-creation endpoints return **201 Created**:
 
 DELETE endpoints intentionally return **200** with a response body.
 
+Removed IBKR features return **410 Gone** with an explicit unsupported-feature error:
+
+- `POST /reference-data/fundamentals` → 410 (IBKR removed fundamental report requests in API 10.47)
+
 ### Pagination
 
 List endpoints accept `limit` (default varies by endpoint) and `offset` (default 0) query parameters:
 
 - `GET /orders/open` — limit default 100, max 1000
+- `GET /orders/open/all` — limit default 100, max 1000 (snapshot across API clients in associated accounts)
 - `GET /orders/completed` — limit default 100, max 1000
 - `GET /orders/cache` — limit default 100, max 1000
 - `GET /account/summary` — limit default 50, max 500
@@ -818,6 +823,16 @@ Returns the IBKR server time, useful for latency measurement and clock synchroni
 curl http://localhost:8000/api/v1/system/server-time
 ```
 
+### Gateway Capabilities
+
+Reports the installed client package/version, connection state, negotiated server protocol, and per-feature implementation status without opening a brokerage connection:
+
+```bash
+curl http://localhost:8000/api/v1/system/capabilities
+```
+
+`availability: unknown` means a feature's live support, entitlements, and instrument availability have not been verified — it does not mean an account has access. The negotiated protocol is not the installed TWS/IB Gateway application version.
+
 ### Market Data Type
 
 Switches the IBKR market data type for the session. This affects all subsequent market data requests. See [IBKR Market Data Type](https://interactivebrokers.github.io/tws-api/market_data_type.html) for details.
@@ -1048,7 +1063,7 @@ OrderCache::<order_uuid>
 
 ## MCP Server
 
-The MCP (Model Context Protocol) server exposes 57 tools for IBKR market data, order management, and account operations. It connects to TWS/IB Gateway using a separate client ID (`IBKR_MCP_CLIENT_ID`, default `301`) and disconnects after a configurable idle period (`MCP_IBKR_IDLE_DISCONNECT_SECONDS`, default `120`).
+The MCP (Model Context Protocol) server exposes 64 tools for IBKR market data, order management, and account operations. It connects to TWS/IB Gateway using a separate client ID (`IBKR_MCP_CLIENT_ID`, default `301`) and disconnects after a configurable idle period (`MCP_IBKR_IDLE_DISCONNECT_SECONDS`, default `120`).
 
 ### Market Data
 
@@ -1059,6 +1074,9 @@ The MCP (Model Context Protocol) server exposes 57 tools for IBKR market data, o
 - `get_depth_exchanges` — L2 market depth exchange list
 - `set_market_data_type` — switch IBKR market data type (live/frozen/delayed)
 - `get_server_time` — IBKR server time for latency/clock sync
+- `get_gateway_capabilities` — local client/feature capability report (no IBKR connection)
+- `load_equity_shortability` — indicative shortable shares via bounded subscription (generic tick 236)
+- `load_equity_dividends` — past/next twelve-month dividend estimates, next date/amount (generic tick 456)
 
 ### Historical Analytics
 
@@ -1070,7 +1088,7 @@ The MCP (Model Context Protocol) server exposes 57 tools for IBKR market data, o
 ### Reference Data
 
 - `get_option_chain` — option chain discovery
-- `get_fundamentals` — company fundamentals
+- `get_fundamentals` — unsupported: IBKR removed fundamental reports in API 10.47 (tool returns an explicit error without connecting)
 - `get_wsh_events` — Wall Street Horizon events
 - `get_economic_calendar` — economic calendar events
 - `get_news_bulletins` — IBKR system news bulletins
