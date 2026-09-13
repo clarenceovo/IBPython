@@ -14,6 +14,9 @@ All existing import paths remain backward-compatible:
 
 from __future__ import annotations
 
+from src.feeds.equity_reference import EquityReferenceClient, EquityReferenceRequest, ShortabilityResponse, DividendsResponse
+from src.feeds.capabilities import GatewayCapabilities, gateway_capabilities
+
 import asyncio
 import logging
 import time as monotonic_time
@@ -238,6 +241,7 @@ class IBKRFeedClient:
         self._reference = IBKRReferenceFeedClient(self._connection, self._historical)
         self._order_client = IBKROrderClient(self._connection, redis=redis)
         self._marketdata_ext = IBKRMarketDataExtClient(self._connection)
+        self._equity_reference = EquityReferenceClient(self._connection, self._historical)
 
     # Backward-compatible internal accessors
     @property
@@ -948,6 +952,15 @@ class IBKRFeedClient:
     # ------------------------------------------------------------------
     # Server time — delegated to connection manager
     # ------------------------------------------------------------------
+
+    def get_capabilities(self) -> GatewayCapabilities:
+        return gateway_capabilities(self._connection)
+
+    async def load_equity_shortability(self, request: EquityReferenceRequest) -> ShortabilityResponse:
+        return await self._equity_reference.load_shortability(request)
+
+    async def load_equity_dividends(self, request: EquityReferenceRequest) -> DividendsResponse:
+        return await self._equity_reference.load_dividends(request)
 
     async def get_server_time(self) -> dict[str, Any]:
         """Request the current IBKR server time."""

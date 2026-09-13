@@ -41,6 +41,7 @@ from src.webapp.routers import (
 from src.feeds.ibkr_historical import HistoricalRequestTooLargeError, HistoricalRequestUnsupportedError
 from src.feeds.exceptions import (
     IBKRConnectionError,
+    IBKRUnsupportedFeatureError,
     IBKRCircuitOpenError,
     IBKRContractResolutionError,
     IBKRMarketDataUnavailableError,
@@ -146,7 +147,7 @@ def create_app(
             "- **Business** — Research-friendly wrappers for curves, news, market panels, returns, option skew, commodity futures, portfolio risk, and Event Contracts\n"
             "- **Fixed Income** — IBKR bond futures prices, CTD analytics, and futures-implied curves\n"
             "- **Market Data** — OHLCV bars, DOM/L2 snapshots, FX/commodity options, option analytics/skew, bond yields, and latest bars\n"
-            "- **Reference Data** — Option chains, fundamentals, WSH events, news, contract search\n"
+            "- **Reference Data** — Option chains, WSH events (legacy fundamentals return 410), news, contract search\n"
             "- **Account** — Positions, portfolio, P&L snapshots\n"
             "- **Orders** — Place, cancel, modify orders; execution details; explicit what-if margin preview\n"
             "- **Streaming** — Real-time market data via SSE\n"
@@ -264,6 +265,7 @@ def create_app(
     # Simple exception→status mappings: one handler factory covers them all.
     _exc_map = {
         IBKRConnectionError: (503, logging.WARNING),
+        IBKRUnsupportedFeatureError: (410, logging.WARNING),
         IBKRCircuitOpenError: (503, logging.WARNING),
         IBKRContractResolutionError: (422, logging.WARNING),
         IBKRMarketDataUnavailableError: (503, logging.WARNING),

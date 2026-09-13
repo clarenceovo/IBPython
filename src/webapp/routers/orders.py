@@ -264,3 +264,14 @@ async def place_oca_group(
     Requires at least 2 orders.
     """
     return await state.feed.place_oca_group(payload)
+
+
+@router.get("/open/all", response_model=list[OpenOrder], summary="Snapshot open orders across API clients")
+async def load_all_open_orders(
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    state: IBKRRestAppState = Depends(require_order_bearer_token),
+) -> list[OpenOrder]:
+    """One-time snapshot in associated accounts; does not bind orders for modification."""
+    results = await state.feed.get_all_open_orders()
+    return results[offset : offset + limit]

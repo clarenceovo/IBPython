@@ -219,7 +219,8 @@ async def load_option_chains(
     return await load()
 
 
-@router.post("/fundamentals", response_model=FundamentalDataReport)
+@router.post("/fundamentals", response_model=FundamentalDataReport, deprecated=True,
+             responses={410: {"description": "IBKR fundamental reports have been removed"}})
 async def load_fundamental_data(
     request: FundamentalDataRequest,
     state: IBKRRestAppState = Depends(get_rest_state),

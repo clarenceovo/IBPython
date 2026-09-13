@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.webapp.cache import CacheStats
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 from src.feeds.exceptions import ConnectionStatus
+from src.feeds.capabilities import GatewayCapabilities
 from src.config.config_constant import APP_VERSION
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -322,3 +323,9 @@ async def _redis_connection_status(state: IBKRRestAppState) -> str | None:
     except Exception:
         return ConnectionStatus.DOWN
     return "connected" if redis_ok else "down"
+
+
+@router.get("/capabilities", response_model=GatewayCapabilities)
+async def get_capabilities(state: IBKRRestAppState = Depends(get_rest_state)) -> GatewayCapabilities:
+    """Report local capabilities without opening a brokerage connection."""
+    return state.feed.get_capabilities()

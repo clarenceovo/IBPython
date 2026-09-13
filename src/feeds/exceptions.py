@@ -61,3 +61,7 @@ class ConnectionStatus:
     CONNECTED = "connected"
     DISCONNECTED = "disconnected"
     DOWN = "down"
+
+
+class IBKRUnsupportedFeatureError(IBKRError):
+    """The requested feature is no longer supported by this gateway."""

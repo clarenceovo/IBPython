@@ -754,15 +754,9 @@ async def load_fundamentals(
     exchange: str = "SMART",
     report_type: str = "ReportSnapshot",
 ) -> dict[str, Any]:
-    """Load fundamental data for a stock from IBKR.
+    """Unsupported legacy tool: IBKR removed fundamental reports in API 10.47.
 
-    Returns raw XML report from IBKR. Report types: ReportSnapshot, ReportsFinSummary,
-    ReportRatios, ReportsOwnership, ReportsFinStatements.
-
-    Args:
-        symbol: Stock symbol (e.g. 'AAPL', 'MSFT')
-        exchange: Exchange (default 'SMART')
-        report_type: Report type (default 'ReportSnapshot')
+    Retained to return an explicit error to existing callers. Does not connect to IBKR.
     """
     state = _state(ctx)
     from src.feeds.fundamental_data import FundamentalDataRequest
@@ -1981,6 +1975,40 @@ async def set_market_data_type(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
+async def get_gateway_capabilities(ctx: Context) -> dict[str, Any]:
+    """Report implementation and client capabilities without connecting to IBKR."""
+    return _state(ctx).feed.get_capabilities().model_dump(mode="json")
+
+
+@mcp.tool()
+async def load_equity_shortability(
+    ctx: Context, symbol: str, exchange: str | None = None, currency: str | None = None,
+    primary_exchange: str | None = None, con_id: int | None = None, timeout_seconds: float = 10,
+) -> dict[str, Any]:
+    """Get indicative shortable shares with a bounded subscription; null means unavailable, not zero."""
+    from src.feeds.equity_reference import EquityReferenceRequest
+    request = EquityReferenceRequest(
+        symbol=symbol, exchange=exchange, currency=currency, primary_exchange=primary_exchange,
+        con_id=con_id, timeout_seconds=timeout_seconds,
+    )
+    return (await _state(ctx).feed.load_equity_shortability(request)).model_dump(mode="json")
+
+
+@mcp.tool()
+async def load_equity_dividends(
+    ctx: Context, symbol: str, exchange: str | None = None, currency: str | None = None,
+    primary_exchange: str | None = None, con_id: int | None = None, timeout_seconds: float = 10,
+) -> dict[str, Any]:
+    """Get past/next twelve-month dividends and the next date/amount; partial data is explicit."""
+    from src.feeds.equity_reference import EquityReferenceRequest
+    request = EquityReferenceRequest(
+        symbol=symbol, exchange=exchange, currency=currency, primary_exchange=primary_exchange,
+        con_id=con_id, timeout_seconds=timeout_seconds,
+    )
+    return (await _state(ctx).feed.load_equity_dividends(request)).model_dump(mode="json")
+
+
+@mcp.tool()
 async def get_server_time(ctx: Context) -> dict[str, Any]:
     """Get IBKR server time. Useful for latency measurement and clock sync."""
     state = _state(ctx)
@@ -2681,7 +2709,10 @@ def get_server_status() -> str:
             "load_live_positions — IBKR live positions",
             "load_historical_ohlcv_live — Direct IBKR historical bars",
             "search_contracts — IBKR contract database search",
-            "load_fundamentals — IBKR fundamental data",
+            "load_fundamentals — Unsupported: IBKR removed fundamental reports",
+            "get_gateway_capabilities — Local client and feature support",
+            "load_equity_shortability — Indicative shortable shares",
+            "load_equity_dividends — Dividend estimates and next payment",
             "load_news — IBKR news feed",
             "query_equity_snapshots — QuestDB equity snapshots",
             "query_fx_option_snapshots — QuestDB FX option snapshots",

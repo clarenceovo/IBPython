@@ -236,7 +236,7 @@ Main route groups:
 - `/api/v1/business/fixed-income/*`: bond futures quotes, CTD analytics, futures-implied curves, and cash/futures curve comparison
 - `/api/v1/system/*`: health, readiness, rate-limit diagnostics, and TTL cache controls
 - `/api/v1/market-data/*`: OHLCV, latest Redis bars, option analytics, commodity futures/options, bond yield history
-- `/api/v1/reference-data/*`: option chains, fundamentals, WSH events/economic calendar, news
+- `/api/v1/reference-data/*`: option chains, deprecated fundamentals (410), WSH events/economic calendar, news
 - `/api/v1/account/*`: account summary, live positions, portfolio, PnL snapshots
 - `/api/v1/orders/*`: protected order lifecycle, execution lookup, what-if preview, and order-envelope cache
 - `/api/v1/histogram`: price histogram data for execution analysis
@@ -286,7 +286,7 @@ POST /api/v1/snapshot/fx-options/capture
 GET  /api/v1/snapshot/fx-options/latest
 POST /api/v1/snapshot/fx-options/query
 POST /api/v1/reference-data/options/chains
-POST /api/v1/reference-data/fundamentals
+POST /api/v1/reference-data/fundamentals  # deprecated; 410 Gone
 GET  /api/v1/reference-data/wsh/metadata
 POST /api/v1/reference-data/wsh/events
 POST /api/v1/reference-data/economic-calendar
@@ -302,6 +302,7 @@ POST /api/v1/orders/place
 POST /api/v1/orders/{order_id}/cancel
 POST /api/v1/orders/{order_id}/modify
 GET  /api/v1/orders/open
+GET  /api/v1/orders/open/all
 POST /api/v1/orders/executions
 POST /api/v1/orders/preview
 GET  /api/v1/orders/completed
@@ -313,6 +314,9 @@ GET  /api/v1/realtime-bars/status
 DELETE /api/v1/realtime-bars/stop/{symbol}
 GET  /api/v1/realtime-bars/stream/{symbol}
 GET  /api/v1/system/server-time
+GET  /api/v1/system/capabilities
+POST /api/v1/market-data/equity/shortability
+POST /api/v1/market-data/equity/dividends
 POST /api/v1/system/market-data-type
 GET  /api/v1/market-data/depth/exchanges
 ```
@@ -1152,3 +1156,7 @@ Current expected test status:
 ## More Detail
 
 Read [PROJECT_SETUP_ARCHITECTURE.md](PROJECT_SETUP_ARCHITECTURE.md) for the full architecture, IBKR pacing notes, job JSON schema, Docker setup, and implementation caveats.
+
+### Equity reference additions
+
+See [equity reference and capability API](docs/gateway_equity_reference.md) for shortable shares, dividend estimates, all-client open orders, capability reporting, and the fundamental-report retirement. REST and MCP share bounded request handling and explicit unavailable-data results.

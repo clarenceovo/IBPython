@@ -179,26 +179,11 @@ class IBKRReferenceFeedClient:
     # ------------------------------------------------------------------
 
     async def load_fundamental_data(self, request: FundamentalDataRequest) -> FundamentalDataReport:
-        """Load an IBKR fundamental report as raw XML."""
-        await self._connection.ensure_connected()
-        logger.info("load_fundamental_data: symbol=%s report_type=%s", request.symbol, request.report_type.value)
-        t0 = monotonic_time.monotonic()
-        contract = await self._historical.qualify_contract(request.to_contract_spec())
-        raw_xml = await self._connection.with_retry(
-            lambda: self._ib.reqFundamentalDataAsync(contract, request.report_type.value, []),
-            operation=f"fundamental_data:{request.symbol}:{request.report_type.value}",
-        )
-        report = FundamentalDataReport(
-            symbol=request.symbol,
-            asset_class=request.asset_class,
-            con_id=getattr(contract, "conId", None),
-            report_type=request.report_type,
-            raw_xml=raw_xml,
-            source=request.source,
-            metadata=request.metadata,
-        )
-        logger.info("load_fundamental_data: %d bytes XML for %s in %.2fs", len(raw_xml or ""), request.symbol, monotonic_time.monotonic() - t0)
-        return report
+        """Reject removed IBKR reports before connecting or retrying."""
+        from src.feeds.capabilities import FUNDAMENTALS_REMOVED
+        from src.feeds.exceptions import IBKRUnsupportedFeatureError
+
+        raise IBKRUnsupportedFeatureError(FUNDAMENTALS_REMOVED)
 
     async def load_wsh_metadata(self) -> WSHMetadataReport:
         """Load Wall Street Horizon metadata as raw JSON."""

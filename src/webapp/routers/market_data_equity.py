@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body, Depends, Query
 from pydantic import Field
 
 from src.config.reference_data import resolve_index as _resolve_index
+from src.feeds.equity_reference import EquityReferenceRequest, ShortabilityResponse, DividendsResponse
 from src.feeds.exchange_resolver import resolve_equity
 from src.feeds.models import (
     AssetClass,
@@ -525,3 +526,21 @@ async def get_latest_bar(
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> OHLCVBar | None:
     return await state.redis.get_latest_bar(asset_class, bar_size, symbol=symbol)
+
+
+@router.post("/equity/shortability", response_model=ShortabilityResponse)
+async def load_equity_shortability(
+    request: EquityReferenceRequest,
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> ShortabilityResponse:
+    """Indicative short availability; a bounded subscription, not a share reservation."""
+    return await state.feed.load_equity_shortability(request)
+
+
+@router.post("/equity/dividends", response_model=DividendsResponse)
+async def load_equity_dividends(
+    request: EquityReferenceRequest,
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> DividendsResponse:
+    """Dividend estimates; unavailable fields remain null when the deadline expires."""
+    return await state.feed.load_equity_dividends(request)
