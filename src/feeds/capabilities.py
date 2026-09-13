@@ -1,7 +1,7 @@
 """Local implementation capabilities; no network calls or entitlement guesses."""
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import version
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -28,16 +28,20 @@ class GatewayCapabilities(BaseModel):
 
 
 def gateway_capabilities(connection: Any) -> GatewayCapabilities:
-    try:
-        client_version = version("ib-insync")
-    except PackageNotFoundError:
-        client_version = None
     ib = connection.ib
     connected = connection.is_connected
     protocol = ib.client.serverVersion() if connected else None
-    features = {}
-    for name, method in (("shortability", "reqMktData"), ("dividends", "reqMktData"), ("all_open_orders", "reqAllOpenOrdersAsync")):
-        supported = callable(getattr(ib, method, None)) if ib is not None else None
+    features: dict[str, FeatureCapability] = {}
+    for name, method, decoder_method in (
+        ("shortability", "reqMktData", "tickSize"),
+        ("dividends", "reqMktData", "tickString"),
+        ("all_open_orders", "reqAllOpenOrdersAsync", None),
+    ):
+        supported = None
+        if ib is not None:
+            supported = callable(getattr(ib, method, None))
+            if decoder_method is not None:
+                supported = supported and callable(getattr(getattr(ib, "wrapper", None), decoder_method, None))
         features[name] = FeatureCapability(
             implemented=True, client_supported=supported,
             availability="unsupported" if supported is False else "unknown",
@@ -46,12 +50,7 @@ def gateway_capabilities(connection: Any) -> GatewayCapabilities:
     features["fundamental_reports"] = FeatureCapability(
         implemented=False, client_supported=False, availability="unsupported", reason=FUNDAMENTALS_REMOVED,
     )
-    for name in ("odd_lot_quotes", "settlement_type", "overnight_conditions"):
-        features[name] = FeatureCapability(
-            implemented=False, client_supported=None, availability="unsupported",
-            reason="Not implemented by this gateway; requires verified encoder/decoder support before exposure.",
-        )
     return GatewayCapabilities(
-        client_version=client_version, connected=connected,
+        client_version=version("ib-insync"), connected=connected,
         negotiated_server_protocol=protocol, features=features,
     )

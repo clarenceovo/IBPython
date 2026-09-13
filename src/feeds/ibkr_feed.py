@@ -6,16 +6,13 @@ delegating to focused domain clients:
 - ``IBKRHistoricalClient`` — historical OHLCV, contract qualification
 - ``IBKROptionsFeedClient`` — option chains, analytics, skew surfaces
 - ``IBKRAccountFeedClient`` — account summary, positions, PnL
-- ``IBKRReferenceFeedClient`` — news, fundamentals, WSH, scanner, bonds, streaming
+- ``IBKRReferenceFeedClient`` — news, WSH, scanner, bonds, streaming
 
 All existing import paths remain backward-compatible:
     from src.feeds.ibkr_feed import IBKRFeedClient
 """
 
 from __future__ import annotations
-
-from src.feeds.equity_reference import EquityReferenceClient, EquityReferenceRequest, ShortabilityResponse, DividendsResponse
-from src.feeds.capabilities import GatewayCapabilities, gateway_capabilities
 
 import asyncio
 import logging
@@ -25,7 +22,9 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from src.config import config_constant as constants
+from src.feeds.capabilities import GatewayCapabilities, gateway_capabilities
 from src.feeds.contracts import ContractSpec, OptionChain, OptionChainRequest, build_ibkr_contract
+from src.feeds.equity_reference import DividendsResponse, EquityReferenceClient, EquityReferenceRequest, ShortabilityResponse
 from src.feeds.fundamental_data import (
     FundamentalDataReport,
     FundamentalDataRequest,

@@ -111,6 +111,8 @@ def _contract_text(contract: Any, *attribute_names: str) -> str:
 
 def _contract_int(contract: Any, attribute_name: str) -> int | None:
     value = getattr(contract, attribute_name, None)
+    if value is None:
+        return None
     try:
         parsed = int(value)
     except (TypeError, ValueError):
@@ -516,6 +518,31 @@ class IBKRConnectionManager:
         if self._rate_limiter is None:
             return {"enabled": False, "reason": "not_configured"}
         return await self._rate_limiter.snapshot()
+
+    def market_data_request_id(self, ib: Any, ticker: Any) -> int:
+        """Return the request id for a live market-data ticker.
+
+        ``ib_insync`` does not expose this id on ``Ticker``. Keep access to its
+        request registry inside the connection boundary so feed clients do not
+        depend on wrapper internals.
+        """
+        request_id = ib.wrapper.ticker2ReqId["mktData"].get(ticker)
+        if request_id is None:
+            raise IBKRConnectionError("IBKR did not register the market-data request")
+        return int(request_id)
+
+    def forget_market_data_ticker(self, ib: Any, contract: Any, ticker: Any, request_id: int | None) -> None:
+        """Drop retained wrapper state for a request-owned cancelled ticker."""
+        wrapper = ib.wrapper
+        if request_id is not None:
+            wrapper.reqId2Ticker.pop(request_id, None)
+        wrapper.tickers.pop(id(contract), None)
+        wrapper.pendingTickers.discard(ticker)
+
+    def retain_background_task(self, task: asyncio.Task[None]) -> None:
+        """Keep lifecycle cleanup alive if its initiating request is cancelled."""
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     def _disconnect_stale_client(self) -> None:
         self._dispose_ib_client(reason="stale client")

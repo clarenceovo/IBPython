@@ -11,6 +11,7 @@ from src.feeds.capabilities import gateway_capabilities
 from src.feeds.equity_reference import EquityReferenceClient, EquityReferenceRequest
 from src.feeds.exceptions import IBKRConnectionError, IBKRMarketDataUnavailableError, IBKRUnsupportedFeatureError
 from src.feeds.fundamental_data import FundamentalDataRequest
+from src.feeds.ibkr_connection import IBKRConnectionManager
 from src.feeds.ibkr_reference_feed import IBKRReferenceFeedClient
 
 
@@ -34,6 +35,9 @@ def setup_client(deliver=None):
         ib=ib, ensure_connected=AsyncMock(), _background_tasks=set(),
         wait_for_ibkr_request=AsyncMock(), acquire_market_data_line=acquire,
     )
+    connection.market_data_request_id = IBKRConnectionManager.market_data_request_id.__get__(connection)
+    connection.forget_market_data_ticker = IBKRConnectionManager.forget_market_data_ticker.__get__(connection)
+    connection.retain_background_task = IBKRConnectionManager.retain_background_task.__get__(connection)
     historical = SimpleNamespace(qualify_contract=AsyncMock(return_value=Stock("AAPL", "SMART", "USD", conId=265598)))
     client = EquityReferenceClient(connection, historical)
     return client, connection, ib, leases
@@ -55,6 +59,7 @@ def assert_clean(ib, leases, count=1):
 
 def test_shortability_real_decoder_preserves_zero_and_rating():
     def deliver(ib, req_id):
+        ib.wrapper.marketDataType(req_id, 3)
         ib.wrapper.tickGeneric(req_id, 46, 1.5)
         ib.wrapper.tickSize(req_id, 89, 0)
         emit(ib, req_id)
@@ -66,6 +71,7 @@ def test_shortability_real_decoder_preserves_zero_and_rating():
         assert result.shortability_rating == 1.5
         assert result.status == "available" and not result.timed_out
         assert result.observed_at is not None
+        assert result.market_data_type == 3
         args = ib.client.reqMktData.call_args.args
         assert args[2:5] == ("236", False, False)
         assert conn.wait_for_ibkr_request.await_count == 2
@@ -75,6 +81,7 @@ def test_shortability_real_decoder_preserves_zero_and_rating():
 
 def test_dividend_tick59_decodes_date_and_amounts():
     def deliver(ib, req_id):
+        ib.wrapper.marketDataType(req_id, 4)
         ib.wrapper.tickString(req_id, 59, '0,0.92,20261019,0.23')
         emit(ib, req_id)
 
@@ -86,6 +93,7 @@ def test_dividend_tick59_decodes_date_and_amounts():
         assert result.next_dividend_amount == .23
         assert result.next_dividend_date == date(2026, 10, 19)
         assert result.status == "available"
+        assert result.market_data_type == 4
         assert ib.client.reqMktData.call_args.args[2] == "456"
         assert_clean(ib, leases)
     asyncio.run(run())
@@ -104,6 +112,7 @@ def test_deadline_returns_missing_or_partial_data(partial):
         assert result.shortable_shares is None
         assert result.status == ("partial" if partial else "unavailable")
         assert result.timed_out
+        assert result.market_data_type == (1 if partial else None)
         assert_clean(ib, leases)
     asyncio.run(run())
 
@@ -149,6 +158,22 @@ def test_broker_errors_do_not_turn_into_success(disconnect):
         client, _, ib, leases = setup_client(deliver)
         with pytest.raises(IBKRConnectionError if disconnect else IBKRMarketDataUnavailableError):
             await client.load_shortability(EquityReferenceRequest(symbol="AAPL"))
+        assert_clean(ib, leases)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("warning_code", [399, 2104, 10090, 10167])
+def test_non_terminal_warning_can_be_followed_by_valid_data(warning_code):
+    def deliver(ib, req_id):
+        ib.errorEvent.emit(req_id, warning_code, "Non-terminal market data message", None)
+        ib.wrapper.tickSize(req_id, 89, 250)
+        emit(ib, req_id)
+
+    async def run():
+        client, _, ib, leases = setup_client(deliver)
+        result = await client.load_shortability(EquityReferenceRequest(symbol="AAPL"))
+        assert result.status == "available"
+        assert result.shortable_shares == 250
         assert_clean(ib, leases)
     asyncio.run(run())
 
@@ -208,16 +233,24 @@ def test_fundamentals_fail_without_connecting():
     asyncio.run(run())
 
 
-def test_capabilities_do_not_infer_live_support():
+def test_capabilities_do_not_infer_live_support(monkeypatch):
     disconnected = gateway_capabilities(SimpleNamespace(ib=None, is_connected=False))
     assert disconnected.negotiated_server_protocol is None
     assert disconnected.features['shortability'].client_supported is None
-    ib = SimpleNamespace(client=SimpleNamespace(serverVersion=lambda: 176), reqMktData=lambda: None)
+    ib = SimpleNamespace(
+        client=SimpleNamespace(serverVersion=lambda: 176),
+        reqMktData=lambda: None,
+        wrapper=SimpleNamespace(tickSize=lambda: None, tickString=lambda: None),
+    )
     connected = gateway_capabilities(SimpleNamespace(ib=ib, is_connected=True))
     assert connected.negotiated_server_protocol == 176
     assert connected.features['shortability'].client_supported is True
     assert connected.features['shortability'].availability == 'unknown'
     assert connected.features['fundamental_reports'].availability == 'unsupported'
+    monkeypatch.setattr(ib, "wrapper", None)
+    missing_decoder = gateway_capabilities(SimpleNamespace(ib=ib, is_connected=True))
+    assert missing_decoder.features['shortability'].client_supported is False
+    assert missing_decoder.features['dividends'].client_supported is False
 
 
 def test_socket_send_failure_cleans_registered_ticker():

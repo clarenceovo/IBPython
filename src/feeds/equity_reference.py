@@ -17,6 +17,8 @@ from src.feeds.exceptions import IBKRConnectionError, IBKRMarketDataUnavailableE
 from src.feeds.ibkr_connection import acquire_market_data_line, wait_for_ibkr_request
 from src.feeds.models import AssetClass
 
+_IBKR_WARNING_CODES = {110, 165, 202, 399, 404, 434, 492, 10090, 10167}
+
 
 class EquityReferenceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
@@ -122,17 +124,22 @@ class EquityReferenceClient:
                 result.next_dividend_amount = _number(dividends.nextAmount)
                 next_date = dividends.nextDate
                 result.next_dividend_date = next_date.date() if isinstance(next_date, datetime) else next_date
-                present = (result.past_12_months, result.next_12_months, result.next_dividend_amount, result.next_dividend_date)
+                present = (
+                    result.past_12_months,
+                    result.next_12_months,
+                    result.next_dividend_amount,
+                    result.next_dividend_date,
+                )
                 complete = all(item is not None for item in present)
             if any(item is not None for item in present):
                 result.observed_at = datetime.now(timezone.utc)
                 result.status = "available" if complete else "partial"
-            result.market_data_type = value.marketDataType
+                result.market_data_type = int(value.marketDataType)
             changed.set()
 
         def on_error(error_id: int, code: int, message: str, *_: Any) -> None:
             nonlocal error
-            if error_id == req_id:
+            if error_id == req_id and code not in _IBKR_WARNING_CODES and not 2100 <= code < 2200:
                 error = IBKRMarketDataUnavailableError(f"IBKR {code}: {message}")
                 changed.set()
 
@@ -154,11 +161,10 @@ class EquityReferenceClient:
                 )
                 await wait_for_ibkr_request(self._connection, operation=operation)
                 ticker = ib.reqMktData(contract, genericTickList=generic_tick, snapshot=False, regulatorySnapshot=False)
-                req_id = ib.wrapper.ticker2ReqId["mktData"][ticker]
+                req_id = self._connection.market_data_request_id(ib, ticker)
                 ticker.updateEvent += update
                 ib.errorEvent += on_error
                 ib.disconnectedEvent += disconnected
-                update(ticker)
                 while result.status != "available":
                     await changed.wait()
                     changed.clear()
@@ -173,9 +179,9 @@ class EquityReferenceClient:
         finally:
             # reqMktData registers a ticker before sending. Recover it if sending raised.
             if ticker is None and ib is not None and contract is not None:
-                ticker = ib.wrapper.tickers.get(id(contract))
+                ticker = ib.ticker(contract)
                 if ticker is not None:
-                    req_id = ib.wrapper.ticker2ReqId["mktData"].get(ticker)
+                    req_id = self._connection.market_data_request_id(ib, ticker)
             if ticker is not None:
                 ticker.updateEvent -= update
                 ib.errorEvent -= on_error
@@ -191,16 +197,12 @@ class EquityReferenceClient:
                                 try:
                                     ib.cancelMktData(contract)
                                 finally:
-                                    # ib_insync retains cancelled tickers; these identities belong to this request.
-                                    ib.wrapper.reqId2Ticker.pop(req_id, None)
-                                    ib.wrapper.tickers.pop(id(contract), None)
-                                    ib.wrapper.pendingTickers.discard(ticker)
+                                    self._connection.forget_market_data_ticker(ib, contract, ticker, req_id)
                     finally:
                         await lease.release()
                 cleanup_task = asyncio.create_task(self._cleanup_with_deadline(cleanup))
                 # Retain cleanup when HTTP/MCP cancellation interrupts the caller.
-                self._connection._background_tasks.add(cleanup_task)
-                cleanup_task.add_done_callback(self._connection._background_tasks.discard)
+                self._connection.retain_background_task(cleanup_task)
                 await asyncio.shield(cleanup_task)
         result.received_at = datetime.now(timezone.utc)
         return result

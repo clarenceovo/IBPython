@@ -1,4 +1,4 @@
-"""Reference data: news, fundamentals, WSH events, contract search/scanner, bonds, streaming."""
+"""Reference data: news, WSH events, contract search/scanner, bonds, streaming."""
 
 from __future__ import annotations
 
@@ -128,7 +128,7 @@ def normalize_market_scanner_rows(scan_data: Sequence[Any]) -> list[MarketScanne
 
 
 class IBKRReferenceFeedClient:
-    """News, fundamentals, WSH events, contract search/scanner, bonds, streaming."""
+    """News, WSH events, contract search/scanner, bonds, streaming."""
 
     def __init__(self, connection: IBKRConnectionManager, historical_client: "IBKRHistoricalClient") -> None:
         self._connection = connection

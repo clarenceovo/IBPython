@@ -52,7 +52,7 @@ Equity reference requests accept `0 < timeout_seconds <= 20` (default 10). The d
 - `status: unavailable`: no requested values arrived.
 - `timed_out: true`: collection ended at its deadline. Null fields remain null; zero is preserved as a valid observation.
 - `observed_at`: local UTC observation time, null if no requested data arrived. It is not an exchange timestamp.
-- `received_at`: local UTC response creation time. `market_data_type` is the client's reported data type when observed.
+- `received_at`: local UTC response creation time. `market_data_type` is populated from the client ticker after requested data is observed and remains null when no requested data arrives.
 
 Partial/unavailable data after successful subscription returns HTTP 200 with explicit status. Setup timeouts and broker subscription errors return HTTP 503; validation errors return 422. Cancellation does not become a successful result. The application reuses its global pacing and line leases and removes the request's retained client ticker entries on cleanup.
 

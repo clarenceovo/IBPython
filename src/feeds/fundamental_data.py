@@ -22,7 +22,7 @@ class FundamentalReportType(StrEnum):
 
 
 class FundamentalDataRequest(BaseModel):
-    """IBKR TWS fundamental report request."""
+    """Legacy IBKR TWS fundamental report request retained for 410 responses."""
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
@@ -45,7 +45,7 @@ class FundamentalDataRequest(BaseModel):
     @model_validator(mode="after")
     def validate_supported_asset_class(self) -> Self:
         if self.asset_class is not AssetClass.EQUITY:
-            raise ValueError("IBKR fundamental reports are supported for equity-style underlyings")
+            raise ValueError("Legacy IBKR fundamental report requests accept only equity-style underlyings")
         return self
 
     def to_contract_spec(self) -> ContractSpec:
@@ -60,7 +60,7 @@ class FundamentalDataRequest(BaseModel):
 
 
 class FundamentalDataReport(BaseModel):
-    """Raw IBKR fundamental report response, usually XML."""
+    """Legacy raw IBKR fundamental report response model, usually XML."""
 
     model_config = ConfigDict(extra="forbid")
 
