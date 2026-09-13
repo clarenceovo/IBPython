@@ -1040,7 +1040,7 @@ class TestTickDataRouter:
         state = _FakeState()
         app = create_app(settings=state.settings, state=state)
 
-        paths = {route.path for route in app.routes}
+        paths = set(app.openapi()["paths"])
         assert "/api/v1/tick-data/subscribe" in paths
         assert "/api/v1/tick-data/unsubscribe" in paths
         assert "/api/v1/tick-data/latest/{symbol}" in paths

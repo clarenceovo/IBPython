@@ -15,11 +15,11 @@ def test_equity_snapshot_uses_true_ibkr_snapshot_request() -> None:
             def isConnected(self) -> bool:
                 return True
 
-            def reqMktData(self, contract: object, generic_tick_list: str, snapshot: bool, regulatory_snapshot: bool) -> object:
+            def reqMktData(self, contract: object, genericTickList: str = "", snapshot: bool = False, regulatorySnapshot: bool = False, mktDataOptions: list | None = None) -> object:
                 captured["contract"] = contract
-                captured["generic_tick_list"] = generic_tick_list
+                captured["generic_tick_list"] = genericTickList
                 captured["snapshot"] = snapshot
-                captured["regulatory_snapshot"] = regulatory_snapshot
+                captured["regulatory_snapshot"] = regulatorySnapshot
                 return SimpleNamespace(contract=contract, last=100.5, bid=100, ask=101)
 
             def cancelMktData(self, contract: object) -> None:
@@ -51,7 +51,7 @@ def test_equity_snapshot_partial_failure_preserves_result_identity() -> None:
             def isConnected(self) -> bool:
                 return True
 
-            def reqMktData(self, contract: object, generic_tick_list: str, snapshot: bool, regulatory_snapshot: bool) -> object:
+            def reqMktData(self, contract: object, genericTickList: str = "", snapshot: bool = False, regulatorySnapshot: bool = False, mktDataOptions: list | None = None) -> object:
                 if getattr(contract, "symbol") == "AAPL":
                     raise RuntimeError("no market data")
                 return SimpleNamespace(contract=contract, last=400.0, bid=399.5, ask=400.5)

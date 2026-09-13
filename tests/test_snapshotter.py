@@ -395,7 +395,7 @@ class TestSnapshotEndpoints:
             ibkr_rest_market_data_cache_maxsize=16,
         )
         app = create_app(settings=s)
-        paths = {route.path for route in app.routes}
+        paths = set(app.openapi()["paths"])
 
         assert "/api/v1/snapshot/capture" in paths
         assert "/api/v1/snapshot/fx-options/capture" in paths

@@ -1283,7 +1283,7 @@ class TestOrdersRouter:
     def test_router_registered_in_app(self) -> None:
         """Verify order router paths appear in the app's route list."""
         app, _ = self._make_app()
-        paths = {route.path for route in app.routes}
+        paths = set(app.openapi()["paths"])
         assert "/api/v1/orders/place" in paths
         assert "/api/v1/orders/open" in paths
         assert "/api/v1/orders/completed" in paths

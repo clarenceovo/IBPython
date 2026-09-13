@@ -689,7 +689,7 @@ def test_webapp_registers_domain_routers() -> None:
     state = FakeState()
     app = create_app(settings=state.settings, state=state)
 
-    paths = {route.path for route in app.routes}
+    paths = set(app.openapi()["paths"])
 
     assert "/api/v1/system/health" in paths
     assert "/api/v1/system/readiness" in paths
