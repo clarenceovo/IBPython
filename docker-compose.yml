@@ -35,7 +35,7 @@ services:
       - "8000:8000"
     env_file:
       - path: .env
-        required: true
+        required: false
     environment:
       <<: *app-env
       IBKR_CLIENT_ID: ${IBKR_API_CLIENT_ID:-101}
@@ -71,7 +71,7 @@ services:
       - "${MCP_HTTP_HOST_PORT:-9685}:${MCP_HTTP_PORT:-9000}"
     env_file:
       - path: .env
-        required: true
+        required: false
     environment:
       <<: *app-env
       IBKR_MCP_CLIENT_ID: ${IBKR_MCP_CLIENT_ID:-301}
