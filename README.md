@@ -209,6 +209,14 @@ Images stay lean:
 - `requirements.txt` covers runtime packages only. `pandas` and `gunicorn` are not used by any service and are not installed; notebooks get `pandas` from `requirements-dev.txt`.
 - Images ship no `curl`. The `ibkr-rest-app` healthcheck runs a Python `urllib` one-liner, so the `slim` base image needs no extra apt packages.
 
+## Observability (OpenTelemetry)
+
+Tracing is opt-in and off by default. Enable it with `OTEL_ENABLED=true` and point `OTEL_EXPORTER_OTLP_ENDPOINT` at an OTLP/HTTP collector (for example `http://jaeger:4318`). A base endpoint gets `/v1/traces` appended automatically. `OTEL_SERVICE_NAME` defaults to `ibpython-rest`.
+
+When enabled, the API exports spans for the ASGI request path, outbound `httpx` calls (IBKR REST), and `redis` commands. The exporter is OTLP/HTTP only — no gRPC dependency, so images stay slim. When disabled, no OpenTelemetry module is imported at all.
+
+Compose passes `OTEL_ENABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT`, and `OTEL_SERVICE_NAME` through to the app container.
+
 The Compose app services set `IBKR_HOST` from `IBKR_DOCKER_HOST`, defaulting to `host.docker.internal`, which lets containers reach TWS or IB Gateway running on the host machine through Docker Desktop. Override `IBKR_DOCKER_HOST` and `IBKR_DOCKER_PORT` if IB Gateway runs elsewhere.
 
 The scheduler uses `IBKR_DOCKER_REST_BASE_URL` inside Compose, defaulting to `http://ibkr-rest-app:8000`, so it calls the FastAPI service over the Docker network instead of container-local `localhost`.

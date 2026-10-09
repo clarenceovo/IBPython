@@ -41,6 +41,7 @@ src/
     scheduler_calendar.py   # Cron parsing and next-run calculation helpers
   webapp/
     app.py                  # IBKRRestApp FastAPI application factory
+    telemetry.py            # Optional OpenTelemetry tracing (opt-in via OTEL_ENABLED)
     dependencies.py         # API-owned IBKR, Redis, loader, and cache state
     cache.py                # Async TTL cache with per-key single-flight protection
     routers/
