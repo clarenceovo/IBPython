@@ -68,7 +68,7 @@ class IBKRAccountFeedClient:
         return result
 
     async def load_portfolio_items(self, account: str = "") -> list[PortfolioItemDTO]:
-        """Expose current portfolio items from ib_insync's local account cache."""
+        """Expose current portfolio items from ib_async's local account cache."""
         await self._connection.ensure_connected()
         logger.info("load_portfolio_items: account=%s", account or "all")
         result = normalize_portfolio_items(self._ib.portfolio(account))
@@ -76,12 +76,12 @@ class IBKRAccountFeedClient:
         return result
 
     async def subscribe_account_pnl(self, account: str, model_code: str = "") -> object:
-        """Start a live account PnL subscription and return the ib_insync PnL object."""
+        """Start a live account PnL subscription and return the ib_async PnL object."""
         _, subscription = await self._subscribe_pnl(account, model_code)
         return subscription
 
     async def subscribe_position_pnl(self, account: str, con_id: int, model_code: str = "") -> object:
-        """Start a live position PnL subscription and return the ib_insync PnLSingle object."""
+        """Start a live position PnL subscription and return the ib_async PnLSingle object."""
         _, subscription = await self._subscribe_pnl(account, model_code, con_id)
         return subscription
 

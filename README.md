@@ -4,7 +4,7 @@ Production-oriented IBKR market data, transport, scheduler, and REST API layer f
 
 ## What This Provides
 
-- Async IBKR TWS / IB Gateway adapter through `ib_insync`
+- Async IBKR TWS / IB Gateway adapter through `ib_async`
 - Unified OHLCV DTOs across equities, FX, futures, bonds, indices, crypto, and options
 - Option-chain discovery and option analytics DTOs
 - Fundamental, economic-event, and news DTOs
@@ -18,7 +18,7 @@ Production-oriented IBKR market data, transport, scheduler, and REST API layer f
 
 ## Requirements
 
-- Python 3.13. Python 3.14 is not supported: `eventkit`, an `ib_insync` dependency, creates an event loop at import time. Python 3.14 removed the implicit event loop, so the import fails with `RuntimeError: There is no current event loop`.
+- Python 3.14. The project runs on the maintained `ib_async` fork; the archived `ib_insync` package does not work on 3.14 because its `eventkit` dependency creates an event loop at import time.
 - IBKR TWS or IB Gateway running locally or on a reachable host
 - Redis
 - QuestDB
@@ -40,7 +40,7 @@ Start TWS or IB Gateway, confirm API access is enabled, then run the REST API:
 make run-api
 ```
 
-`make run-api` forces uvicorn to use the standard `asyncio` loop. This matters for `ib_insync`; uvicorn's `uvloop` backend can conflict with nested event-loop patching and prevent the API from connecting even when notebooks can.
+`make run-api` forces uvicorn to use the standard `asyncio` loop. This matters for `ib_async`; uvicorn's `uvloop` backend can conflict with nested event-loop patching and prevent the API from connecting even when notebooks can.
 
 Open:
 

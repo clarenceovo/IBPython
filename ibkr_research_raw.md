@@ -1749,15 +1749,15 @@ trade.statusEvent += onStatus
 - TWS/Gateway must have "Download open orders on connection" checked
 - Large option chains can be slow — use `reqSecDefOptParams` instead
 
-### 10.2 ib_insync (Archived)
+### 10.2 ib_async (Archived)
 
-**Repository**: https://github.com/pilotech/ib_insync (404 — archived/moved)  
+**Repository**: https://github.com/pilotech/ib_async (404 — archived/moved)  
 **Status**: Archived. Migration path: switch to `ib_async`.
 
-**Migration from ib_insync to ib_async:**
-- Replace `from ib_insync import *` with `from ib_async import *`
+**Migration from ib_async to ib_async:**
+- Replace `from ib_async import *` with `from ib_async import *`
 - Nearly identical API surface
-- ib_async is a fork of ib_insync with ongoing maintenance
+- ib_async is a fork of ib_async with ongoing maintenance
 - Key difference: ib_async uses newer Python features (3.10+)
 
 ### 10.3 Official ibapi

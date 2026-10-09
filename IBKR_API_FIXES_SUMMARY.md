@@ -39,12 +39,12 @@
 
 ---
 
-## Known Limitations (ib_insync Wrapper)
+## Known Limitations (ib_async Wrapper)
 
-These are inherent to the ib_insync wrapper and cannot be fixed in application code:
+These are inherent to the ib_async wrapper and cannot be fixed in application code:
 
-1. **`exerciseOptions`** - ib_insync handles `reqId` internally
-2. **`cancelOrder`** - ib_insync abstracts `OrderCancel` parameter
+1. **`exerciseOptions`** - ib_async handles `reqId` internally
+2. **`cancelOrder`** - ib_async abstracts `OrderCancel` parameter
 
 ---
 

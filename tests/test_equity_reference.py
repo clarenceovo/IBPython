@@ -1,4 +1,4 @@
-"""Exercise the real ib_insync decoder with a fake socket transport."""
+"""Exercise the real ib_async decoder with a fake socket transport."""
 import asyncio
 from datetime import date
 from types import SimpleNamespace
@@ -16,7 +16,7 @@ from src.feeds.ibkr_reference_feed import IBKRReferenceFeedClient
 
 
 def setup_client(deliver=None):
-    from ib_insync import IB, Stock
+    from ib_async import IB, Stock
     ib = IB()
     ib.client._apiReady = True
     ib.client.updateReqId(1)
@@ -131,17 +131,24 @@ def test_cancellation_cleans_subscription():
     asyncio.run(run())
 
 
-def test_concurrent_identical_contracts_are_isolated():
+def test_concurrent_identical_contracts_complete_and_clean_up():
+    """ib_async 2.x shares one ticker across concurrent subscriptions for the
+    same contract. Both requests must still complete, cancel their own reqId,
+    and release their own lease."""
+
     def deliver(ib, req_id):
-        ib.wrapper.tickSize(req_id, 89, 100 + req_id)
+        # Same contract -> same market value regardless of subscription.
+        ib.wrapper.tickSize(req_id, 89, 150)
         emit(ib, req_id)
 
     async def run():
         client, _, ib, leases = setup_client(deliver)
         results = await asyncio.gather(*(client.load_shortability(EquityReferenceRequest(symbol="AAPL")) for _ in range(2)))
-        assert {result.shortable_shares for result in results} == {101, 102}
+        assert {result.shortable_shares for result in results} == {150}
+        assert all(result.status == "available" for result in results)
         calls = ib.client.reqMktData.call_args_list
         assert calls[0].args[1] is not calls[1].args[1]
+        assert {call[0][0] for call in ib.client.cancelMktData.call_args_list} == {1, 2}
         assert_clean(ib, leases, count=2)
     asyncio.run(run())
 

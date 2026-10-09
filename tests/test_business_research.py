@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi.testclient import TestClient
-from ib_insync import IB, Stock
+from ib_async import IB, Stock
 
 from src.feeds.equity_reference import DividendsResponse, ShortabilityResponse
 from src.feeds.ibkr_feed import IBKRFeedClient

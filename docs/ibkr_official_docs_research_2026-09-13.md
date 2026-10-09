@@ -44,7 +44,7 @@ Historical trading schedules already exist in this repository through `load_trad
 
 ## Repository observations and limits
 
-`requirements.txt` and `pyproject.toml` declare `ib-insync>=0.9.86`. Runtime imports in `src/feeds/ibkr_connection.py` use `ib_insync`; comments mentioning `ib_async` are not evidence of a migration. New SDK features cannot be assumed available merely because the IB Gateway application is upgraded.
+`requirements.txt` and `pyproject.toml` declare `ib-insync>=0.9.86`. Runtime imports in `src/feeds/ibkr_connection.py` use `ib_async`; comments mentioning `ib_async` are not evidence of a migration. New SDK features cannot be assumed available merely because the IB Gateway application is upgraded.
 
 Existing feed code already calls historical ticks, histogram data, market rules, SMART components, head timestamps, matching symbols, market-depth exchanges and scanner APIs. These should not be presented as entirely new backend capabilities without checking their REST/MCP exposure. The current reference feed also still calls `reqFundamentalDataAsync`, making the 10.47 removal directly relevant.
 
@@ -74,7 +74,7 @@ Shortability is indicative availability, not a share reservation. Dividend data 
 
 ## Local compatibility evidence and validation plan
 
-The installed `.venv` contains `ib_insync` **0.9.86**, whose `client.py` declares `MaxClientVersion = 176`. This is a protocol ceiling, not API release 10.176. The upstream repository was archived in March 2024. Installing a current `ibapi` package alongside it would not change this application's imports or serializers. Assess a maintained compatible client or an official SDK adapter, then test the actual required messages before choosing a migration. [Upstream ib_insync repository](https://github.com/erdewit/ib_insync)
+The installed `.venv` contains `ib_async` **0.9.86**, whose `client.py` declares `MaxClientVersion = 176`. This is a protocol ceiling, not API release 10.176. The upstream repository was archived in March 2024. Installing a current `ibapi` package alongside it would not change this application's imports or serializers. Assess a maintained compatible client or an official SDK adapter, then test the actual required messages before choosing a migration. [Upstream ib_async repository](https://github.com/erdewit/ib_async)
 
 Other existing capabilities include historical OHLCV, options chains/Greeks/skew, snapshots and SSE, depth, ticks, scanners, WSH/news, account/P&L, bracket/OCA orders, preview, executions and completed orders. `/system/server-time` is already REST-accessible. Contract search already returns trading/liquid hours and minimum tick; richer contract metadata is an expansion. Global cancel and exercise/lapse already exist in feed and MCP, so REST parity is possible, but exercise currently logs and ignores unsupported `manual_order_time`; that should be resolved before expanding exposure.
 

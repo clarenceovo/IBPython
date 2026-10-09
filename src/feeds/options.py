@@ -51,9 +51,9 @@ __all__ = [
 
 def build_ibkr_option_contract(spec: OptionContractSpec) -> Any:
     try:
-        from ib_insync import Contract, Option
+        from ib_async import Contract, Option
     except ImportError as exc:
-        raise RuntimeError("ib_insync is required for option contract creation") from exc
+        raise RuntimeError("ib_async is required for option contract creation") from exc
     if spec.sec_type == "FOP":
         contract = Contract(
             secType="FOP",

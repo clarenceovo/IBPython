@@ -175,25 +175,25 @@ def test_ibkr_ensure_connected_preserves_root_cause_in_error_message() -> None:
 
 
 def test_ibkr_loop_getter_patch_uses_running_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    ib_pkg = ModuleType("ib_insync")
+    ib_pkg = ModuleType("ib_async")
     ib_pkg.__path__ = []
-    util = ModuleType("ib_insync.util")
-    connection = ModuleType("ib_insync.connection")
-    client = ModuleType("ib_insync.client")
-    wrapper = ModuleType("ib_insync.wrapper")
+    util = ModuleType("ib_async.util")
+    connection = ModuleType("ib_async.connection")
+    client = ModuleType("ib_async.client")
+    wrapper = ModuleType("ib_async.wrapper")
 
     for module in (util, connection, client, wrapper):
         module.getLoop = lambda: object()
 
-    monkeypatch.setitem(sys.modules, "ib_insync", ib_pkg)
-    monkeypatch.setitem(sys.modules, "ib_insync.util", util)
-    monkeypatch.setitem(sys.modules, "ib_insync.connection", connection)
-    monkeypatch.setitem(sys.modules, "ib_insync.client", client)
-    monkeypatch.setitem(sys.modules, "ib_insync.wrapper", wrapper)
+    monkeypatch.setitem(sys.modules, "ib_async", ib_pkg)
+    monkeypatch.setitem(sys.modules, "ib_async.util", util)
+    monkeypatch.setitem(sys.modules, "ib_async.connection", connection)
+    monkeypatch.setitem(sys.modules, "ib_async.client", client)
+    monkeypatch.setitem(sys.modules, "ib_async.wrapper", wrapper)
 
     async def run() -> None:
         running_loop = asyncio.get_running_loop()
-        ibkr_feed._patch_ib_insync_loop_getters()
+        ibkr_feed._patch_ib_async_loop_getters()
 
         assert util.getLoop() is running_loop
         assert connection.getLoop() is running_loop

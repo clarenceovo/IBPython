@@ -2499,7 +2499,7 @@ async def place_bracket_order(
         sec_type_map = {"EQUITY": "STK", "FUTURE": "FUT", "OPTION": "OPT", "FX": "CASH", "INDEX": "IND", "BOND": "BOND"}
         sec_type = sec_type_map.get(ac.value if hasattr(ac, "value") else str(ac), "STK")
 
-        from ib_insync import Contract
+        from ib_async import Contract
         contract = Contract(symbol=symbol, secType=sec_type, exchange=exchange, currency=currency)
         qualified = await ib.qualifyContractsAsync(contract)
         if not qualified:
@@ -2564,7 +2564,7 @@ async def place_oca_group(
     state = _state(ctx)
     try:
         import uuid
-        from ib_insync import Contract, Order
+        from ib_async import Contract, Order
 
         ib = state.feed._connection.ib
         if ib is None:

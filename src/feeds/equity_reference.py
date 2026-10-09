@@ -14,7 +14,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from src.feeds.contracts import ContractSpec
 from src.feeds.exchange_resolver import resolve_equity
 from src.feeds.exceptions import IBKRConnectionError, IBKRMarketDataUnavailableError
-from src.feeds.ibkr_connection import acquire_market_data_line, wait_for_ibkr_request, capture_ibkr_session, require_ibkr_session
+from src.feeds.ibkr_connection import (
+    acquire_market_data_line,
+    capture_ibkr_session,
+    request_market_data_with_req_id,
+    require_ibkr_session,
+    wait_for_ibkr_request,
+)
 from src.feeds.models import AssetClass
 
 _IBKR_WARNING_CODES = {110, 165, 202, 399, 404, 434, 492, 10090, 10167}
@@ -109,7 +115,7 @@ class EquityReferenceClient:
             present: tuple[Any, ...]
             if generic_tick == "236":
                 result.shortable_shares = _number(value.shortableShares)
-                # ib_insync 0.9.86 preserves tick 46 in ticks, not a named field.
+                # ib_async 0.9.86 preserves tick 46 in ticks, not a named field.
                 for tick in value.ticks:
                     if tick.tickType == 46:
                         result.shortability_rating = _number(tick.price)
@@ -152,7 +158,7 @@ class EquityReferenceClient:
             async with asyncio.timeout(request.timeout_seconds):
                 await self._connection.ensure_connected()
                 session = capture_ibkr_session(self._connection)
-                # Each request owns its contract identity: ib_insync keys tickers by id(contract).
+                # Each request owns its contract identity: ib_async keys tickers by id(contract).
                 contract = copy.deepcopy(await self._historical.qualify_contract(spec))
                 require_ibkr_session(self._connection, session)
                 result.con_id = contract.conId or None
@@ -163,8 +169,9 @@ class EquityReferenceClient:
                 )
                 await wait_for_ibkr_request(self._connection, operation=operation)
                 require_ibkr_session(self._connection, session)
-                ticker = ib.reqMktData(contract, genericTickList=generic_tick, snapshot=False, regulatorySnapshot=False)
-                req_id = self._connection.market_data_request_id(ib, ticker)
+                ticker, req_id = request_market_data_with_req_id(
+                    ib, contract, genericTickList=generic_tick, snapshot=False, regulatorySnapshot=False
+                )
                 ticker.updateEvent += update
                 ib.errorEvent += on_error
                 ib.disconnectedEvent += disconnected
@@ -198,7 +205,14 @@ class EquityReferenceClient:
                             finally:
                                 # Cancellation must still be sent if pacing times out or the caller is cancelled.
                                 try:
-                                    ib.cancelMktData(contract)
+                                    if req_id is not None:
+                                        # Direct reqId cancel: ib_async 2.x keys tickers by
+                                        # hash(contract), so concurrent subscriptions for one
+                                        # contract share a ticker and IB.cancelMktData(contract)
+                                        # cannot resolve each subscription's reqId.
+                                        ib.client.cancelMktData(req_id)
+                                    else:
+                                        ib.cancelMktData(contract)
                                 finally:
                                     self._connection.forget_market_data_ticker(ib, contract, ticker, req_id)
                     finally:

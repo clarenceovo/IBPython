@@ -92,7 +92,7 @@ def sockets(monkeypatch):
             self.close_socket()
             self.disconnectedEvent.emit()
 
-    monkeypatch.setattr('ib_insync.IB', Socket)
+    monkeypatch.setattr('ib_async.IB', Socket)
     return instances
 
 
@@ -165,15 +165,15 @@ def test_disable_during_connect_cancels_socket_setup_not_the_caller(sockets, mon
     async def run():
         redis = MemoryRedis()
         client = manager(redis)
-        import ib_insync
-        factory = ib_insync.IB
+        import ib_async
+        factory = ib_async.IB
 
         def blocked_socket():
             socket = factory()
             socket.gate = asyncio.Event()
             return socket
 
-        monkeypatch.setattr(ib_insync, 'IB', blocked_socket)
+        monkeypatch.setattr(ib_async, 'IB', blocked_socket)
         try:
             pending = asyncio.create_task(client.connect())
             await until(lambda: bool(sockets) and sockets[0].started.is_set())
@@ -182,7 +182,7 @@ def test_disable_during_connect_cancels_socket_setup_not_the_caller(sockets, mon
                 await asyncio.wait_for(pending, 2)
             assert sockets[0].cancelled and not sockets[0].low_connected
             assert client.ib is None
-            monkeypatch.setattr(ib_insync, 'IB', factory)
+            monkeypatch.setattr(ib_async, 'IB', factory)
             await client.write_connection_control(IBKRConnectionSwitch(enabled=True))
             await until(lambda: client.is_connected)
             assert client.ib is sockets[1]

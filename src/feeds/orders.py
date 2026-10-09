@@ -492,7 +492,7 @@ class CompletedOrder(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _ibkr_order_status_to_enum(status: Any) -> OrderStatus:
-    """Map ib_insync OrderStatus or raw string to our OrderStatus enum."""
+    """Map ib_async OrderStatus or raw string to our OrderStatus enum."""
     raw = str(status).lower() if status is not None else ""
     mapping = {
         "pendingsubmit": OrderStatus.PENDING,
@@ -511,7 +511,7 @@ def _ibkr_order_status_to_enum(status: Any) -> OrderStatus:
 
 
 def normalize_open_order(trade: Any) -> OpenOrder:
-    """Normalize an ib_insync Trade/OpenOrder into an OpenOrder DTO."""
+    """Normalize an ib_async Trade/OpenOrder into an OpenOrder DTO."""
     contract = getattr(trade, "contract", None) or SimpleNamespaceHelper()
     order = getattr(trade, "order", None) or SimpleNamespaceHelper()
     order_status = getattr(trade, "orderStatus", None) or SimpleNamespaceHelper()
@@ -541,7 +541,7 @@ def _parse_ibkr_fill_time(value: Any) -> datetime | None:
     s = str(value).strip()
     if not s:
         return None
-    # ib_insync returns 'YYYYMMDD  HH:MM:SS' format
+    # ib_async returns 'YYYYMMDD  HH:MM:SS' format
     for fmt in ("%Y%m%d %H:%M:%S", "%Y%m%d  %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
         try:
             return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
@@ -554,7 +554,7 @@ def _parse_ibkr_fill_time(value: Any) -> datetime | None:
 
 
 def normalize_execution(fill: Any) -> ExecutionDetail:
-    """Normalize an ib_insync Fill into an ExecutionDetail DTO."""
+    """Normalize an ib_async Fill into an ExecutionDetail DTO."""
     contract = getattr(fill, "contract", None) or SimpleNamespaceHelper()
     execution = getattr(fill, "execution", None) or SimpleNamespaceHelper()
     commission_report = getattr(fill, "commissionReport", None) or SimpleNamespaceHelper()
@@ -574,7 +574,7 @@ def normalize_execution(fill: Any) -> ExecutionDetail:
 
 
 def normalize_completed_order(trade: Any) -> CompletedOrder:
-    """Normalize a completed ib_insync Trade into a CompletedOrder DTO."""
+    """Normalize a completed ib_async Trade into a CompletedOrder DTO."""
     contract = getattr(trade, "contract", None) or SimpleNamespaceHelper()
     order = getattr(trade, "order", None) or SimpleNamespaceHelper()
     order_status = getattr(trade, "orderStatus", None) or SimpleNamespaceHelper()
@@ -637,5 +637,5 @@ def _safe_float(value: Any) -> float | None:
 
 
 class SimpleNamespaceHelper:
-    """Fallback namespace for safe getattr on possibly-None ib_insync objects."""
+    """Fallback namespace for safe getattr on possibly-None ib_async objects."""
     pass

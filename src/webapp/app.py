@@ -324,7 +324,7 @@ def get_app() -> FastAPI:
     """Uvicorn factory entrypoint.
 
     Return a fresh FastAPI object and build transport state inside lifespan so
-    ib_insync, locks, and socket futures are owned by uvicorn's active loop.
+    ib_async, locks, and socket futures are owned by uvicorn's active loop.
     """
 
     return create_app()

@@ -202,7 +202,7 @@ class OptionChain(BaseModel):
 
 
 def ibkr_contract_kwargs(spec: ContractSpec) -> dict[str, Any]:
-    """Return keyword arguments for ib_insync.Contract without importing ib_insync."""
+    """Return keyword arguments for ib_async.Contract without importing ib_async."""
 
     symbol = spec.symbol.upper()
     exchange = spec.exchange.upper()
@@ -300,12 +300,12 @@ def ibkr_contract_kwargs(spec: ContractSpec) -> dict[str, Any]:
 
 
 def build_ibkr_contract(spec: ContractSpec) -> Any:
-    """Build an ib_insync Contract, importing ib_insync only when the adapter is used."""
+    """Build an ib_async Contract, importing ib_async only when the adapter is used."""
 
     try:
-        from ib_insync import Contract
+        from ib_async import Contract
     except ImportError as exc:
-        raise RuntimeError("ib_insync is required for IBKR contract creation") from exc
+        raise RuntimeError("ib_async is required for IBKR contract creation") from exc
     return Contract(**ibkr_contract_kwargs(spec))
 
 

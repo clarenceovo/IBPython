@@ -1,6 +1,6 @@
 # Equity reference data and gateway capabilities
 
-The first delivery from the September 2026 IBKR comparison adds four REST endpoints and three MCP tools. It uses the existing `ib_insync` transport. No new broker credentials or service are required.
+The first delivery from the September 2026 IBKR comparison adds four REST endpoints and three MCP tools. It uses the existing `ib_async` transport. No new broker credentials or service are required.
 
 | REST endpoint | MCP tool | Result |
 | --- | --- | --- |
@@ -70,6 +70,6 @@ Focused tests run without broker access:
 .venv/bin/python -m pytest tests/test_equity_reference.py tests/test_gateway_additions.py tests/test_mcp_server.py -q
 ```
 
-They use the installed ib_insync decoder with fake socket calls to verify generic ticks, zero/missing values, deadlines, concurrent isolation, broker errors, and cleanup. REST checks cover validation, deprecation, authentication and pagination; MCP checks exercise the shared request/response models. Live IBKR entitlements and delivery have not been tested.
+They use the installed ib_async decoder with fake socket calls to verify generic ticks, zero/missing values, deadlines, concurrent isolation, broker errors, and cleanup. REST checks cover validation, deprecation, authentication and pagination; MCP checks exercise the shared request/response models. Live IBKR entitlements and delivery have not been tested.
 
 Bulletin completion, Adaptive/combo orders, and newer protocol features remain later work from the comparison.

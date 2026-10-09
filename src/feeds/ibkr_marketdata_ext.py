@@ -129,7 +129,7 @@ def _parse_tick_timestamp(value: Any) -> datetime:
 
 
 def _normalize_ibkr_tick(ibkr_tick: Any, tick_type: TickType) -> TickByTickData:
-    """Convert an ib_insync HistoricalTick / HistoricalTickBidAsk to our model."""
+    """Convert an ib_async HistoricalTick / HistoricalTickBidAsk to our model."""
     if tick_type == TickType.BID_ASK:
         return TickByTickData(
             timestamp=_parse_tick_timestamp(getattr(ibkr_tick, "time", None)),
@@ -250,7 +250,7 @@ class IBKRMarketDataExtClient:
         self._connection = connection
         # Tick-by-tick subscription state: key = (symbol, sec_type, exchange) → deque
         self._tick_buffers: dict[tuple[str, str, str], deque[TickByTickData]] = {}
-        # Active subscription handles: key = (symbol, sec_type, exchange) → ib_insync ticker handle
+        # Active subscription handles: key = (symbol, sec_type, exchange) → ib_async ticker handle
         self._tick_subscriptions: dict[tuple[str, str, str], Any] = {}
         self._tick_subscription_contracts: dict[tuple[str, str, str], Any] = {}
         self._tick_subscription_tick_types: dict[tuple[str, str, str], str] = {}
@@ -654,8 +654,8 @@ class IBKRMarketDataExtClient:
                 finally:
                     self._connection.pacing_guard.release()
             except AttributeError:
-                # ib_insync might not have reqHistoricalTicksAsync; fallback gracefully
-                logger.warning("reqHistoricalTicksAsync not available in ib_insync; returning empty")
+                # ib_async might not have reqHistoricalTicksAsync; fallback gracefully
+                logger.warning("reqHistoricalTicksAsync not available in ib_async; returning empty")
                 break
 
             if not raw_ticks:
@@ -694,7 +694,7 @@ class IBKRMarketDataExtClient:
     async def load_histogram_data(self, request: HistogramDataRequest) -> HistogramDataResponse:
         """Load IBKR price histogram data.
 
-        IBKR documents the final argument as ``period``. ``ib_insync`` exposes
+        IBKR documents the final argument as ``period``. ``ib_async`` exposes
         it as ``reqHistogramDataAsync(contract, useRTH, period)`` and does not
         accept the raw-API-era ``timePeriod`` keyword.
 
@@ -729,7 +729,7 @@ class IBKRMarketDataExtClient:
             finally:
                 self._connection.pacing_guard.release()
         except AttributeError:
-            logger.warning("reqHistogramDataAsync not available in ib_insync; returning empty")
+            logger.warning("reqHistogramDataAsync not available in ib_async; returning empty")
             raw_items = []
 
         data = [_normalize_histogram_data_point(item) for item in raw_items or []]
@@ -863,8 +863,8 @@ class IBKRMarketDataExtClient:
             ),
             operation="calculate_iv",
         )
-        # ib_insync returns TickOptionComputation NamedTuple: (reqId, tickAttrib, impliedVol, delta, optPrice, pvDividend, gamma, vega, theta, undPrice)
-        # Extract impliedVol via attribute access for robustness across ib_insync versions
+        # ib_async returns TickOptionComputation NamedTuple: (reqId, tickAttrib, impliedVol, delta, optPrice, pvDividend, gamma, vega, theta, undPrice)
+        # Extract impliedVol via attribute access for robustness across ib_async versions
         vol = None
         if hasattr(iv, "impliedVol"):
             vol = float(iv.impliedVol) if iv.impliedVol is not None else None
@@ -905,7 +905,7 @@ class IBKRMarketDataExtClient:
             ),
             operation="calculate_option_price",
         )
-        # ib_insync returns TickOptionComputation NamedTuple: (reqId, tickAttrib, impliedVol, delta, optPrice, pvDividend, gamma, vega, theta, undPrice)
+        # ib_async returns TickOptionComputation NamedTuple: (reqId, tickAttrib, impliedVol, delta, optPrice, pvDividend, gamma, vega, theta, undPrice)
         # Extract optPrice via attribute access for robustness
         opt_price = None
         if hasattr(price, "optPrice"):
@@ -1202,7 +1202,7 @@ class IBKRMarketDataExtClient:
             instrument, location, scan_code, max_results,
         )
 
-        from ib_insync import ScannerSubscription, TagValue
+        from ib_async import ScannerSubscription, TagValue
 
         sub = ScannerSubscription()
         sub.instrument = instrument

@@ -1,7 +1,7 @@
 # IBKR API Parameter Review — Brutal Cross-Reference with Official Documentation
 
 **Date:** 2025-06-17  
-**Scope:** All TWS API (ib_insync) method calls in the codebase  
+**Scope:** All TWS API (ib_async) method calls in the codebase  
 **Reference:** `ibkr_research_raw.md` (compiled from IBKR Campus docs)
 
 ## Executive Summary
@@ -40,7 +40,7 @@ raw_ticks = await self._connection.with_retry(
 reqHistoricalTicks(reqId, contract, startDateTime, endDateTime, numberOfTicks, whatToShow, useRTH, ignoreSize, miscOptions)
 ```
 
-**Issue:** The `miscOptions` parameter (a list of TagValue objects) is missing. While ib_insync may provide a default, this is an optional parameter in the official API that should be explicitly passed as an empty list if not used.
+**Issue:** The `miscOptions` parameter (a list of TagValue objects) is missing. While ib_async may provide a default, this is an optional parameter in the official API that should be explicitly passed as an empty list if not used.
 
 **Recommended Fix:**
 ```python
@@ -124,9 +124,9 @@ headlines = await self._connection.with_retry(
 reqHistoricalNews(reqId, conId, providerCodes, startDateTime, endDateTime, totalResults, historicalNewsOptions)
 ```
 
-**Issue:** The empty list `[]` is passed as `historicalNewsOptions` which is correct. However, ib_insync's `reqHistoricalNewsAsync` signature may differ. The documentation shows `historicalNewsOptions` should be a list of TagValue objects, not an empty list by default.
+**Issue:** The empty list `[]` is passed as `historicalNewsOptions` which is correct. However, ib_async's `reqHistoricalNewsAsync` signature may differ. The documentation shows `historicalNewsOptions` should be a list of TagValue objects, not an empty list by default.
 
-**Verification Needed:** Test with `historicalNewsOptions=None` or verify ib_insync handles the empty list correctly.
+**Verification Needed:** Test with `historicalNewsOptions=None` or verify ib_async handles the empty list correctly.
 
 ---
 
@@ -154,9 +154,9 @@ self._ib.exerciseOptions(contract, **exercise_kwargs)
 exerciseOptions(reqId, contract, exerciseAction, exerciseQuantity, account, override, manualOrderTime)
 ```
 
-**Issue:** The `reqId` parameter is completely missing. This is required for proper callback handling. The ib_insync wrapper may handle this internally, but it's a deviation from the official API.
+**Issue:** The `reqId` parameter is completely missing. This is required for proper callback handling. The ib_async wrapper may handle this internally, but it's a deviation from the official API.
 
-**Recommended Fix:** Verify ib_insync generates a valid reqId internally or add explicit reqId handling.
+**Recommended Fix:** Verify ib_async generates a valid reqId internally or add explicit reqId handling.
 
 ---
 
@@ -174,7 +174,7 @@ self._ib.cancelOrder(target_order)
 cancelOrder(orderId, orderCancel)
 ```
 
-**Issue:** The `orderCancel` parameter (OrderCancel object with `manualOrderTime` field) is not passed. While ib_insync's simplified signature may work, the official API requires both parameters.
+**Issue:** The `orderCancel` parameter (OrderCancel object with `manualOrderTime` field) is not passed. While ib_async's simplified signature may work, the official API requires both parameters.
 
 **Verification Needed:** Test if `cancelOrder` with single parameter works for all order types including those with `manualOrderTime` set.
 
@@ -334,7 +334,7 @@ bars = await self._connection.with_retry(
 reqHistoricalData(reqId, contract, endDateTime, durationStr, barSizeSetting, whatToShow, useRTH, formatDate, keepUpToDate, chartOptions)
 ```
 
-**Status:** ✅ CORRECT — All parameters match. `chartOptions` has a default value in ib_insync.
+**Status:** ✅ CORRECT — All parameters match. `chartOptions` has a default value in ib_async.
 
 ---
 
@@ -556,7 +556,7 @@ trade = self._ib.placeOrder(contract, order)
 placeOrder(orderId, contract, order)
 ```
 
-**Status:** ✅ CORRECT — ib_insync handles orderId internally.
+**Status:** ✅ CORRECT — ib_async handles orderId internally.
 
 ---
 
@@ -665,7 +665,7 @@ cancelPnLSingle(reqId, account, modelCode, conId)
 |----------|-------|------|--------|
 | 🔴 HIGH | `reqNewsArticleAsync` parameter order reversed | `ibkr_reference_feed.py:289` | Swap article_id and provider_code |
 | 🟠 MEDIUM | `reqHistoricalTicksAsync` missing miscOptions | `ibkr_marketdata_ext.py:593-601` | Add `miscOptions=[]` |
-| 🟠 MEDIUM | `exerciseOptions` missing reqId | `ibkr_order_client.py:1076` | Verify ib_insync handles reqId internally |
+| 🟠 MEDIUM | `exerciseOptions` missing reqId | `ibkr_order_client.py:1076` | Verify ib_async handles reqId internally |
 | 🟡 LOW | `reqHeadTimeStampAsync` formatDate value | `ibkr_marketdata_ext.py:770` | Consider using formatDate=1 |
 | 🟡 LOW | `reqMktData` regulatorySnapshot logic | `ibkr_options_feed.py:331` | Make regulatorySnapshot independent |
 

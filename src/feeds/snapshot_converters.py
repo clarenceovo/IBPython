@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class EquityTickerLike(Protocol):
-    """Subset of ib_insync.Ticker fields consumed by equity snapshot conversion."""
+    """Subset of ib_async.Ticker fields consumed by equity snapshot conversion."""
 
     time: Any
     last: Any
@@ -53,7 +53,7 @@ def ticker_to_snapshot(
     con_id: int = 0,
     timestamp: datetime | None = None,
 ) -> EquitySnapshot:
-    """Convert an ib_insync Ticker to an EquitySnapshot."""
+    """Convert an ib_async Ticker to an EquitySnapshot."""
     if timestamp is None:
         ticker_time = getattr(ticker, "time", None)
         if ticker_time is not None:
