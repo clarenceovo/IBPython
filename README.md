@@ -40,7 +40,7 @@ Start TWS or IB Gateway, confirm API access is enabled, then run the REST API:
 make run-api
 ```
 
-`make run-api` forces uvicorn to use the standard `asyncio` loop. This matters for `ib_async`; uvicorn's `uvloop` backend can conflict with nested event-loop patching and prevent the API from connecting even when notebooks can.
+`make run-api` forces uvicorn to use the standard `asyncio` loop. This matters for `ib_async`; uvicorn's `uvloop` backend can conflict with nested event-loop patching and prevent the API from connecting even when notebooks can. The runtime requirements install plain `uvicorn` (no `[standard]` extras), so `uvloop` is not present in production images at all.
 
 Open:
 
@@ -203,6 +203,11 @@ Compose uses separate Dockerfiles:
 - `Dockerfile.scheduler`
 
 `Dockerfile` remains an API-compatible default for tools that expect the conventional filename.
+
+Images stay lean:
+
+- `requirements.txt` covers runtime packages only. `pandas` and `gunicorn` are not used by any service and are not installed; notebooks get `pandas` from `requirements-dev.txt`.
+- Images ship no `curl`. The `ibkr-rest-app` healthcheck runs a Python `urllib` one-liner, so the `slim` base image needs no extra apt packages.
 
 The Compose app services set `IBKR_HOST` from `IBKR_DOCKER_HOST`, defaulting to `host.docker.internal`, which lets containers reach TWS or IB Gateway running on the host machine through Docker Desktop. Override `IBKR_DOCKER_HOST` and `IBKR_DOCKER_PORT` if IB Gateway runs elsewhere.
 

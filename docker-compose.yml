@@ -55,7 +55,7 @@ services:
           cpus: "0.5"
           memory: 256M
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/system/live"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/system/live', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 5
