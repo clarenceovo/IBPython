@@ -105,6 +105,10 @@ async def main() -> None:
         port=settings.ibkr_port,
         client_id=settings.ibkr_client_id,
         pacing_guard=pacing_guard,
+        redis=redis,
+        connection_control_key=settings.ibkr_connection_control_redis_key,
+        connection_control_poll_seconds=settings.ibkr_connection_control_poll_seconds,
+        client_role="scheduler",
     )
 
     scheduler = GenericScheduler(

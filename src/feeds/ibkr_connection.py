@@ -7,13 +7,19 @@ used by all domain-specific sub-clients (historical, options, account, reference
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import logging
 import time as monotonic_time
+from datetime import datetime, timezone
+from uuid import uuid4
 from typing import TYPE_CHECKING, Any, ClassVar
+
+from pydantic import BaseModel, ConfigDict, StrictBool
 
 from src.config import config_constant as constants
 from src.transport.metrics import metrics
-from src.feeds.exceptions import IBKRConnectionError
+from src.feeds.exceptions import IBKRConnectionDisabledError, IBKRConnectionError
 
 if TYPE_CHECKING:
     from src.feeds.contracts import ContractSpec
@@ -22,6 +28,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DETECTION_TIMEOUT = 180  # seconds before IBKR reports idle timeout
+
+
+class IBKRConnectionSwitch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: StrictBool
 
 
 def _ib_insync_compatible_loop() -> asyncio.AbstractEventLoop:
@@ -151,6 +163,11 @@ class IBKRConnectionManager:
         retry_base_delay_seconds: float = 0.5,
         pacing_guard: "IBKRHistoricalPacingGuard | None" = None,
         rate_limiter: Any | None = None,
+        redis: Any | None = None,
+        connection_control_key: str = constants.DEFAULT_IBKR_CONNECTION_CONTROL_REDIS_KEY,
+        connection_control_poll_seconds: float = constants.DEFAULT_IBKR_CONNECTION_CONTROL_POLL_SECONDS,
+        on_connected: Any | None = None,
+        client_role: str = "notebook",
     ) -> None:
         self.host = host
         self.port = port
@@ -166,6 +183,27 @@ class IBKRConnectionManager:
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._connection_dead = False
         self._notification_callback: Any | None = None
+        self._control_redis = redis
+        self.connection_control_key = connection_control_key
+        self._control_poll_seconds = connection_control_poll_seconds
+        self._control_lock = asyncio.Lock()
+        self._control_task: asyncio.Task[None] | None = None
+        self._connect_task: asyncio.Task[None] | None = None
+        self._reconnect_task: asyncio.Task[None] | None = None
+        self._cleanup_tasks: set[asyncio.Task[Any]] = set()
+        self._session_end_callbacks: list[Any] = []
+        self.generation = 0
+        self.session_ended = asyncio.Event()
+        self._closed = False
+        self.connection_enabled = redis is None
+        self.desired_enabled: bool | None = True if redis is None else None
+        self.connection_control_error: str | None = None
+        self._on_connected = on_connected
+        self.market_data_type = 1
+        self.client_role = client_role
+        self.instance_id = str(uuid4())
+        self.last_control_check: str | None = None
+        self._connect_error: str | None = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -208,59 +246,137 @@ class IBKRConnectionManager:
     # Connection lifecycle
     # ------------------------------------------------------------------
 
+    def capture_session(self) -> tuple[int, Any]:
+        self.require_connection_enabled()
+        if not self.is_connected or self._shutting_down:
+            raise IBKRConnectionError("IBKR session is not connected")
+        return self.generation, self._ib
+
+    def require_session(self, session: tuple[int, Any]) -> None:
+        self.require_connection_enabled()
+        if self._shutting_down or session != (self.generation, self._ib) or self._ib is None:
+            raise IBKRConnectionError("IBKR connection changed; submit a new request")
+
+    def add_session_end_callback(self, callback: Any) -> None:
+        self._session_end_callbacks.append(callback)
+
+    def _end_session(self) -> None:
+        self.generation += 1
+        self.session_ended.set()
+        self.session_ended = asyncio.Event()
+        for callback in self._session_end_callbacks:
+            try:
+                result = callback(self._ib)
+                if inspect.isawaitable(result):
+                    self.retain_background_task(asyncio.create_task(result))
+            except Exception:
+                logger.exception("IBKR session cleanup callback failed")
+
+    def _require_generation(self, generation: int) -> None:
+        self.require_connection_enabled()
+        if generation != self.generation or self._closed or self._shutting_down:
+            raise IBKRConnectionError("IBKR connection attempt was interrupted")
+
     async def connect(self) -> None:
+        # An explicit later connect may reopen a closed manager; older calls cannot.
+        generation = self.generation
+        self._closed = False
         self._shutting_down = False
-        self._connection_dead = False
-        if self._ib is not None and self._ib.isConnected():
-            logger.debug("connect skipped – already connected to %s:%d clientId=%d", self.host, self.port, self.client_id)
+        await self.start_connection_control()
+        await self.refresh_connection_control()
+        self._require_generation(generation)
+        if self.is_connected:
             return
-
-        logger.info("connecting to IBKR at %s:%d clientId=%d", self.host, self.port, self.client_id)
-
+        if self._connect_task is None or self._connect_task.done():
+            self._connect_task = asyncio.create_task(self._connect(generation))
+            self._connect_task.add_done_callback(self._consume_task)
+        task = self._connect_task
         try:
-            from ib_insync import IB
-        except ImportError as exc:
-            raise RuntimeError("ib_insync is required to connect to IBKR") from exc
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self._require_generation(generation)
+            raise
+
+    async def _connect(self, generation: int) -> None:
+        self._require_generation(generation)
+        self._connection_dead = False
+        if self.is_connected:
+            return
+        self._disconnect_stale_client()
+        from ib_insync import IB
 
         _patch_ib_insync_loop_getters()
         _maybe_apply_nest_asyncio()
-
-        # Always create a fresh IB() on the current running loop.
-        self._ib = IB()
-        self._ib.errorEvent += self._on_ibkr_error
-        self._ib.disconnectedEvent += self._on_ibkr_disconnected
-        self._ib.timeoutEvent += self._on_ibkr_timeout
-        t0 = monotonic_time.monotonic()
+        ib = IB()
+        self._ib = ib
+        ib.errorEvent += self._on_ibkr_error
+        ib.disconnectedEvent += self._on_ibkr_disconnected
+        ib.timeoutEvent += self._on_ibkr_timeout
+        self._last_ibkr_error = None
         try:
             await self._with_retry(
-                lambda: self._ib.connectAsync(self.host, self.port, clientId=self.client_id),
-                operation="connect",
+                lambda: ib.connectAsync(self.host, self.port, clientId=self.client_id), operation="connect",
             )
-            if not self._ib.isConnected():
-                raise IBKRConnectionError("connectAsync returned but IBKR client is not connected")
-            logger.info("connected to IBKR in %.2fs", monotonic_time.monotonic() - t0)
-            self._ib.setTimeout(DETECTION_TIMEOUT)
-        except Exception:
-            logger.exception(
-                "failed to connect to IBKR at %s:%d clientId=%d; last_ibkr_error=%s",
-                self.host,
-                self.port,
-                self.client_id,
-                self._last_ibkr_error,
-            )
-            self._disconnect_stale_client()
+            self._require_generation(generation)
+            if self._ib is not ib or not ib.isConnected():
+                raise IBKRConnectionError("IBKR socket setup did not complete")
+            ib.setTimeout(DETECTION_TIMEOUT)
+            # Minimal fake clients may omit this API; real IB always supplies it.
+            set_mode = getattr(ib, "reqMarketDataType", None)
+            if callable(set_mode):
+                set_mode(self.market_data_type)
+            if self._on_connected is not None:
+                await self._on_connected()
+            self._require_generation(generation)
+            self._connect_error = None
+            logger.info("IBKR connected clientId=%s generation=%s", self.client_id, generation)
+        except BaseException:
+            if self._ib is ib:
+                self._dispose_ib_client(reason="connection attempt ended")
+            else:
+                # A cancellation-resistant old attempt must only close its own socket.
+                self._close_ib_client(ib, reason="obsolete connection attempt")
             raise
 
-    async def disconnect(self) -> None:
+    @staticmethod
+    def _consume_task(task: asyncio.Task[Any]) -> None:
+        if not task.cancelled():
+            task.exception()
+
+    def _stop_connection(self, *, stop_control: bool) -> set[asyncio.Task[Any]]:
         self._shutting_down = True
-        current_task = asyncio.current_task()
-        reconnect_tasks = [task for task in self._background_tasks if task is not current_task and not task.done()]
-        for task in reconnect_tasks:
-            task.cancel()
-        if reconnect_tasks:
-            await asyncio.gather(*reconnect_tasks, return_exceptions=True)
-            self._background_tasks.difference_update(reconnect_tasks)
+        if stop_control:
+            self._closed = True
+        self._end_session()
+        # This happens before the first await, including when the caller is cancelled.
         self._dispose_ib_client(reason="disconnect")
+        current = asyncio.current_task()
+        cancelled = set(self._background_tasks)
+        cancelled.update(task for task in (self._connect_task, self._reconnect_task) if task is not None)
+        self._connect_task = self._reconnect_task = None
+        if stop_control and self._control_task is not None:
+            cancelled.add(self._control_task)
+            self._control_task = None
+        for task in cancelled:
+            if task is not current and not task.done():
+                task.cancel()
+        return {task for task in cancelled | self._cleanup_tasks if task is not current and not task.done()}
+
+    async def _drain_cleanup(self, tasks: set[asyncio.Task[Any]]) -> None:
+        if not tasks:
+            return
+        _, pending = await asyncio.wait(tasks, timeout=5)
+        self._background_tasks.difference_update(task for task in tasks if task.done())
+        for task in pending:
+            task.cancel()
+        if pending:
+            logger.warning("IBKR cleanup deadline reached: %s tasks; socket already closed", len(pending))
+
+    async def disconnect(self, *, stop_control: bool = True) -> None:
+        tasks = self._stop_connection(stop_control=stop_control)
+        cleanup = asyncio.create_task(self._drain_cleanup(tasks))
+        self.retain_background_task(cleanup)
+        await asyncio.shield(cleanup)
 
     async def __aenter__(self) -> "IBKRConnectionManager":
         await self.connect()
@@ -271,15 +387,21 @@ class IBKRConnectionManager:
 
     async def ensure_connected(self) -> None:
         """Ensure the IB connection is alive, reconnecting if necessary."""
+        self.require_connection_enabled()
         if self._ib is not None and self._ib.isConnected():
             return
+        generation = self.generation
         async with self._reconnect_lock:
+            self._require_generation(generation)
+            self.require_connection_enabled()
             # Double-check after acquiring lock.
             if self._ib is not None and self._ib.isConnected():
                 return
             logger.info("connection stale or missing; reconnecting")
             try:
                 await self.connect()
+            except IBKRConnectionDisabledError:
+                raise
             except Exception as exc:
                 root_cause = _root_cause_message(exc)
                 logger.exception(
@@ -296,6 +418,120 @@ class IBKRConnectionManager:
                     f"clientId={self.client_id}. root_cause={root_cause}. "
                     f"{_last_ibkr_error_message(self._last_ibkr_error)}"
                 ) from exc
+
+    def require_connection_enabled(self) -> None:
+        if not self.connection_enabled:
+            raise IBKRConnectionDisabledError("IBKR connection disabled by Redis control switch")
+
+    async def start_connection_control(self) -> None:
+        if self._control_redis is None or self._closed:
+            return
+        if self._control_task is None or self._control_task.done():
+            self._control_task = asyncio.create_task(self._watch_connection_control())
+            self._control_task.add_done_callback(self._consume_task)
+        await self.refresh_connection_control()
+
+    async def refresh_connection_control(self) -> None:
+        if self._control_redis is None or self._closed:
+            return
+        generation = self.generation
+        async with self._control_lock:
+            if self._closed or generation != self.generation:
+                return
+            try:
+                async with asyncio.timeout(2):
+                    raw = await self._control_redis.get_raw(self.connection_control_key)
+                desired = None if raw is None else IBKRConnectionSwitch.model_validate_json(raw).enabled
+                error = "missing" if raw is None else None
+            except Exception as exc:
+                desired, error = None, type(exc).__name__
+            # A read that began before shutdown cannot restart the manager.
+            if self._closed or generation != self.generation:
+                return
+            self.last_control_check = datetime.now(timezone.utc).isoformat()
+            self.desired_enabled = desired
+            self.connection_control_error = error
+            await self._apply_connection_switch(desired is True)
+
+    async def write_connection_control(self, switch: IBKRConnectionSwitch) -> None:
+        if self._control_redis is None:
+            raise IBKRConnectionError("Redis connection control is not configured")
+        # Own the write/application so cancellation of an HTTP request cannot split them.
+        task = asyncio.create_task(self._write_connection_control(switch))
+        self.retain_background_task(task)
+        await asyncio.shield(task)
+
+    async def _write_connection_control(self, switch: IBKRConnectionSwitch) -> None:
+        generation = self.generation
+        async with self._control_lock:
+            try:
+                async with asyncio.timeout(2):
+                    await self._control_redis.set_raw(self.connection_control_key, switch.model_dump_json())
+            except Exception as exc:
+                self.connection_control_error = type(exc).__name__
+                self.desired_enabled = None
+                await self._apply_connection_switch(False)
+                raise
+            if self._closed or generation != self.generation:
+                return
+            self.last_control_check = datetime.now(timezone.utc).isoformat()
+            self.desired_enabled = switch.enabled
+            self.connection_control_error = None
+            await self._apply_connection_switch(switch.enabled)
+
+    async def _apply_connection_switch(self, enabled: bool, *, reconnect: bool = False) -> None:
+        changed = self.connection_enabled != enabled
+        self.connection_enabled = enabled
+        if not enabled:
+            self._connection_dead = False
+            if changed or self._ib is not None or (self._connect_task is not None and not self._connect_task.done()):
+                tasks = self._stop_connection(stop_control=False)
+                self.retain_background_task(asyncio.create_task(self._drain_cleanup(tasks)))
+        elif not self._closed:
+            self._shutting_down = False
+            self._schedule_reconnect()
+
+    def _schedule_reconnect(self) -> None:
+        if self._closed or self._shutting_down or not self.connection_enabled or self.is_connected:
+            return
+        if self._reconnect_task is None or self._reconnect_task.done():
+            self._reconnect_task = asyncio.create_task(self._reconnect())
+            self._reconnect_task.add_done_callback(self._consume_task)
+
+    def control_status(self) -> dict[str, Any]:
+        connected = self.is_connected
+        connecting = self._connect_task is not None and not self._connect_task.done()
+        retrying = self._reconnect_task is not None and not self._reconnect_task.done()
+        status = "connected" if connected else "disabled" if not self.connection_enabled else "down" if self._connection_dead else "disconnected"
+        lifecycle = "connected" if connected else "disabled" if not self.connection_enabled else "connecting" if connecting else "retrying" if retrying else "disconnected"
+        return {
+            "enabled": self.connection_enabled, "desired_enabled": self.desired_enabled,
+            "connection_status": status, "socket_connected": connected, "lifecycle_state": lifecycle,
+            "generation": self.generation, "redis_key": self.connection_control_key,
+            "client_id": self.client_id, "instance_id": self.instance_id, "role": self.client_role,
+            "last_checked_at": self.last_control_check,
+            "last_error": self.connection_control_error or self._connect_error,
+            "updated_at": datetime.now(timezone.utc).isoformat(), "poll_seconds": self._control_poll_seconds,
+            "ttl_seconds": max(60, int(6 * self._control_poll_seconds)),
+        }
+
+    async def _publish_control_status(self) -> None:
+        if self._control_redis is None:
+            return
+        status = self.control_status()
+        async with asyncio.timeout(2):
+            await self._control_redis.set_raw(
+                f"{self.connection_control_key}:clients:{self.instance_id}", json.dumps(status), ex=status["ttl_seconds"],
+            )
+
+    async def _watch_connection_control(self) -> None:
+        while not self._closed:
+            try:
+                await self.refresh_connection_control()
+                await self._publish_control_status()
+            except Exception:
+                logger.warning("IBKR control watcher iteration failed", exc_info=True)
+            await asyncio.sleep(self._control_poll_seconds)
 
     # ------------------------------------------------------------------
     # IBKR event handlers
@@ -331,13 +567,14 @@ class IBKRConnectionManager:
 
     def _on_ibkr_disconnected(self, *_: object) -> None:
         """Handle IB disconnection events with automatic reconnection."""
-        if self._shutting_down:
+        if self._shutting_down or not self.connection_enabled:
             logger.info("IBKR disconnected during shutdown – skipping reconnection")
             return
+        if self._connect_task is not None and not self._connect_task.done():
+            return  # The owning connection attempt handles setup failure.
         logger.warning("IBKR disconnected – attempting reconnection")
-        task = asyncio.create_task(self._reconnect())
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        self._end_session()
+        self._schedule_reconnect()
 
     def _on_ibkr_timeout(self, *_: object) -> None:
         """Handle IB timeout events."""
@@ -349,50 +586,30 @@ class IBKRConnectionManager:
             logger.warning("IBKR connection timeout – connection lost")
 
     async def _reconnect(self) -> None:
-        """Reconnect with exponential backoff (max 5 attempts)."""
-        async with self._reconnect_lock:
-            # Another coroutine may have already reconnected.
-            if self._ib is not None and self._ib.isConnected():
-                logger.info("IBKR already reconnected by another coroutine")
+        """Keep trying while enabled; stop immediately on disable or shutdown."""
+        generation = self.generation
+        attempt = 0
+        while not self._shutting_down and not self._closed and self.connection_enabled and generation == self.generation:
+            if self.is_connected:
                 return
-            max_attempts = 5
-            for attempt in range(1, max_attempts + 1):
-                if self._shutting_down:
-                    logger.info("IBKR reconnect aborted – shutdown in progress")
+            try:
+                async with self._reconnect_lock:
+                    self._require_generation(generation)
+                    await self.connect()
+                return
+            except IBKRConnectionDisabledError:
+                return
+            except Exception as exc:
+                if generation != self.generation or self._closed:
                     return
-                try:
-                    logger.info("IBKR reconnect attempt %s/%s", attempt, max_attempts)
-                    if self._ib is not None:
-                        try:
-                            self._ib.disconnect()
-                        except Exception:
-                            logger.debug("failed to disconnect stale IBKR instance", exc_info=True)
-                    await self._with_retry(
-                        lambda: self._ib.connectAsync(self.host, self.port, clientId=self.client_id),
-                        operation="reconnect",
-                    )
-                    self._ib.setTimeout(DETECTION_TIMEOUT)
-                    logger.info("IBKR reconnected successfully on attempt %s", attempt)
-                    return
-                except Exception as exc:
-                    delay = 2 ** attempt
-                    logger.error("IBKR reconnect attempt %s failed: %s; next retry in %ss", attempt, exc, delay)
-                    if attempt >= max_attempts:
-                        self._connection_dead = True
-                        logger.critical(
-                            "IBKR reconnection FAILED after %s attempts — connection is DEAD. "
-                            "host=%s port=%d clientId=%d last_error=%s last_ibkr_error=%s "
-                            "All market data requests will fail until connection is restored.",
-                            max_attempts,
-                            self.host,
-                            self.port,
-                            self.client_id,
-                            str(exc),
-                            self._last_ibkr_error,
-                        )
-                        await self._fire_connection_dead_alert(exc)
-                        break
-                    await asyncio.sleep(delay)
+                attempt += 1
+                self._connect_error = str(exc)
+                self._connection_dead = attempt >= 5
+                if attempt == 5:
+                    await self._fire_connection_dead_alert(exc)
+                delay = min(30, 2 ** min(attempt, 5))
+                logger.warning("IBKR reconnect failed clientId=%s attempt=%s; retry in %ss", self.client_id, attempt, delay)
+                await asyncio.sleep(delay)
 
     # ------------------------------------------------------------------
     # Connection dead alerting
@@ -448,14 +665,24 @@ class IBKRConnectionManager:
     async def with_retry(self, call: Any, *, operation: str) -> Any:
         """Execute an async callable with retry logic for transient errors."""
         last_error: BaseException | None = None
+        generation, owner = self.generation, self._ib
         t0 = monotonic_time.monotonic()
         for attempt in range(1, self.retry_attempts + 1):
+            self._require_generation(generation)
             try:
                 await self.wait_for_ibkr_request(operation=operation)
+                self._require_generation(generation)
+                if owner is not self._ib:
+                    raise IBKRConnectionError("IBKR connection changed during request")
                 result = await call()
+                self._require_generation(generation)
+                if owner is not self._ib:
+                    raise IBKRConnectionError("IBKR connection changed during request")
                 elapsed = monotonic_time.monotonic() - t0
                 metrics.ibkr_request_duration.observe(elapsed, {"operation": operation, "status": "ok"})
                 return result
+            except IBKRConnectionError:
+                raise
             except Exception as exc:  # pragma: no cover - exercised with live gateways.
                 last_error = exc
                 if not self.is_transient_error(exc) or attempt >= self.retry_attempts:
@@ -541,18 +768,20 @@ class IBKRConnectionManager:
 
     def retain_background_task(self, task: asyncio.Task[None]) -> None:
         """Keep lifecycle cleanup alive if its initiating request is cancelled."""
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_tasks.discard)
+        task.add_done_callback(self._consume_task)
 
     def _disconnect_stale_client(self) -> None:
         self._dispose_ib_client(reason="stale client")
 
     def _dispose_ib_client(self, *, reason: str) -> None:
         """Fully release the current ib_insync client and detach callbacks."""
-        ib = self._ib
-        if ib is None:
-            return
+        ib, self._ib = self._ib, None
+        if ib is not None:
+            self._close_ib_client(ib, reason=reason)
 
+    def _close_ib_client(self, ib: Any, *, reason: str) -> None:
         self._detach_ib_event_handlers(ib)
         try:
             is_connected = getattr(ib, "isConnected", None)
@@ -576,8 +805,6 @@ class IBKRConnectionManager:
                 client_reset()
         except Exception:
             logger.debug("error resetting low-level IBKR client", exc_info=True)
-        finally:
-            self._ib = None
 
     def _detach_ib_event_handlers(self, ib: Any) -> None:
         for event_name, handler in (
@@ -598,6 +825,25 @@ class _NoopMarketDataLease:
 
     async def release(self) -> None:
         self.released = True
+
+
+def capture_ibkr_session(connection: Any) -> tuple[int, Any]:
+    """Capture a session, including lightweight injected feed adapters."""
+    capture = getattr(connection, "capture_session", None)
+    if callable(capture):
+        return capture()
+    return getattr(connection, "generation", 0), connection.ib
+
+
+def require_ibkr_session(connection: Any, session: tuple[int, Any]) -> None:
+    require = getattr(connection, "require_session", None)
+    if callable(require):
+        require(session)
+        return
+    if not getattr(connection, "connection_enabled", True):
+        raise IBKRConnectionDisabledError("IBKR connection disabled by Redis control switch")
+    if session[0] != getattr(connection, "generation", 0) or session[1] is not connection.ib:
+        raise IBKRConnectionError("IBKR connection changed; submit a new request")
 
 
 async def wait_for_ibkr_request(connection: Any, *, operation: str, weight: int = 1) -> None:

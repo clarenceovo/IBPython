@@ -19,7 +19,12 @@ from src.feeds.account import (
     normalize_position_pnl,
     normalize_positions,
 )
-from src.feeds.ibkr_connection import IBKRConnectionManager, wait_for_ibkr_request
+from src.feeds.ibkr_connection import (
+    IBKRConnectionManager,
+    capture_ibkr_session,
+    require_ibkr_session,
+    wait_for_ibkr_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +42,13 @@ class IBKRAccountFeedClient:
     async def load_account_summary(self, account: str = "") -> list[AccountSummaryDTO]:
         """Load account summary values grouped by account."""
         await self._connection.ensure_connected()
+        session = capture_ibkr_session(self._connection)
         logger.info("load_account_summary: account=%s", account or "all")
         values = await self._connection.with_retry(
-            lambda: self._ib.accountSummaryAsync(account),
+            lambda: session[1].accountSummaryAsync(account),
             operation=f"account_summary:{account or 'all'}",
         )
+        require_ibkr_session(self._connection, session)
         result = group_account_summary(normalize_account_values(values))
         logger.info("load_account_summary: %d accounts for %s", len(result), account or "all")
         return result
@@ -49,11 +56,13 @@ class IBKRAccountFeedClient:
     async def load_live_positions(self) -> list[LivePositionDTO]:
         """Load current live positions."""
         await self._connection.ensure_connected()
+        session = capture_ibkr_session(self._connection)
         logger.info("load_live_positions: starting")
         positions = await self._connection.with_retry(
-            lambda: self._ib.reqPositionsAsync(),
+            lambda: session[1].reqPositionsAsync(),
             operation="positions",
         )
+        require_ibkr_session(self._connection, session)
         result = normalize_positions(positions)
         logger.info("load_live_positions: %d positions loaded", len(result))
         return result
@@ -68,17 +77,54 @@ class IBKRAccountFeedClient:
 
     async def subscribe_account_pnl(self, account: str, model_code: str = "") -> object:
         """Start a live account PnL subscription and return the ib_insync PnL object."""
-        await self._connection.ensure_connected()
-        logger.info("subscribe_account_pnl: account=%s model_code=%s", account, model_code)
-        await wait_for_ibkr_request(self._connection, operation=f"account_pnl_subscribe:{account or 'all'}")
-        return self._ib.reqPnL(account, model_code)
+        _, subscription = await self._subscribe_pnl(account, model_code)
+        return subscription
 
     async def subscribe_position_pnl(self, account: str, con_id: int, model_code: str = "") -> object:
         """Start a live position PnL subscription and return the ib_insync PnLSingle object."""
+        _, subscription = await self._subscribe_pnl(account, model_code, con_id)
+        return subscription
+
+    async def _subscribe_pnl(
+        self, account: str, model_code: str, con_id: int | None = None,
+    ) -> tuple[tuple[int, Any], Any]:
         await self._connection.ensure_connected()
-        logger.info("subscribe_position_pnl: account=%s con_id=%d model_code=%s", account, con_id, model_code)
-        await wait_for_ibkr_request(self._connection, operation=f"position_pnl_subscribe:{con_id}")
-        return self._ib.reqPnLSingle(account, model_code, con_id)
+        session = capture_ibkr_session(self._connection)
+        operation = f"account_pnl_subscribe:{account or 'all'}" if con_id is None else f"position_pnl_subscribe:{con_id}"
+        await wait_for_ibkr_request(self._connection, operation=operation)
+        require_ibkr_session(self._connection, session)
+        ib = session[1]
+        subscription = ib.reqPnL(account, model_code) if con_id is None else ib.reqPnLSingle(account, model_code, con_id)
+        return session, subscription
+
+    async def _wait_for_pnl(self, session: tuple[int, Any], wait_seconds: float) -> None:
+        ended = getattr(self._connection, "session_ended", None)
+        if wait_seconds:
+            if isinstance(ended, asyncio.Event):
+                try:
+                    await asyncio.wait_for(ended.wait(), timeout=wait_seconds)
+                except TimeoutError:
+                    pass
+            else:
+                await asyncio.sleep(wait_seconds)
+        require_ibkr_session(self._connection, session)
+
+    async def _cancel_pnl(
+        self, ib: Any, account: str, model_code: str, con_id: int | None = None,
+    ) -> None:
+        cancel = getattr(ib, "cancelPnL" if con_id is None else "cancelPnLSingle", None)
+        if cancel is None:
+            return
+        operation = f"account_pnl_cancel:{account or 'all'}" if con_id is None else f"position_pnl_cancel:{con_id}"
+        try:
+            async with asyncio.timeout(5):
+                try:
+                    await wait_for_ibkr_request(self._connection, operation=operation)
+                finally:
+                    args = (account, model_code) if con_id is None else (account, model_code, con_id)
+                    cancel(*args)
+        except Exception:
+            logger.debug("PnL subscription cleanup failed", exc_info=True)
 
     async def load_account_pnl_snapshot(
         self,
@@ -89,16 +135,12 @@ class IBKRAccountFeedClient:
     ) -> AccountPnLDTO:
         """Open a short-lived account PnL subscription and return the latest values."""
         logger.info("load_account_pnl_snapshot: account=%s wait=%.1fs", account, wait_seconds)
-        subscription = await self.subscribe_account_pnl(account, model_code)
+        session, subscription = await self._subscribe_pnl(account, model_code)
         try:
-            if wait_seconds:
-                await asyncio.sleep(wait_seconds)
+            await self._wait_for_pnl(session, wait_seconds)
             return self.account_pnl_snapshot(subscription, account, model_code)
         finally:
-            cancel = getattr(self._ib, "cancelPnL", None)
-            if cancel is not None:
-                await wait_for_ibkr_request(self._connection, operation=f"account_pnl_cancel:{account or 'all'}")
-                cancel(account, model_code)
+            await self._cancel_pnl(session[1], account, model_code)
 
     async def load_position_pnl_snapshot(
         self,
@@ -110,16 +152,12 @@ class IBKRAccountFeedClient:
     ) -> PositionPnLDTO:
         """Open a short-lived position PnL subscription and return the latest values."""
         logger.info("load_position_pnl_snapshot: account=%s con_id=%d wait=%.1fs", account, con_id, wait_seconds)
-        subscription = await self.subscribe_position_pnl(account, con_id, model_code)
+        session, subscription = await self._subscribe_pnl(account, model_code, con_id)
         try:
-            if wait_seconds:
-                await asyncio.sleep(wait_seconds)
+            await self._wait_for_pnl(session, wait_seconds)
             return self.position_pnl_snapshot(subscription, account, con_id, model_code)
         finally:
-            cancel = getattr(self._ib, "cancelPnLSingle", None)
-            if cancel is not None:
-                await wait_for_ibkr_request(self._connection, operation=f"position_pnl_cancel:{con_id}")
-                cancel(account, model_code, con_id)
+            await self._cancel_pnl(session[1], account, model_code, con_id)
 
     def account_pnl_snapshot(self, pnl_subscription: object, account: str, model_code: str = "") -> AccountPnLDTO:
         return normalize_account_pnl(pnl_subscription, account, model_code)

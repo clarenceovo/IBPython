@@ -101,6 +101,7 @@ from src.feeds.ibkr_connection import (
 )
 from src.feeds.exceptions import (  # noqa: E402
     IBKRConnectionError,
+    IBKRConnectionDisabledError,
     IBKRContractResolutionError,
     IBKRMarketDataUnavailableError,
     ConnectionStatus,
@@ -201,6 +202,9 @@ class IBKRFeedClient:
         pacing_guard: "IBKRHistoricalPacingGuard | None" = None,
         rate_limiter: Any | None = None,
         redis: Any | None = None,
+        connection_control_key: str = constants.DEFAULT_IBKR_CONNECTION_CONTROL_REDIS_KEY,
+        connection_control_poll_seconds: float = constants.DEFAULT_IBKR_CONNECTION_CONTROL_POLL_SECONDS,
+        client_role: str = "notebook",
     ) -> None:
         self._circuit_breaker = CircuitBreaker(
             failure_threshold=5,
@@ -225,6 +229,11 @@ class IBKRFeedClient:
             retry_base_delay_seconds=retry_base_delay_seconds,
             pacing_guard=pacing_guard or IBKRHistoricalPacingGuard(),
             rate_limiter=rate_limiter,
+            redis=redis,
+            connection_control_key=connection_control_key,
+            connection_control_poll_seconds=connection_control_poll_seconds,
+            on_connected=self._circuit_breaker.record_success,
+            client_role=client_role,
         )
         # Expose top-level attributes for backward compatibility
         self.host = self._connection.host
@@ -283,8 +292,11 @@ class IBKRFeedClient:
         """Return the current IBKR connection status as a string.
 
         Returns one of: ``ConnectionStatus.CONNECTED``,
-        ``ConnectionStatus.DISCONNECTED``, or ``ConnectionStatus.DOWN``.
+        ``ConnectionStatus.DISCONNECTED``, ``ConnectionStatus.DISABLED``,
+        or ``ConnectionStatus.DOWN``.
         """
+        if not self._connection.connection_enabled:
+            return ConnectionStatus.DISABLED
         if getattr(self._connection, '_connection_dead', False):
             return ConnectionStatus.DOWN
         if self._connection.is_connected:
@@ -298,11 +310,21 @@ class IBKRFeedClient:
     async def connect(self) -> None:
         await self._connection.connect()
 
+    async def start_connection_control(self) -> None:
+        await self._connection.start_connection_control()
+
     async def disconnect(self) -> None:
         await self._connection.disconnect()
 
     async def __aenter__(self) -> "IBKRFeedClient":
-        await self.connect()
+        try:
+            await self.connect()
+        except IBKRConnectionDisabledError:
+            logger.info("IBKR feed starts disabled; Redis watcher remains active")
+        except Exception:
+            if self._connection._control_redis is None:
+                raise
+            logger.warning("IBKR unavailable at startup; reconnecting in the background", exc_info=True)
         return self
 
     async def __aexit__(self, *_: object) -> None:
@@ -315,15 +337,21 @@ class IBKRFeedClient:
         ``client.connect`` are respected.
         """
         # Circuit breaker guard — fast-fail before any I/O
+        self._connection.require_connection_enabled()
+        generation = self._connection.generation
         await self._circuit_breaker.guard()
         try:
             if self._connection.ib is not None and hasattr(self._connection.ib, 'isConnected') and self._connection.ib.isConnected():
                 return
             async with self._connection._reconnect_lock:
+                self._connection._require_generation(generation)
+                self._connection.require_connection_enabled()
                 if self._connection.ib is not None and hasattr(self._connection.ib, 'isConnected') and self._connection.ib.isConnected():
                     return
                 try:
                     await self.connect()
+                except IBKRConnectionDisabledError:
+                    raise
                 except Exception as exc:
                     await self._circuit_breaker.record_failure()
                     root_cause = _root_cause_message(exc)
@@ -361,6 +389,8 @@ class IBKRFeedClient:
             result = await self._connection.with_retry(call, operation=operation)
             await self._circuit_breaker.record_success()
             return result
+        except IBKRConnectionDisabledError:
+            raise
         except Exception:
             await self._circuit_breaker.record_failure()
             raise

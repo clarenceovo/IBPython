@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     ibkr_port: int = Field(default=constants.DEFAULT_IBKR_PORT, alias=constants.IBKR_PORT_ENV)
     ibkr_client_id: int = Field(default=constants.DEFAULT_IBKR_CLIENT_ID, alias=constants.IBKR_CLIENT_ID_ENV)
     ibkr_mcp_client_id: int = Field(default=constants.DEFAULT_IBKR_MCP_CLIENT_ID, alias=constants.IBKR_MCP_CLIENT_ID_ENV)
+    ibkr_connection_control_redis_key: str = Field(
+        default=constants.DEFAULT_IBKR_CONNECTION_CONTROL_REDIS_KEY,
+        alias="IBKR_CONNECTION_CONTROL_REDIS_KEY", min_length=1,
+    )
+    ibkr_connection_control_poll_seconds: float = Field(
+        default=constants.DEFAULT_IBKR_CONNECTION_CONTROL_POLL_SECONDS,
+        alias="IBKR_CONNECTION_CONTROL_POLL_SECONDS", gt=0, le=60,
+    )
 
     redis_url: str = Field(default=constants.DEFAULT_REDIS_URL, alias=constants.REDIS_URL_ENV)
     redis_password: str = Field(default=constants.DEFAULT_REDIS_PASSWORD, alias=constants.REDIS_PASSWORD_ENV)

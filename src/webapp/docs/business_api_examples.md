@@ -51,6 +51,67 @@ Fetch a body after receiving `provider_code` and `article_id` from
 
 ## Market Research
 
+The read-only research dashboard is available at `/dashboard/` on the same
+host and port as the API. It serves local HTML/CSS/JavaScript with FastAPI
+0.142.2 and uses same-origin requests. Enter the API-wide bearer token in
+Connection when authentication is enabled; it is kept only in page memory.
+Market-data loads and refreshes are explicit actions.
+
+### Detailed batch results
+
+`POST /api/v1/business/getMarketPanelDetailed` and
+`POST /api/v1/business/getUniverseBarsDetailed` accept the same payloads as
+their existing list endpoints. The response contains `generated_at` and an
+ordered `results` array. Each entry includes `input_index`, `requested_symbol`,
+the normalized `request` (including contract identifiers), `status`, `bars`,
+and nullable `error`. Status is `success`, `empty`, or `error`. Valid requests
+return the envelope even when every instrument fails; malformed requests and
+missing universes retain their usual HTTP errors. Failed batches are not
+cached. Legacy endpoints still return sorted bare lists.
+
+`getReturns` warns about failed or empty instruments and omits symbols that
+appear in multiple successful instrument requests, preventing different
+contracts from being merged into one return series. Its existing response
+format is preserved. Realized volatility remains the sample standard
+deviation of per-bar log returns, without annualization.
+
+<!-- openapi-example: business.getEquityOverview spy_overview -->
+### SPY equity overview
+Combine the existing quote, dividends, and shortability feeds for a qualified
+equity. News is opt-in and returns headlines without article bodies.
+
+```json
+{
+  "symbol": "SPY",
+  "include_news": false,
+  "timeout_seconds": 10,
+  "cache_ttl_seconds": 5
+}
+```
+
+`getEquityOverview` accepts exchange, currency, primary exchange and `con_id`
+overrides. Dividends and shortability can be disabled separately with
+`include_dividends` and `include_shortability`. Optional `news_provider_codes`
+and `news_limit` control the news request; the limit defaults to 20.
+
+The response preserves each existing feed model and its timestamps, a
+`quote_observed_at`, `quote_received_at`, `quote_market_data_type`, per-section `section_status`,
+and `warnings`. Status is `available`, `partial`, `unavailable`, or
+`not_requested`. Missing numbers remain null; valid zeros stay zero. Quote
+timestamps and reference `observed_at` indicate application observation,
+not a guaranteed exchange trade time. `quote_observed_at` remains null when the
+source has no observation time, even though the legacy quote model requires a
+timestamp. Market-data types 1/2/3/4 indicate
+live/frozen/delayed/delayed-frozen data. Short availability is indicative.
+
+The 10-second default deadline (maximum 20) includes qualification and feed
+requests. Cleanup may take up to five additional seconds. Successful sections
+are retained when another source is unavailable. Only overviews whose requested
+sections are fully available are cached; cached timestamps are not refreshed.
+Quotes use a one-shot snapshot and return as soon as a usable price arrives,
+without waiting for IBKR's full snapshot interval. Generic reference ticks use separate temporary
+streams because IBKR snapshots cannot include generic ticks.
+
 <!-- openapi-example: business.getMarketPanel us_equity_panel -->
 ### US equity panel
 Load normalized long-form OHLCV bars for several symbols with one business
@@ -299,6 +360,26 @@ Load bars and compute close-to-close simple/log returns.
   "bar_size": "5 mins"
 }
 ```
+
+<!-- openapi-example: business.getReturns adjusted_daily_equity_returns -->
+### Daily equity returns adjusted for splits and dividends
+Use IBKR ADJUSTED_LAST historical prices. TRADES remains the default and
+adjusts for splits without dividend adjustment. This is a price adjustment
+choice, not a separate dividend-reinvestment simulation.
+
+```json
+{
+  "symbols": ["SPY", "QQQ"],
+  "asset_class": "equity",
+  "duration": "1 M",
+  "bar_size": "1 day",
+  "what_to_show": "ADJUSTED_LAST"
+}
+```
+
+See [IBKR ADJUSTED_LAST](https://www.interactivebrokers.com/docs/tws-api/doc/market-data-historical/historical-bar-what-to-show/adjusted-last)
+for instrument support and [IBKR TRADES](https://www.interactivebrokers.com/docs/tws-api/doc/market-data-historical/historical-bar-what-to-show/trades)
+for the default price basis.
 
 <!-- openapi-example: business.getOptionSkew tsla_skew -->
 ### TSLA option skew

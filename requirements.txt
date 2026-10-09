@@ -9,7 +9,7 @@ ib-insync>=0.9.86
 nest-asyncio>=1.5
 pandas>=2.2
 python-dotenv>=1.0
-fastapi>=0.115
+fastapi==0.142.2
 uvicorn[standard]>=0.30
 httpx>=0.27
 gunicorn>=22.0

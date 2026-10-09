@@ -10,6 +10,7 @@ from fastapi import Request
 
 from src.config.settings import Settings
 from src.feeds.event_contracts import IBKRWebAPIClient
+from src.feeds.exceptions import IBKRConnectionDisabledError
 from src.feeds.fixed_income import FixedIncomeReferenceProvider
 from src.feeds.ibkr_feed import IBKRFeedClient
 from src.feeds.ohlcv_loader import OHLCVLoader
@@ -39,10 +40,10 @@ class IBKRRestAppState:
             raise
         try:
             await self.feed.connect()
+        except IBKRConnectionDisabledError:
+            logger.info("REST app IBKR connection disabled; control API remains available")
         except Exception:
-            logger.exception("failed to connect IBKR feed during startup; closing Redis")
-            await self._safe_close(self.redis.close)
-            raise
+            logger.warning("IBKR unavailable; control API remains available while reconnecting", exc_info=True)
 
     async def close(self) -> None:
         errors: list[BaseException] = []
@@ -87,6 +88,10 @@ def build_rest_app_state(settings: Settings) -> IBKRRestAppState:
         client_id=settings.ibkr_client_id,
         pacing_guard=rate_limiter.pacing_guard,
         rate_limiter=rate_limiter,
+        redis=redis,
+        connection_control_key=settings.ibkr_connection_control_redis_key,
+        connection_control_poll_seconds=settings.ibkr_connection_control_poll_seconds,
+        client_role="api",
     )
     loader = OHLCVLoader(feed, store=None, redis=redis)
     market_data_cache = AsyncTTLCache(

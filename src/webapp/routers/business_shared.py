@@ -6,10 +6,10 @@ import logging
 import math
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, field_validator, model_validator
 
 from src.config.reference_data import resolve_index
 from src.feeds.models import AssetClass, OHLCVBar, OHLCVRequest
@@ -323,11 +323,35 @@ def symbol_to_ohlcv_request(item: str | BusinessOHLCVSymbol, payload: MarketPane
     )
 
 
-async def load_many_ohlcv(
+class InstrumentBarsResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_index: int
+    requested_symbol: str
+    request: OHLCVRequest
+    status: Literal["success", "empty", "error"]
+    bars: list[SerializeAsAny[OHLCVBar]] = Field(default_factory=list)
+    error: str | None = None
+
+
+class DetailedBarsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    results: list[InstrumentBarsResult]
+
+    def flattened_bars(self) -> list[OHLCVBar]:
+        return sorted([bar for result in self.results for bar in result.bars], key=lambda bar: (bar.symbol, bar.timestamp))
+
+    def cacheable(self) -> bool:
+        return all(result.status != "error" for result in self.results)
+
+
+async def load_many_ohlcv_detailed(
     requests: list[OHLCVRequest],
     payload: MarketPanelRequest,
     state: Any,
-) -> list[OHLCVBar]:
+) -> DetailedBarsResponse:
     import asyncio
 
     semaphore = asyncio.Semaphore(payload.max_concurrent_requests)
@@ -347,10 +371,23 @@ async def load_many_ohlcv(
             return await state.loader.load(request, persist=False, cache_latest=payload.cache_latest)
 
     raw_batches = await asyncio.gather(*(load_one(request) for request in requests), return_exceptions=True)
-    batches: list[list[OHLCVBar]] = []
-    for raw in raw_batches:
+    results: list[InstrumentBarsResult] = []
+    for index, (request, raw) in enumerate(zip(requests, raw_batches, strict=True)):
+        item = payload.symbols[index]
+        requested_symbol = item if isinstance(item, str) else item.symbol
+        if isinstance(raw, BaseException) and not isinstance(raw, Exception):
+            raise raw
         if isinstance(raw, Exception):
-            logging.getLogger("business_shared").warning("Failed to load OHLCV batch: %s", raw)
-            continue
-        batches.append(raw)  # type: ignore[arg-type]
-    return sorted([bar for batch in batches for bar in batch], key=lambda bar: (bar.symbol, bar.timestamp))
+            logging.getLogger("business_shared").warning("Failed to load OHLCV for %s: %s", request.symbol, raw)
+        results.append(InstrumentBarsResult(
+            input_index=index, requested_symbol=requested_symbol, request=request,
+            status="error" if isinstance(raw, Exception) else "success" if raw else "empty",
+            bars=[] if isinstance(raw, Exception) else raw,
+            error=(str(raw) or type(raw).__name__) if isinstance(raw, Exception) else None,
+        ))
+    return DetailedBarsResponse(results=results)
+
+
+async def load_many_ohlcv(requests: list[OHLCVRequest], payload: MarketPanelRequest, state: Any) -> list[OHLCVBar]:
+    """Compatibility projection of the shared per-instrument loader."""
+    return (await load_many_ohlcv_detailed(requests, payload, state)).flattened_bars()

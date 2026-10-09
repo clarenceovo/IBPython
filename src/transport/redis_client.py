@@ -214,6 +214,45 @@ class MarketDataRedisClient:
         kwargs = {"ex": ex} if ex is not None else {}
         await self._client.set(key, value, **kwargs)
 
+    async def list_ibkr_client_status(self, control_key: str) -> list[dict[str, Any]]:
+        """Read client heartbeats, measuring age with Redis TTL rather than host clocks."""
+        await self.connect()
+        prefix = f"{control_key}:clients:"
+        pattern = "".join(f"\\{char}" if char in r"\*?[]" else char for char in prefix) + "*"
+        records: dict[str, dict[str, Any]] = {}
+        async for key in self._client.scan_iter(match=pattern, count=100):
+            # Read payload and remaining TTL atomically: a concurrent heartbeat
+            # must not pair an old payload with a freshly reset expiry.
+            async with self._client.pipeline(transaction=True) as pipe:
+                pipe.get(key)
+                pipe.pttl(key)
+                raw, remaining_ms = await pipe.execute()
+            if raw is None or remaining_ms == -2:
+                continue
+            name = key.decode("utf-8") if isinstance(key, bytes) else str(key)
+            try:
+                payload = json.loads(raw)
+                if not isinstance(payload, dict):
+                    raise ValueError("Heartbeat must be an object")
+                ttl_seconds = float(payload["ttl_seconds"])
+                poll_seconds = float(payload["poll_seconds"])
+                if not (0 < poll_seconds <= 60 and ttl_seconds >= max(60, 6 * poll_seconds)):
+                    raise ValueError("Invalid heartbeat timing")
+                age = max(0.0, ttl_seconds - remaining_ms / 1000) if remaining_ms >= 0 else None
+                fresh = age is not None and age <= max(5, 2 * poll_seconds + 2)
+                payload.update(heartbeat_age_seconds=age, freshness="fresh" if fresh else "stale")
+                if not fresh:
+                    payload.update(connection_status="unknown", lifecycle_state="unknown", socket_connected=None)
+                records[name] = payload
+            except (KeyError, TypeError, ValueError):
+                logger.warning("Invalid IBKR client heartbeat at %s", name)
+                records[name] = {
+                    "instance_id": name.removeprefix(prefix), "freshness": "unknown",
+                    "connection_status": "unknown", "lifecycle_state": "unknown",
+                    "last_error": "Invalid client heartbeat",
+                }
+        return list(records.values())
+
     async def acquire_scheduler_lease(self, job_name: str, owner_token: str, *, ttl_seconds: float) -> bool:
         await self.connect()
         key = scheduler_lease_key(job_name)

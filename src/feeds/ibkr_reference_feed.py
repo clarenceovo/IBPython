@@ -23,8 +23,13 @@ from src.feeds.fundamental_data import (
     WSHEventDataRequest,
     WSHMetadataReport,
 )
-from src.feeds.ibkr_connection import IBKRConnectionManager
-from src.feeds.ibkr_connection import acquire_market_data_line, wait_for_ibkr_request
+from src.feeds.ibkr_connection import (
+    IBKRConnectionManager,
+    acquire_market_data_line,
+    capture_ibkr_session,
+    require_ibkr_session,
+    wait_for_ibkr_request,
+)
 from src.feeds.ibkr_historical import _format_ibkr_end_datetime
 from src.feeds.news import (
     HistoricalNewsHeadline,
@@ -134,7 +139,24 @@ class IBKRReferenceFeedClient:
         self._connection = connection
         self._historical = historical_client
         self._wsh_metadata_loaded = False
-        self._market_data_leases_by_ticker_id: dict[int, Any] = {}
+        self._market_data_leases_by_ticker_id: dict[int, tuple[Any, Any, Any]] = {}
+        register = getattr(connection, "add_session_end_callback", None)
+        if callable(register):
+            register(self._session_ended)
+
+    def _session_ended(self, ib: Any) -> Any:
+        self._wsh_metadata_loaded = False
+        leases = []
+        for ticker_id, (owner, _, lease) in list(self._market_data_leases_by_ticker_id.items()):
+            if owner is ib:
+                self._market_data_leases_by_ticker_id.pop(ticker_id)
+                leases.append(lease)
+
+        async def release() -> None:
+            async with asyncio.timeout(5):
+                await asyncio.gather(*(lease.release() for lease in leases), return_exceptions=True)
+
+        return release() if leases else None
 
     @property
     def _ib(self) -> Any:
@@ -189,11 +211,14 @@ class IBKRReferenceFeedClient:
         """Load Wall Street Horizon metadata as raw JSON."""
         await self._connection.ensure_connected()
         logger.info("load_wsh_metadata: starting")
+        session = capture_ibkr_session(self._connection)
+        ib = session[1]
         t0 = monotonic_time.monotonic()
         raw_json = await self._connection.with_retry(
-            lambda: self._ib.getWshMetaDataAsync(singleJsonEvent=True),
+            lambda: ib.getWshMetaDataAsync(singleJsonEvent=True),
             operation="wsh_metadata",
         )
+        require_ibkr_session(self._connection, session)
         self._wsh_metadata_loaded = True
         logger.info("load_wsh_metadata: completed in %.2fs", monotonic_time.monotonic() - t0)
         return WSHMetadataReport.from_raw_json(raw_json)
@@ -206,16 +231,19 @@ class IBKRReferenceFeedClient:
     ) -> WSHEventDataReport:
         """Load Wall Street Horizon event data as raw JSON."""
         await self._connection.ensure_connected()
+        session = capture_ibkr_session(self._connection)
         logger.info("load_wsh_event_data: starting")
         t0 = monotonic_time.monotonic()
         if ensure_metadata and not self._wsh_metadata_loaded:
             await self.load_wsh_metadata()
+        require_ibkr_session(self._connection, session)
         request_filter_json = request.to_filter_json() if request.uses_filter_json else ""
         wsh_event_data = _build_wsh_event_data(request)
         raw_json = await self._connection.with_retry(
-            lambda: self._ib.getWshEventDataAsync(wsh_event_data),
+            lambda: session[1].getWshEventDataAsync(wsh_event_data),
             operation="wsh_event_data",
         )
+        require_ibkr_session(self._connection, session)
         report = WSHEventDataReport.from_raw_json(
             raw_json=raw_json,
             request_filter_json=request_filter_json,
@@ -397,6 +425,8 @@ class IBKRReferenceFeedClient:
     async def subscribe_ticker(self, spec: ContractSpec) -> Any:
         """Subscribe to real-time market data for a contract."""
         await self._connection.ensure_connected()
+        session = capture_ibkr_session(self._connection)
+        ib = session[1]
         contract = build_ibkr_contract(spec)
         operation = f"subscribe_ticker:{spec.symbol}"
         lease = await acquire_market_data_line(
@@ -404,35 +434,31 @@ class IBKRReferenceFeedClient:
             contract_key=_rate_limit_contract_key(contract, operation),
             operation=operation,
         )
-        await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
+        ticker = None
         try:
-            ticker = self._ib.reqMktData(
+            await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
+            require_ibkr_session(self._connection, session)
+            ticker = ib.reqMktData(
                 contract,
                 genericTickList="",
                 snapshot=False,
                 regulatorySnapshot=False,
                 mktDataOptions=[],
             )
-        except Exception:
-            await lease.release()
+            self._market_data_leases_by_ticker_id[id(ticker)] = (ib, ticker, lease)
+            await asyncio.sleep(0.5)
+            require_ibkr_session(self._connection, session)
+            return ticker
+        except BaseException:
+            if ticker is not None:
+                await self.cancel_equity_tickers([ticker])
+            else:
+                await lease.release()
             raise
-        self._market_data_leases_by_ticker_id[id(ticker)] = lease
-        await asyncio.sleep(0.5)
-        return ticker
 
     async def unsubscribe_ticker(self, ticker: Any) -> None:
         """Cancel a market data subscription."""
-        if self._ib is None:
-            return
-        try:
-            await wait_for_ibkr_request(self._connection, operation="unsubscribe_ticker:cancelMktData")
-            self._ib.cancelMktData(ticker.contract)
-        except Exception:
-            logger.warning("error unsubscribing ticker", exc_info=True)
-        finally:
-            lease = self._market_data_leases_by_ticker_id.pop(id(ticker), None)
-            if lease is not None:
-                await lease.release()
+        await self.cancel_equity_tickers([ticker])
 
     async def capture_equity_snapshots(
         self,
@@ -443,89 +469,127 @@ class IBKRReferenceFeedClient:
     ) -> list[EquitySnapshotCaptureResult]:
         """Capture IBKR one-shot market-data snapshots for equity contracts."""
         await self._connection.ensure_connected()
+        session = capture_ibkr_session(self._connection)
+        ib = session[1]
         results: list[EquitySnapshotCaptureResult] = []
+        ended = getattr(self._connection, "session_ended", None)
         subscribed_tickers: list[Any] = []
-        for symbol, exchange, currency, primary_exchange, con_id in symbols:
-            lease = None
-            try:
-                from ib_insync import Contract
-
-                kwargs: dict[str, Any] = {
-                    "secType": "STK",
-                    "symbol": symbol.upper(),
-                    "exchange": exchange.upper(),
-                    "currency": currency.upper(),
-                }
-                if primary_exchange:
-                    kwargs["primaryExchange"] = primary_exchange.upper()
-                if con_id and con_id > 0:
-                    kwargs["conId"] = con_id
-                contract = Contract(**kwargs)
-                operation = f"equity_snapshot:{symbol}"
-                lease = await acquire_market_data_line(
-                    self._connection,
-                    contract_key=_rate_limit_contract_key(contract, operation),
-                    operation=operation,
-                    ttl_seconds=lease_ttl_seconds,
-                )
-                await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
-                try:
-                    ticker = self._ib.reqMktData(
-                        contract,
-                        genericTickList="",
-                        snapshot=True,
-                        regulatorySnapshot=False,
-                        mktDataOptions=[],
-                    )
-                except Exception:
-                    await lease.release()
-                    raise
-                self._market_data_leases_by_ticker_id[id(ticker)] = lease
-                subscribed_tickers.append(ticker)
-                ticker_contract = getattr(ticker, "contract", contract)
-                results.append(
-                    EquitySnapshotCaptureResult(
-                        requested_symbol=symbol,
-                        symbol=symbol.upper(),
-                        exchange=exchange.upper(),
-                        currency=currency.upper(),
-                        primary_exchange=primary_exchange.upper() if primary_exchange else "",
-                        con_id=int(getattr(ticker_contract, "conId", None) or con_id or 0),
-                        ticker=ticker,
-                    )
-                )
-            except Exception as exc:
-                logger.warning("failed to subscribe ticker for %s", symbol, exc_info=True)
-                results.append(
-                    EquitySnapshotCaptureResult(
-                        requested_symbol=symbol,
-                        symbol=symbol.upper(),
-                        exchange=exchange.upper(),
-                        currency=currency.upper(),
-                        primary_exchange=primary_exchange.upper() if primary_exchange else "",
-                        con_id=int(con_id or 0),
-                        error=str(exc),
-                    )
-                )
         try:
+            for symbol, exchange, currency, primary_exchange, con_id in symbols:
+                lease = None
+                lease_owned = False
+                try:
+                    from ib_insync import Contract
+
+                    kwargs: dict[str, Any] = {
+                        "secType": "STK",
+                        "symbol": symbol.upper(),
+                        "exchange": exchange.upper(),
+                        "currency": currency.upper(),
+                    }
+                    if primary_exchange:
+                        kwargs["primaryExchange"] = primary_exchange.upper()
+                    if con_id and con_id > 0:
+                        kwargs["conId"] = con_id
+                    contract = Contract(**kwargs)
+                    operation = f"equity_snapshot:{symbol}"
+                    lease = await acquire_market_data_line(
+                        self._connection,
+                        contract_key=_rate_limit_contract_key(contract, operation),
+                        operation=operation,
+                        ttl_seconds=lease_ttl_seconds,
+                    )
+                    await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
+                    require_ibkr_session(self._connection, session)
+                    ticker = ib.reqMktData(
+                        contract, genericTickList="", snapshot=True,
+                        regulatorySnapshot=False, mktDataOptions=[],
+                    )
+                    self._market_data_leases_by_ticker_id[id(ticker)] = (ib, ticker, lease)
+                    subscribed_tickers.append(ticker)
+                    lease_owned = True
+                    ticker_contract = getattr(ticker, "contract", contract)
+                    results.append(
+                        EquitySnapshotCaptureResult(
+                            requested_symbol=symbol,
+                            symbol=symbol.upper(),
+                            exchange=exchange.upper(),
+                            currency=currency.upper(),
+                            primary_exchange=primary_exchange.upper() if primary_exchange else "",
+                            con_id=int(getattr(ticker_contract, "conId", None) or con_id or 0),
+                            ticker=ticker,
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("failed to subscribe ticker for %s", symbol, exc_info=True)
+                    results.append(
+                        EquitySnapshotCaptureResult(
+                            requested_symbol=symbol,
+                            symbol=symbol.upper(),
+                            exchange=exchange.upper(),
+                            currency=currency.upper(),
+                            primary_exchange=primary_exchange.upper() if primary_exchange else "",
+                            con_id=int(con_id or 0),
+                            error=str(exc),
+                        )
+                    )
+                finally:
+                    if lease is not None and not lease_owned:
+                        async def release_setup() -> None:
+                            async with asyncio.timeout(5):
+                                # Sending can register a ticker before raising an exception.
+                                ticker_lookup = getattr(ib, "ticker", None)
+                                recovered = ticker_lookup(contract) if callable(ticker_lookup) else None
+                                if recovered is not None:
+                                    self._market_data_leases_by_ticker_id[id(recovered)] = (ib, recovered, lease)
+                                    await self.cancel_equity_tickers([recovered])
+                                else:
+                                    await lease.release()
+                        cleanup_task = asyncio.create_task(release_setup())
+                        self._connection.retain_background_task(cleanup_task)
+                        await asyncio.shield(cleanup_task)
             if subscribed_tickers:
-                await asyncio.sleep(snapshot_wait_seconds)
+                if snapshot_wait_seconds > 0 and isinstance(ended, asyncio.Event):
+                    try:
+                        await asyncio.wait_for(ended.wait(), timeout=snapshot_wait_seconds)
+                    except TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(snapshot_wait_seconds)
+            require_ibkr_session(self._connection, session)
         except BaseException:
             await self.cancel_equity_tickers(subscribed_tickers)
             raise
         return results
 
     async def cancel_equity_tickers(self, tickers: Sequence[Any]) -> int:
-        """Cancel market data subscriptions for a batch of tickers."""
-        if self._ib is None:
-            return 0
+        """Bounded cleanup retained when its initiating request is cancelled."""
         cleanup_failures = 0
-        for ticker in tickers:
+
+        async def cancel_one(ticker: Any) -> None:
+            nonlocal cleanup_failures
+            owned = self._market_data_leases_by_ticker_id.pop(id(ticker), None)
+            if owned is None:
+                return
+            ib, _, lease = owned
+            contract = getattr(ticker, "contract", None)
+            request_id = None
+            if getattr(ib, "wrapper", None) is not None:
+                try:
+                    request_id = self._connection.market_data_request_id(ib, ticker)
+                except Exception:
+                    pass  # Snapshot completion may already have removed the request id.
             try:
-                contract = getattr(ticker, "contract", None)
-                if contract is not None:
+                try:
                     await wait_for_ibkr_request(self._connection, operation="equity_snapshot:cancelMktData")
-                    self._ib.cancelMktData(contract)
+                finally:
+                    # Cancellation still has to be sent when pacing fails or times out.
+                    if contract is not None:
+                        try:
+                            ib.cancelMktData(contract)
+                        finally:
+                            if getattr(ib, "wrapper", None) is not None:
+                                self._connection.forget_market_data_ticker(ib, contract, ticker, request_id)
             except Exception:
                 cleanup_failures += 1
                 metrics.market_data_snapshot_cleanup_failures_total.inc(
@@ -533,7 +597,6 @@ class IBKRReferenceFeedClient:
                 )
                 logger.debug("error cancelling ticker", exc_info=True)
             finally:
-                lease = self._market_data_leases_by_ticker_id.pop(id(ticker), None)
                 if lease is not None:
                     try:
                         await lease.release()
@@ -543,4 +606,17 @@ class IBKRReferenceFeedClient:
                             {"asset_class": "equity", "operation": "release_lease"}
                         )
                         logger.debug("error releasing market data lease", exc_info=True)
+
+        async def cleanup() -> None:
+            nonlocal cleanup_failures
+            try:
+                async with asyncio.timeout(5):
+                    await asyncio.gather(*(cancel_one(ticker) for ticker in tickers))
+            except TimeoutError:
+                cleanup_failures += 1
+                logger.warning("Equity snapshot cleanup exceeded five seconds")
+
+        cleanup_task = asyncio.create_task(cleanup())
+        self._connection.retain_background_task(cleanup_task)
+        await asyncio.shield(cleanup_task)
         return cleanup_failures

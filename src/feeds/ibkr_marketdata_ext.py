@@ -21,6 +21,8 @@ from src.feeds.ibkr_connection import (
     _contract_int,
     _contract_text,
     acquire_market_data_line,
+    capture_ibkr_session,
+    require_ibkr_session,
     wait_for_ibkr_request,
 )
 from src.feeds.models import AssetClass
@@ -253,8 +255,53 @@ class IBKRMarketDataExtClient:
         self._tick_subscription_contracts: dict[tuple[str, str, str], Any] = {}
         self._tick_subscription_tick_types: dict[tuple[str, str, str], str] = {}
         self._tick_subscription_leases: dict[tuple[str, str, str], Any] = {}
+        self._tick_subscription_owners: dict[tuple[str, str, str], Any] = {}
         # Optional callback per symbol key
         self._on_tick_callbacks: dict[tuple[str, str, str], Callable[[TickByTickData], None] | None] = {}
+        register = getattr(connection, "add_session_end_callback", None)
+        if callable(register):
+            register(self._session_ended)
+
+    def _pop_tick_subscription(self, key: tuple[str, str, str]) -> tuple[Any, Any, Any, Any, Any]:
+        self._tick_buffers.pop(key, None)
+        self._on_tick_callbacks.pop(key, None)
+        return (
+            self._tick_subscription_owners.pop(key, None),
+            self._tick_subscriptions.pop(key, None),
+            self._tick_subscription_contracts.pop(key, None),
+            self._tick_subscription_tick_types.pop(key, None),
+            self._tick_subscription_leases.pop(key, None),
+        )
+
+    def _session_ended(self, ib: Any) -> Any:
+        subscriptions = [
+            (key, self._pop_tick_subscription(key))
+            for key, owner in list(self._tick_subscription_owners.items()) if owner is ib
+        ]
+
+        async def cleanup() -> None:
+            await asyncio.gather(
+                *(self._cancel_tick_subscription(key[0], owned) for key, owned in subscriptions),
+                return_exceptions=True,
+            )
+
+        return cleanup() if subscriptions else None
+
+    async def _cancel_tick_subscription(self, symbol: str, owned: tuple[Any, Any, Any, Any, Any]) -> None:
+        ib, handle, contract, tick_type_value, lease = owned
+        try:
+            async with asyncio.timeout(5):
+                try:
+                    if handle is not None and ib is not None:
+                        try:
+                            await wait_for_ibkr_request(self._connection, operation=f"tick_by_tick_cancel:{symbol}")
+                        finally:
+                            ib.cancelTickByTickData(contract, tick_type_value)
+                finally:
+                    if lease is not None:
+                        await lease.release()
+        except Exception:
+            logger.debug("error cancelling tick-by-tick for %s", symbol, exc_info=True)
 
     @property
     def _ib(self) -> Any:
@@ -279,6 +326,8 @@ class IBKRMarketDataExtClient:
         Stores ticks in a bounded deque per symbol. Returns the subscription handle.
         """
         await self._connection.ensure_connected()
+        session = capture_ibkr_session(self._connection)
+        ib = session[1]
         key = (symbol.upper(), sec_type.upper(), exchange.upper())
 
         # Cancel existing subscription if any
@@ -292,13 +341,10 @@ class IBKRMarketDataExtClient:
             operation=f"tick_by_tick:{symbol}",
         )
 
-        # Store buffer and callback
-        self._tick_buffers[key] = deque(maxlen=max_ticks)
-        self._on_tick_callbacks[key] = on_tick
-
         # Build the callback wrapper
         def _on_tick_by_tick(ticker: Any, tick_type_str: str = tick_type.value) -> None:
             try:
+                require_ibkr_session(self._connection, session)
                 tick_data = TickByTickData(
                     timestamp=_parse_tick_timestamp(getattr(ticker, "time", None)),
                     tick_type=TickType(tick_type_str),
@@ -322,26 +368,32 @@ class IBKRMarketDataExtClient:
                 logger.debug("error processing tick-by-tick data for %s", symbol, exc_info=True)
 
         async def _request_tick_by_tick() -> Any:
-            return self._ib.reqTickByTickData(
+            require_ibkr_session(self._connection, session)
+            return ib.reqTickByTickData(
                 contract,
                 tick_type.value,
                 numberOfTicks=0,
                 ignoreSize=True,
             )
 
+        handle = None
         try:
             handle = await self._connection.with_retry(
                 _request_tick_by_tick,
                 operation=f"tick_by_tick:{symbol}",
             )
-        except Exception:
-            await lease.release()
+            require_ibkr_session(self._connection, session)
+        except BaseException:
+            await self._cancel_tick_subscription(symbol, (ib, handle, contract, tick_type.value, lease))
             raise
 
+        self._tick_buffers[key] = deque(maxlen=max_ticks)
+        self._on_tick_callbacks[key] = on_tick
         self._tick_subscriptions[key] = handle
         self._tick_subscription_contracts[key] = contract
         self._tick_subscription_tick_types[key] = tick_type.value
         self._tick_subscription_leases[key] = lease
+        self._tick_subscription_owners[key] = ib
         logger.info(
             "started tick-by-tick subscription: symbol=%s sec_type=%s exchange=%s tick_type=%s max_ticks=%d",
             symbol, sec_type, exchange, tick_type.value, max_ticks,
@@ -356,23 +408,7 @@ class IBKRMarketDataExtClient:
     ) -> None:
         """Cancel a tick-by-tick subscription."""
         key = (symbol.upper(), sec_type.upper(), exchange.upper())
-        handle = self._tick_subscriptions.pop(key, None)
-        contract = self._tick_subscription_contracts.pop(key, None)
-        tick_type_value = self._tick_subscription_tick_types.pop(key, None)
-        if handle is not None and self._ib is not None:
-            try:
-                await wait_for_ibkr_request(self._connection, operation=f"tick_by_tick_cancel:{symbol}")
-                if contract is None:
-                    contract = getattr(handle, "contract", handle)
-                if tick_type_value is None:
-                    tick_type_value = getattr(handle, "tick_type", None) or getattr(handle, "tickType", TickType.ALL_LAST.value)
-                self._ib.cancelTickByTickData(contract, tick_type_value)
-            except Exception:
-                logger.debug("error cancelling tick-by-tick for %s", symbol, exc_info=True)
-        lease = self._tick_subscription_leases.pop(key, None)
-        if lease is not None:
-            await lease.release()
-        self._on_tick_callbacks.pop(key, None)
+        await self._cancel_tick_subscription(symbol, self._pop_tick_subscription(key))
         logger.info("stopped tick-by-tick subscription: symbol=%s sec_type=%s exchange=%s", symbol, sec_type, exchange)
 
     def get_latest_ticks(
@@ -465,7 +501,10 @@ class IBKRMarketDataExtClient:
         lease_wait_seconds: float,
     ) -> MarketDepthSnapshot:
         await self._connection.ensure_connected()
+        session = capture_ibkr_session(self._connection)
+        ib = session[1]
         bounded_rows = max(1, min(int(num_rows), 5))
+        ended = getattr(self._connection, "session_ended", None)
         bounded_wait = max(0.05, float(snapshot_wait_seconds))
         operation = f"market_depth:{spec.symbol}"
         try:
@@ -487,14 +526,22 @@ class IBKRMarketDataExtClient:
         last_error_before = getattr(self._connection, "last_ibkr_error", None)
         try:
             await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktDepth")
-            ticker = self._ib.reqMktDepth(
+            require_ibkr_session(self._connection, session)
+            ticker = ib.reqMktDepth(
                 contract,
                 numRows=bounded_rows,
                 isSmartDepth=is_smart_depth,
                 mktDepthOptions=[],
             )
             subscribed = True
-            await asyncio.sleep(bounded_wait)
+            if isinstance(ended, asyncio.Event):
+                try:
+                    await asyncio.wait_for(ended.wait(), timeout=bounded_wait)
+                except TimeoutError:
+                    pass
+            else:
+                await asyncio.sleep(bounded_wait)
+            require_ibkr_session(self._connection, session)
             bids = _normalize_dom_levels(list(getattr(ticker, "domBids", []) or []), limit=bounded_rows)
             asks = _normalize_dom_levels(list(getattr(ticker, "domAsks", []) or []), limit=bounded_rows)
             if not bids and not asks:
@@ -537,7 +584,7 @@ class IBKRMarketDataExtClient:
             if subscribed:
                 try:
                     await asyncio.wait_for(
-                        self._cancel_market_depth(ticker, spec.symbol, is_smart_depth=is_smart_depth),
+                        self._cancel_market_depth(ib, contract, spec.symbol, is_smart_depth=is_smart_depth),
                         timeout=1.0,
                     )
                 except Exception:
@@ -549,9 +596,11 @@ class IBKRMarketDataExtClient:
                 metrics.market_depth_cleanup_failures_total.inc({"operation": "release_lease"})
                 logger.debug("error releasing market depth lease for %s", spec.symbol, exc_info=True)
 
-    async def _cancel_market_depth(self, ticker: Any, symbol: str, *, is_smart_depth: bool) -> None:
-        await wait_for_ibkr_request(self._connection, operation=f"market_depth:{symbol}:cancelMktDepth")
-        self._ib.cancelMktDepth(ticker, isSmartDepth=is_smart_depth)
+    async def _cancel_market_depth(self, ib: Any, contract: Any, symbol: str, *, is_smart_depth: bool) -> None:
+        try:
+            await wait_for_ibkr_request(self._connection, operation=f"market_depth:{symbol}:cancelMktDepth")
+        finally:
+            ib.cancelMktDepth(contract, isSmartDepth=is_smart_depth)
 
     # ------------------------------------------------------------------
     # 3. Historical ticks
@@ -993,6 +1042,9 @@ class IBKRMarketDataExtClient:
         Yields ``dict`` with keys: time, open, high, low, close, volume, wap, count.
         """
         await self._connection.ensure_connected()
+        session = capture_ibkr_session(self._connection)
+        ib = session[1]
+        ended = getattr(self._connection, "session_ended", None)
         logger.info(
             "subscribe_realtime_bars: symbol=%s asset_class=%s what_to_show=%s",
             symbol, asset_class, what_to_show,
@@ -1002,8 +1054,9 @@ class IBKRMarketDataExtClient:
         contract = _build_contract(symbol, sec_type, exchange, currency)
 
         async def _request_realtime_bars() -> Any:
+            require_ibkr_session(self._connection, session)
             # IBKR only supports barSize=5 for real-time bars (5-second bars)
-            return self._ib.reqRealTimeBars(
+            return ib.reqRealTimeBars(
                 contract,
                 5,  # barSize: IBKR only supports 5 for 5-second real-time bars
                 whatToShow=what_to_show,
@@ -1018,7 +1071,9 @@ class IBKRMarketDataExtClient:
         seen = 0
         try:
             while True:
+                require_ibkr_session(self._connection, session)
                 while seen < len(bars):
+                    require_ibkr_session(self._connection, session)
                     bar = bars[seen]
                     seen += 1
                     yield {
@@ -1031,10 +1086,16 @@ class IBKRMarketDataExtClient:
                         "wap": float(getattr(bar, "wap", 0)),
                         "count": int(getattr(bar, "count", 0)),
                     }
-                await asyncio.sleep(0.25)
+                if isinstance(ended, asyncio.Event):
+                    try:
+                        await asyncio.wait_for(ended.wait(), timeout=0.25)
+                    except TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(0.25)
         finally:
             try:
-                self._ib.cancelRealTimeBars(bars)
+                ib.cancelRealTimeBars(bars)
             except Exception:
                 logger.debug("error cancelling real-time bars for %s", symbol, exc_info=True)
 
@@ -1074,12 +1135,18 @@ class IBKRMarketDataExtClient:
     async def set_market_data_type(self, market_data_type: int) -> dict[str, Any]:
         """Switch the IBKR market data type.
 
-        Values: 1=Live, 2=Delayed, 3=Delayed Frozen, 4=Delayed Off.
+        Values: 1=Live, 2=Frozen, 3=Delayed, 4=Delayed Frozen.
         """
+        if isinstance(market_data_type, bool) or market_data_type not in {1, 2, 3, 4}:
+            raise ValueError("market_data_type must be 1 (live), 2 (frozen), 3 (delayed), or 4 (delayed frozen)")
         await self._connection.ensure_connected()
+        session = capture_ibkr_session(self._connection)
         logger.info("set_market_data_type: type=%d", market_data_type)
 
-        self._ib.reqMarketDataType(market_data_type)
+        await wait_for_ibkr_request(self._connection, operation="market_data_type")
+        require_ibkr_session(self._connection, session)
+        session[1].reqMarketDataType(market_data_type)
+        self._connection.market_data_type = market_data_type
 
         return {"market_data_type": market_data_type}
 

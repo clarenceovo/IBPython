@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from src.feeds.contracts import ContractSpec
 from src.feeds.exchange_resolver import resolve_equity
 from src.feeds.exceptions import IBKRConnectionError, IBKRMarketDataUnavailableError
-from src.feeds.ibkr_connection import acquire_market_data_line, wait_for_ibkr_request
+from src.feeds.ibkr_connection import acquire_market_data_line, wait_for_ibkr_request, capture_ibkr_session, require_ibkr_session
 from src.feeds.models import AssetClass
 
 _IBKR_WARNING_CODES = {110, 165, 202, 399, 404, 434, 492, 10090, 10167}
@@ -151,8 +151,10 @@ class EquityReferenceClient:
         try:
             async with asyncio.timeout(request.timeout_seconds):
                 await self._connection.ensure_connected()
+                session = capture_ibkr_session(self._connection)
                 # Each request owns its contract identity: ib_insync keys tickers by id(contract).
                 contract = copy.deepcopy(await self._historical.qualify_contract(spec))
+                require_ibkr_session(self._connection, session)
                 result.con_id = contract.conId or None
                 ib = self._connection.ib
                 lease = await acquire_market_data_line(
@@ -160,6 +162,7 @@ class EquityReferenceClient:
                     operation=operation, ttl_seconds=request.timeout_seconds + 10,
                 )
                 await wait_for_ibkr_request(self._connection, operation=operation)
+                require_ibkr_session(self._connection, session)
                 ticker = ib.reqMktData(contract, genericTickList=generic_tick, snapshot=False, regulatorySnapshot=False)
                 req_id = self._connection.market_data_request_id(ib, ticker)
                 ticker.updateEvent += update
@@ -205,6 +208,7 @@ class EquityReferenceClient:
                 self._connection.retain_background_task(cleanup_task)
                 await asyncio.shield(cleanup_task)
         result.received_at = datetime.now(timezone.utc)
+        require_ibkr_session(self._connection, session)
         return result
 
     @staticmethod

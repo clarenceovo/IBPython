@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>IBKR · Research desk</title>
+  <link rel="stylesheet" href="/dashboard/style.css">
+  <script src="/dashboard/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#research">Skip to research</a>
+  <header class="masthead">
+    <a class="wordmark" href="/dashboard/" aria-label="IBKR research home">IB<span>/</span>RESEARCH</a>
+    <span class="edition">GATEWAY WORKSPACE <span class="tag">READ ONLY</span></span>
+  </header>
+  <main id="research">
+    <div class="title-row">
+      <div><p class="eyebrow">MARKET DATA / RESEARCH</p><h1>Research desk<span>.</span></h1></div>
+      <p class="intro">One instrument. Every source.<br> Availability stays beside the numbers.</p>
+    </div>
+    <section class="connection" aria-labelledby="connection-heading">
+      <div class="section-label"><h2 id="connection-heading">Connection</h2><span id="health-status" class="status">Not checked</span></div>
+      <form id="connection-form">
+        <label for="api-token">API token <span class="muted">optional on trusted networks</span></label>
+        <div class="input-action"><input id="api-token" type="password" autocomplete="off" placeholder="Enter token if required"><button type="submit">Check connection <span aria-hidden="true">↗</span></button></div>
+        <p class="hint">Token stays in this page’s memory. Reloading clears it.</p>
+      </form>
+      <div id="health-result" class="health-strip" role="status" aria-live="polite">Check the API and feed connections when you’re ready.</div>
+      <div id="connection-result" class="client-status" aria-live="polite" aria-busy="false">
+        <h3>IBKR clients</h3><p class="hint">Check connection to see the shared switch and each client’s last report. Refresh is manual; switch changes use the JSON API.</p>
+      </div>
+    </section>
+    <section class="workspace" aria-labelledby="equity-heading">
+      <div class="controls">
+        <p class="eyebrow">01 / INSTRUMENT CONTEXT</p><h2 id="equity-heading">Equity overview</h2>
+        <p class="description">Quotes, dividend context and indicative short availability. Request news when you need it.</p>
+        <form id="equity-form">
+          <label for="equity-symbol">Symbol</label><input id="equity-symbol" name="symbol" required maxlength="80" value="SPY" placeholder="SPY or 0700.HK">
+          <div class="field-pair"><div><label for="equity-exchange">Exchange <span class="muted">optional</span></label><input id="equity-exchange" name="exchange" placeholder="Auto"></div><div><label for="equity-currency">Currency <span class="muted">optional</span></label><input id="equity-currency" name="currency" placeholder="Auto" maxlength="8"></div></div>
+          <label class="checkbox"><input id="include-news" type="checkbox"> Include news headlines</label>
+          <button type="submit" class="primary">Load overview <span aria-hidden="true">↗</span></button>
+          <p class="hint">10-second request budget. Cleanup may take up to five more seconds. No automatic refresh.</p>
+        </form>
+      </div>
+      <div class="results" id="equity-result" aria-live="polite" aria-busy="false">
+        <div class="empty-state"><span class="empty-index">01</span><h3>Choose an equity to begin.</h3><p>Each feed reports its own availability and observation time. Missing data remains visible.</p></div>
+      </div>
+    </section>
+    <section class="workspace" aria-labelledby="batch-heading">
+      <div class="controls">
+        <p class="eyebrow">02 / HISTORICAL DATA</p><h2 id="batch-heading">Market panel</h2>
+        <p class="description">An explicit result for every instrument. Successful bars remain available when a symbol fails.</p>
+        <form id="batch-form">
+          <label for="batch-source">Source</label><select id="batch-source"><option value="symbols">Explicit equity symbols</option><option value="universe">Named Redis universe</option></select>
+          <div id="symbols-field"><label for="batch-symbols">Symbols <span class="muted">comma separated</span></label><textarea id="batch-symbols" required rows="2">SPY, QQQ</textarea></div>
+          <div id="universe-field" hidden><label for="batch-universe">Universe</label><input id="batch-universe" disabled placeholder="SPX or HSI"></div>
+          <div class="field-pair"><div><label for="batch-duration">Duration</label><select id="batch-duration"><option>1 M</option><option>1 W</option><option>1 D</option><option>1 Y</option></select></div><div><label for="batch-size">Bar size</label><select id="batch-size"><option>1 day</option><option>1 hour</option><option>5 mins</option><option>1 min</option></select></div></div>
+          <label for="price-basis">Price basis</label><select id="price-basis"><option value="TRADES">TRADES · split adjusted</option><option value="ADJUSTED_LAST">ADJUSTED_LAST · splits + dividends</option></select>
+          <button type="submit" class="primary">Load panel <span aria-hidden="true">↗</span></button>
+          <p class="hint">Regular trading hours. Up to 100 symbols from a named universe. Expand a row to inspect bars.</p>
+        </form>
+      </div>
+      <div class="results" id="batch-result" aria-live="polite" aria-busy="false">
+        <div class="empty-state"><span class="empty-index">02</span><h3>No panel requested yet.</h3><p>Success, empty data and failures are reported separately. Requests are never silently omitted.</p></div>
+      </div>
+    </section>
+    <footer><span>IBKR / RESEARCH DESK</span><p>Data availability depends on market hours and account entitlements. Short availability is indicative.</p><span>ON DEMAND ONLY</span></footer>
+  </main>
+</body>
+</html>

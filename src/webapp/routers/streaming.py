@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 
 from src.feeds.contracts import ContractSpec
 from src.feeds.exchange_resolver import resolve_equity
+from src.feeds.ibkr_connection import capture_ibkr_session, require_ibkr_session
 from src.feeds.models import AssetClass
 from src.feeds.streaming import StreamRequest, StreamSubscription, StreamingTickerSnapshot
 from src.transport.metrics import metrics
@@ -232,13 +233,26 @@ async def stream_ticker(
     async def event_generator():
         ticker = None
         updates_sent = 0
-        queue: asyncio.Queue[StreamingTickerSnapshot] = asyncio.Queue(maxsize=100)
+        queue: asyncio.Queue[StreamingTickerSnapshot | None] = asyncio.Queue(maxsize=100)
         try:
             ticker = await state.feed.subscribe_ticker(spec)
+            connection = getattr(state.feed, "_connection", None)
+            session = capture_ibkr_session(connection) if connection is not None else None
+            ended = getattr(connection, "session_ended", None)
+
+            async def _stop_on_session_end() -> None:
+                await ended.wait()
+                stop_event.set()
+                # Wake a consumer even if no ticks arrive after disconnect.
+                if queue.full():
+                    queue.get_nowait()
+                queue.put_nowait(None)
 
             async def _ticker_to_queue() -> None:
                 """Producer: push ticker snapshots to the bounded queue."""
                 while not stop_event.is_set():
+                    if isinstance(ended, asyncio.Event) and ended.is_set():
+                        return
                     snapshot = _ticker_to_snapshot(ticker, spec)
                     try:
                         queue.put_nowait(snapshot)
@@ -265,6 +279,7 @@ async def stream_ticker(
                         pass  # normal tick interval elapsed
 
             producer_task = asyncio.create_task(_ticker_to_queue())
+            session_end_task = asyncio.create_task(_stop_on_session_end()) if isinstance(ended, asyncio.Event) else None
             try:
                 while not stop_event.is_set():
                     if request.max_updates > 0 and updates_sent >= request.max_updates:
@@ -281,16 +296,23 @@ async def stream_ticker(
                         yield ": keepalive\n\n"
                         continue
 
+                    if snapshot is None or (isinstance(ended, asyncio.Event) and ended.is_set()):
+                        break
+                    if session is not None:
+                        require_ibkr_session(connection, session)
                     data = snapshot.model_dump_json()
                     yield f"data: {data}\n\n"
                     updates_sent += 1
                     subscription.updates_sent = updates_sent
+                if isinstance(ended, asyncio.Event) and ended.is_set():
+                    reason = "connection_disabled" if not connection.connection_enabled else "connection_lost"
+                    data = json.dumps({"subscription_id": subscription_id, "reason": reason})
+                    yield f"event: done\ndata: {data}\n\n"
             finally:
-                producer_task.cancel()
-                try:
-                    await producer_task
-                except asyncio.CancelledError:
-                    pass
+                tasks = [producer_task] + ([session_end_task] if session_end_task is not None else [])
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
         except asyncio.CancelledError:
             logger.info("SSE stream cancelled: subscription_id=%s updates_sent=%d", subscription_id, updates_sent)
         except Exception:
@@ -298,10 +320,12 @@ async def stream_ticker(
             error_data = json.dumps({"subscription_id": subscription_id, "error": "stream_interrupted"})
             yield f"event: error\ndata: {error_data}\n\n"
         finally:
-            if ticker is not None:
-                await state.feed.unsubscribe_ticker(ticker)
-            async with _sub_lock:
-                _pop_subscription_locked(subscription_id)
+            try:
+                if ticker is not None:
+                    await state.feed.unsubscribe_ticker(ticker)
+            finally:
+                async with _sub_lock:
+                    _pop_subscription_locked(subscription_id)
             logger.info("SSE stream closed: subscription_id=%s updates_sent=%d dropped=%d", subscription_id, updates_sent, subscription.dropped_updates)
 
     # Start the background cleanup task on first subscription

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from pathlib import Path
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, Callable, Awaitable
@@ -62,8 +63,8 @@ class APIBearerAuthMiddleware:
 
     When ``resolved_settings.ibkr_api_bearer_token`` is empty (default),
     requests pass through without auth — fully backward compatible.
-    When set to a non-empty value, every request must include a valid
-    ``Authorization: Bearer <token>`` header.
+    When set, API requests require a valid bearer header. Only the fixed
+    dashboard HTML/CSS/JavaScript files are readable before authentication.
     """
 
     def __init__(self, app: Any, *, expected_token: str) -> None:
@@ -72,6 +73,12 @@ class APIBearerAuthMiddleware:
 
     async def __call__(self, scope: dict[str, Any], receive: Callable[[], Awaitable[dict[str, Any]]], send: Callable[[dict[str, Any]], Awaitable[None]]) -> None:
         if scope["type"] != "http" or not self._expected_token:
+            await self.app(scope, receive, send)
+            return
+
+        if scope.get("method") in {"GET", "HEAD"} and scope.get("path") in {
+            "/dashboard", "/dashboard/", "/dashboard/index.html", "/dashboard/style.css", "/dashboard/app.js",
+        }:
             await self.app(scope, receive, send)
             return
 
@@ -121,15 +128,16 @@ def create_app(
             resolved_settings.ibkr_port,
             resolved_settings.ibkr_client_id,
         )
-        if resolved_settings.ibkr_rest_connect_on_startup:
-            try:
-                await app_state.connect()
-            except Exception:
-                logger.exception("IBKRRestApp startup failed — exiting to allow orchestrator restart")
-                # Re-raise so uvicorn/gunicorn exits with non-zero code.
-                # This prevents the service from running half-alive.
-                raise
         try:
+            start_control = getattr(app_state.feed, "start_connection_control", None)
+            if callable(start_control):
+                await start_control()
+            if resolved_settings.ibkr_rest_connect_on_startup:
+                try:
+                    await app_state.connect()
+                except Exception:
+                    logger.exception("IBKRRestApp startup failed — exiting to allow orchestrator restart")
+                    raise
             yield
         finally:
             logger.info("IBKRRestApp shutdown requested; closing IBKR and Redis transports")
@@ -156,14 +164,14 @@ def create_app(
             "## Authentication\n"
             "There are two independent auth layers:\n"
             "1. **API-wide bearer token** (optional, env var `IBKR_API_BEARER_TOKEN`)\n"
-            "   — When set, ALL endpoints require `Authorization: Bearer <token>`.\n"
+            "   — When set, API endpoints require `Authorization: Bearer <token>`; dashboard static files remain accessible.\n"
             "   — When empty (default), auth is disabled for backward compatibility.\n"
             "2. **Order-specific Redis bearer token** (env var `IBKR_ORDER_AUTH_REDIS_KEY`)\n"
             "   — Required on all `/orders/*` endpoints regardless of the API-wide setting.\n"
             "   — Token payload is read from Redis.\n\n"
             "| Endpoint group | Auth status |\n"
             "|---|---|\n"
-            "| All endpoints (when `IBKR_API_BEARER_TOKEN` is set) | `Authorization: Bearer <api-token>` required |\n"
+            "| API endpoints (when `IBKR_API_BEARER_TOKEN` is set) | `Authorization: Bearer <api-token>` required |\n"
             "| Orders (place/cancel/modify/preview) | Requires additional `Authorization: Bearer <token>` via Redis key `IBKR_ORDER_AUTH_REDIS_KEY` |\n"
             "| All other endpoints (when `IBKR_API_BEARER_TOKEN` is empty/default) | **No authentication** — bind to trusted networks or add an upstream gateway before production |\n"
             "\n"
@@ -182,7 +190,7 @@ def create_app(
         ),
         lifespan=lifespan,
         servers=[
-            {"url": "http://localhost:8000", "description": "Local development"},
+            {"url": "/", "description": "Current server"},
         ],
         openapi_tags=[
             {"name": "business", "description": "Research-friendly wrappers for curves, symbol news, market panels, returns, option skew, commodity futures, portfolio risk, and ForecastEx/CME Event Contracts"},
@@ -256,6 +264,10 @@ def create_app(
     fastapi_app.include_router(market_data_histogram.router, prefix="/api/v1")
     fastapi_app.include_router(market_data_realtime.router, prefix="/api/v1")
     fastapi_app.include_router(system._market_data_router, prefix="/api/v1")
+
+    fastapi_app.frontend(
+        "/dashboard", directory=Path(__file__).with_name("dashboard"), fallback=None, check_dir=True,
+    )
 
     @fastapi_app.get("/metrics", include_in_schema=False)
     async def metrics_endpoint() -> bytes:

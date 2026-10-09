@@ -15,6 +15,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from src.webapp.routers.business_equity import router as equity_router
+from src.webapp.routers.business_equity import EquityOverviewRequest, EquityOverviewResponse, get_equity_overview
+
 from src.webapp.routers.business_curves import router as curves_router  # noqa: F401
 from src.webapp.routers.business_curves import get_bond_curve  # noqa: F401
 from src.webapp.routers.business_news import router as news_router  # noqa: F401
@@ -35,6 +38,8 @@ from src.webapp.routers.business_returns import (  # noqa: F401
     get_market_panel,
     get_universe_bars,
     get_returns,
+    get_market_panel_detailed,
+    get_universe_bars_detailed,
 )
 from src.webapp.routers.business_skew import router as skew_router  # noqa: F401
 from src.webapp.routers.business_skew import (  # noqa: F401
@@ -68,6 +73,8 @@ from src.webapp.routers.business_shared import (  # noqa: F401
     resolve_business_symbol,
     symbol_to_ohlcv_request,
     load_many_ohlcv,
+    DetailedBarsResponse,
+    InstrumentBarsResult,
 )
 
 # Backward compat aliases — tests import the underscore-prefixed names
@@ -80,6 +87,7 @@ router = APIRouter(prefix="/business", tags=["business"])
 router.include_router(curves_router)
 router.include_router(news_router)
 router.include_router(returns_router)
+router.include_router(equity_router)
 router.include_router(skew_router)
 router.include_router(futures_router)
 router.include_router(portfolio_router)

@@ -74,6 +74,7 @@ class AsyncTTLCache:
         factory: Callable[[], Awaitable[T]],
         *,
         ttl_seconds: float | None = None,
+        cache_if: Callable[[T], bool] | None = None,
     ) -> T:
         cached = await self.get(key)
         if cached is not None:
@@ -83,7 +84,8 @@ class AsyncTTLCache:
             if cached is not None:
                 return cached
             value = await factory()
-            await self.set(key, value, ttl_seconds=ttl_seconds)
+            if cache_if is None or cache_if(value):
+                await self.set(key, value, ttl_seconds=ttl_seconds)
             return value
 
     async def clear(self) -> None:

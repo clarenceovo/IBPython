@@ -15,13 +15,14 @@ import asyncio
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, Response, Query
+from fastapi import APIRouter, Depends, HTTPException, Response, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.webapp.cache import CacheStats
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 from src.feeds.exceptions import ConnectionStatus
 from src.feeds.capabilities import GatewayCapabilities
+from src.feeds.ibkr_connection import IBKRConnectionManager, IBKRConnectionSwitch
 from src.config.config_constant import APP_VERSION
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -68,6 +69,106 @@ class MarketDataTypeResponse(BaseModel):
 
     market_data_type: int
     status: str
+
+
+class IBKRClientConnectionStatus(BaseModel):
+    """A process's last report; stale socket and lifecycle states are unknown."""
+
+    enabled: bool | None = None
+    desired_enabled: bool | None = None
+    connection_status: str = "unknown"
+    socket_connected: bool | None = None
+    lifecycle_state: str = "unknown"
+    generation: int | None = None
+    redis_key: str | None = None
+    client_id: int | None = None
+    instance_id: str
+    role: str = "unknown"
+    last_checked_at: str | None = None
+    last_error: str | None = None
+    updated_at: str | None = None
+    poll_seconds: float | None = None
+    freshness: str = "fresh"
+    heartbeat_age_seconds: float | None = None
+
+
+class IBKRConnectionControlResponse(IBKRClientConnectionStatus):
+    enabled: bool
+    connection_status: str
+    redis_key: str
+    client_id: int
+    clients: list[IBKRClientConnectionStatus] = Field(default_factory=list)
+    clients_status: str = "unavailable"
+    clients_error: str | None = None
+
+
+def _connection_control_manager(state: IBKRRestAppState) -> IBKRConnectionManager:
+    connection = getattr(state.feed, "_connection", None)
+    if connection is None or connection._control_redis is None:
+        raise HTTPException(status_code=503, detail="Redis IBKR connection control is not configured")
+    return connection
+
+
+async def _connection_control_response(connection: IBKRConnectionManager) -> IBKRConnectionControlResponse:
+    local = connection.control_status()
+    clients = {local["instance_id"]: IBKRClientConnectionStatus.model_validate(local)}
+    clients_status, clients_error = "unavailable", "Client status listing is not configured"
+    listing = getattr(connection._control_redis, "list_ibkr_client_status", None)
+    if callable(listing):
+        try:
+            async with asyncio.timeout(_READINESS_CHECK_TIMEOUT_SECONDS):
+                records = await listing(connection.connection_control_key)
+            for record in records:
+                client = IBKRClientConnectionStatus.model_validate(record)
+                if client.instance_id != local["instance_id"]:
+                    clients[client.instance_id] = client
+            clients_status, clients_error = "available", None
+        except Exception as exc:
+            clients_error = f"Client status listing unavailable ({type(exc).__name__})"
+    return IBKRConnectionControlResponse(
+        **local, clients=sorted(clients.values(), key=lambda client: (client.role, client.client_id or 0, client.instance_id)),
+        clients_status=clients_status, clients_error=clients_error,
+    )
+
+
+@router.get("/ibkr/connection", response_model=IBKRConnectionControlResponse)
+async def get_ibkr_connection_control(state: IBKRRestAppState = Depends(get_rest_state)) -> IBKRConnectionControlResponse:
+    """Read the switch, local state and last reported client states.
+
+    Expired clients disappear; stale heartbeats report unknown socket state.
+    Client reports are observations, not an acknowledgement from every client.
+    """
+    connection = _connection_control_manager(state)
+    await connection.refresh_connection_control()
+    result = await _connection_control_response(connection)
+    if connection.connection_control_error is not None:
+        raise HTTPException(status_code=503, detail={
+            "message": "Redis IBKR connection switch is unreadable; connection is disabled",
+            "connection": result.model_dump(),
+        })
+    return result
+
+
+@router.put("/ibkr/connection", response_model=IBKRConnectionControlResponse)
+async def set_ibkr_connection_control(
+    payload: IBKRConnectionSwitch, state: IBKRRestAppState = Depends(get_rest_state),
+) -> IBKRConnectionControlResponse:
+    """Persist {\"enabled\": false/true} and apply it locally.
+
+    Remote clients observe the flag independently. This response does not
+    confirm that every client has stopped or finished reconnecting.
+    """
+    connection = _connection_control_manager(state)
+    try:
+        await connection.write_connection_control(payload)
+    except Exception as exc:
+        logger.warning("Failed to persist IBKR connection switch: %s", type(exc).__name__)
+        result = await _connection_control_response(connection)
+        raise HTTPException(status_code=503, detail={
+            "message": "Could not persist IBKR connection switch in Redis",
+            "connection": result.model_dump(),
+        }) from exc
+    return await _connection_control_response(connection)
 
 
 class ServerTimeResponse(BaseModel):
@@ -203,7 +304,7 @@ class MarketDataTypeRequest(BaseModel):
     market_data_type: int = Field(
         ge=1,
         le=4,
-        description="1=Live, 2=Delayed, 3=Delayed Frozen, 4=Delayed Off",
+        description="1=Live, 2=Frozen, 3=Delayed, 4=Delayed Frozen",
     )
 
 

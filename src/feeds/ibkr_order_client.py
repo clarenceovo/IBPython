@@ -13,13 +13,19 @@ client-side tracking.
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import logging
 import uuid as _uuid
 from types import SimpleNamespace
 from typing import Any
 
-from src.feeds.ibkr_connection import IBKRConnectionManager, wait_for_ibkr_request
+from src.feeds.ibkr_connection import (
+    IBKRConnectionManager,
+    capture_ibkr_session,
+    require_ibkr_session,
+    wait_for_ibkr_request,
+)
 from src.feeds.contracts import ContractSpec, build_ibkr_contract
 from src.feeds.models import AssetClass
 from src.feeds.exceptions import IBKROrderError
@@ -259,21 +265,67 @@ class IBKROrderClient:
                 raise IBKROrderError(READ_ONLY_ORDER_API_MESSAGE) from exc
             raise
 
+    async def _session_read(self, session: tuple[Any, Any], call: Any, *, operation: str) -> Any:
+        """Allow read retries only while the originating connection still owns the request."""
+        require_ibkr_session(self._connection, session)
+
+        async def guarded_call() -> Any:
+            require_ibkr_session(self._connection, session)
+            return await call()
+
+        result = await self._connection.with_retry(guarded_call, operation=operation)
+        require_ibkr_session(self._connection, session)
+        return result
+
+    async def _wait_for_order_request(self, session: tuple[Any, Any], *, operation: str) -> None:
+        require_ibkr_session(self._connection, session)
+        await wait_for_ibkr_request(self._connection, operation=operation)
+        require_ibkr_session(self._connection, session)
+
+    @staticmethod
+    def _record_interruption(
+        envelope: OrderEnvelope, exc: BaseException, attempted: list[Any], trades: list[Any],
+    ) -> None:
+        """Preserve last known broker state without marking uncertain sends inactive."""
+        attempted_ids = [int(getattr(order, "orderId", 0) or 0) for order in attempted]
+        submitted = [
+            {
+                "order_id": int(getattr(trade.order, "orderId", 0) or 0),
+                "status": _ibkr_order_status_to_enum(getattr(trade.orderStatus, "status", None)).value,
+            }
+            for trade in trades
+        ]
+        envelope.metadata.update(
+            reconciliation_required=bool(attempted),
+            attempted_order_ids=attempted_ids,
+            submitted_order_ids=[item["order_id"] for item in submitted],
+            last_known_orders=submitted,
+            interruption=str(exc) or type(exc).__name__,
+        )
+        envelope.ibkr_order_id = next((value for value in attempted_ids if value), envelope.ibkr_order_id)
+        envelope.status = OrderStatus.PENDING if attempted else OrderStatus.INACTIVE
+        if len(attempted) == len(trades) == 1 and envelope.action in {"place", "modify"}:
+            envelope.status = OrderStatus(submitted[0]["status"])
+        envelope.touch()
+
     async def _preflight_order(self, request: PlaceOrderRequest, *, envelope: OrderEnvelope) -> WhatIfOrderResponse:
         """Run a what-if order before a live submission and reject obvious margin failures."""
+        session = capture_ibkr_session(self._connection)
+        ib = session[1]
         contract = self._build_ibkr_contract(request)
         order = self._build_ibkr_order(request, what_if=True)
         order.orderRef = envelope.order_uuid
-        qualified = await self._connection.with_retry(
-            lambda: self._ib.qualifyContractsAsync(contract),
+        qualified = await self._session_read(
+            session, lambda: ib.qualifyContractsAsync(contract),
             operation=f"qualify_preflight_contract:{request.symbol}",
         )
         if qualified:
             contract = qualified[0]
-        await wait_for_ibkr_request(self._connection, operation=f"preflight_order:place:{request.symbol}")
-        trade = self._ib.placeOrder(contract, order)
+        await self._wait_for_order_request(session, operation=f"preflight_order:place:{request.symbol}")
+        trade = ib.placeOrder(contract, order)
         try:
             await asyncio.sleep(0.5)
+            require_ibkr_session(self._connection, session)
             result = normalize_what_if_response(trade)
             if (
                 result.initial_margin is not None
@@ -287,25 +339,29 @@ class IBKROrderClient:
             return result
         finally:
             try:
-                await wait_for_ibkr_request(self._connection, operation=f"preflight_order:cancel:{request.symbol}")
-                self._ib.cancelOrder(order)
-            except Exception:
+                await self._wait_for_order_request(session, operation=f"preflight_order:cancel:{request.symbol}")
+                ib.cancelOrder(order)
+            except Exception as exc:
+                self._record_interruption(envelope, exc, [order], [trade])
                 logger.debug("_preflight_order: uuid=%s what-if cancel skipped", envelope.order_uuid, exc_info=True)
 
-    async def _load_open_trades_for_action(self, *, operation: str) -> list[Any]:
+    async def _load_open_trades_for_action(self, session: tuple[Any, Any], *, operation: str) -> list[Any]:
         """Refresh open orders from IBKR before cancel/modify, with local cache fallback."""
-        if hasattr(self._ib, "reqOpenOrdersAsync"):
+        ib = session[1]
+        require_ibkr_session(self._connection, session)
+        if hasattr(ib, "reqOpenOrdersAsync"):
             try:
-                trades = await self._connection.with_retry(
-                    lambda: self._ib.reqOpenOrdersAsync(),
+                trades = await self._session_read(
+                    session, lambda: ib.reqOpenOrdersAsync(),
                     operation=operation,
                 )
                 if trades is not None:
                     return list(trades)
             except Exception:
+                require_ibkr_session(self._connection, session)
                 logger.warning("%s: reqOpenOrdersAsync failed; falling back to openTrades", operation, exc_info=True)
-        if hasattr(self._ib, "openTrades"):
-            return list(self._ib.openTrades())
+        if hasattr(ib, "openTrades"):
+            return list(ib.openTrades())
         return []
 
     @staticmethod
@@ -416,29 +472,36 @@ class IBKROrderClient:
         order = self._build_ibkr_order(request)
         order.orderRef = order_uuid
 
-        await self._cache_envelope(envelope, ttl_seconds=0)
+        attempted: list[Any] = []
+        trades: list[Any] = []
         try:
             await self._connection.ensure_connected()
-            qualified = await self._connection.with_retry(
-                lambda: self._ib.qualifyContractsAsync(contract),
+            session = capture_ibkr_session(self._connection)
+            ib = session[1]
+            await self._cache_envelope(envelope, ttl_seconds=0)
+            qualified = await self._session_read(
+                session, lambda: ib.qualifyContractsAsync(contract),
                 operation=f"qualify_order_contract:{request.symbol}",
             )
             if qualified:
                 contract = qualified[0]
 
-            await wait_for_ibkr_request(self._connection, operation=f"place_order:{request.symbol}")
-            trade = self._ib.placeOrder(contract, order)
+            await self._wait_for_order_request(session, operation=f"place_order:{request.symbol}")
+            attempted.append(order)
+            trade = ib.placeOrder(contract, order)
+            trades.append(trade)
             status = await self._wait_for_order_status(trade, timeout_seconds=5.0)
-        except Exception as exc:
+            require_ibkr_session(self._connection, session)
+        except BaseException as exc:
+            self._record_interruption(envelope, exc, attempted, trades)
             response = OrderResponse(
                 order_id=getattr(order, "orderId", 0) or 0,
-                status=OrderStatus.INACTIVE,
-                message=str(exc),
-                warnings=[str(exc)],
+                status=envelope.status,
+                message=str(exc) or type(exc).__name__,
+                warnings=[str(exc) or type(exc).__name__],
                 order_uuid=order_uuid,
             )
             envelope.ibkr_order_id = response.order_id
-            envelope.status = OrderStatus.INACTIVE
             envelope.response = response.model_dump()
             envelope.touch()
             await self._cache_envelope(envelope, ttl_seconds=0)
@@ -480,6 +543,8 @@ class IBKROrderClient:
     async def cancel_order(self, account_id: str, order_id: int) -> CancelOrderResponse:
         """Cancel an existing order by account ID and order ID."""
         await self._connection.ensure_connected()
+        session = capture_ibkr_session(self._connection)
+        ib = session[1]
         if not account_id.strip():
             raise IBKROrderError("account_id is required to cancel orders")
         if order_id <= 0:
@@ -497,7 +562,7 @@ class IBKROrderClient:
             metadata={"cancel_of_order_id": order_id},
         )
 
-        open_trades = await self._load_open_trades_for_action(operation="cancel_open_orders_refresh")
+        open_trades = await self._load_open_trades_for_action(session, operation="cancel_open_orders_refresh")
         target_trade = self._find_trade_by_order_id(open_trades, order_id)
         target_order = getattr(target_trade, "order", None) if target_trade is not None else None
 
@@ -531,8 +596,16 @@ class IBKROrderClient:
             await self._cache_envelope(envelope, ttl_seconds=0)
             return result
 
-        await wait_for_ibkr_request(self._connection, operation="cancel_order")
-        self._ib.cancelOrder(target_order)
+        attempted: list[Any] = []
+        try:
+            await self._wait_for_order_request(session, operation="cancel_order")
+            attempted.append(target_order)
+            ib.cancelOrder(target_order)
+        except BaseException as exc:
+            self._record_interruption(envelope, exc, attempted, [target_trade] if attempted else [])
+            envelope.response = {"order_id": order_id, "status": "interrupted", "message": str(exc)}
+            await self._cache_envelope(envelope, ttl_seconds=0)
+            raise
         logger.info("cancel_order: cancel requested for order_id=%d", order_id)
 
         result = CancelOrderResponse(
@@ -553,6 +626,8 @@ class IBKROrderClient:
     ) -> OrderResponse:
         """Modify an existing order."""
         await self._connection.ensure_connected()
+        session = capture_ibkr_session(self._connection)
+        ib = session[1]
         if not account_id.strip():
             raise IBKROrderError("account_id is required to modify orders")
         if order_id <= 0:
@@ -570,13 +645,14 @@ class IBKROrderClient:
             metadata={"modify_of_order_id": order_id},
         )
 
-        open_trades = await self._load_open_trades_for_action(operation="modify_open_orders_refresh")
+        open_trades = await self._load_open_trades_for_action(session, operation="modify_open_orders_refresh")
         target_trade = self._find_trade_by_order_id(open_trades, order_id)
 
         if target_trade is None:
             raise IBKROrderError(f"Order {order_id} not found in open orders")
 
-        order = target_trade.order
+        # A rejected modification must not mutate the last acknowledged trade.
+        order = copy.copy(target_trade.order)
         contract = target_trade.contract
         target_account = str(getattr(order, "acctCode", "") or getattr(order, "account", "")).strip()
         if target_account and target_account != account_id:
@@ -590,9 +666,22 @@ class IBKROrderClient:
             order.tif = modifications.tif.value
         order.orderRef = modify_uuid
 
-        await wait_for_ibkr_request(self._connection, operation="modify_order")
-        modified_trade = self._ib.placeOrder(contract, order)
-        status = await self._wait_for_order_status(modified_trade, timeout_seconds=5.0)
+        attempted: list[Any] = []
+        trades: list[Any] = []
+        try:
+            await self._wait_for_order_request(session, operation="modify_order")
+            attempted.append(order)
+            modified_trade = ib.placeOrder(contract, order)
+            trades.append(modified_trade)
+            status = await self._wait_for_order_status(modified_trade, timeout_seconds=5.0)
+            require_ibkr_session(self._connection, session)
+        except BaseException as exc:
+            self._record_interruption(envelope, exc, attempted, trades)
+            envelope.response = OrderResponse(
+                order_id=order_id, status=envelope.status, message=str(exc) or type(exc).__name__, order_uuid=modify_uuid,
+            ).model_dump()
+            await self._cache_envelope(envelope, ttl_seconds=0)
+            raise
 
         response = OrderResponse(
             order_id=order_id,
@@ -617,6 +706,8 @@ class IBKROrderClient:
     async def preview_order(self, request: PlaceOrderRequest) -> WhatIfOrderResponse:
         """Pre-trade margin and commission preview (what-if order)."""
         await self._connection.ensure_connected()
+        session = capture_ibkr_session(self._connection)
+        ib = session[1]
 
         preview_uuid = str(_uuid.uuid4())
         logger.info(
@@ -639,26 +730,40 @@ class IBKROrderClient:
         contract = self._build_ibkr_contract(request)
         order = self._build_ibkr_order(request, what_if=True)
 
-        qualified = await self._connection.with_retry(
-            lambda: self._ib.qualifyContractsAsync(contract),
+        qualified = await self._session_read(
+            session, lambda: ib.qualifyContractsAsync(contract),
             operation=f"qualify_preview_contract:{request.symbol}",
         )
         if qualified:
             contract = qualified[0]
 
         order.orderRef = preview_uuid
-        await wait_for_ibkr_request(self._connection, operation=f"preview_order:place:{request.symbol}")
-        trade = self._ib.placeOrder(contract, order)
-
+        attempted: list[Any] = []
+        trades: list[Any] = []
         try:
+            await self._wait_for_order_request(session, operation=f"preview_order:place:{request.symbol}")
+            attempted.append(order)
+            trade = ib.placeOrder(contract, order)
+            trades.append(trade)
             await asyncio.sleep(0.5)
+            require_ibkr_session(self._connection, session)
             result = normalize_what_if_response(trade)
+        except BaseException as exc:
+            self._record_interruption(envelope, exc, attempted, trades)
+            envelope.response = {"error": str(exc) or type(exc).__name__}
+            await self._cache_envelope(envelope, ttl_seconds=0)
+            raise
         finally:
-            try:
-                await wait_for_ibkr_request(self._connection, operation=f"preview_order:cancel:{request.symbol}")
-                self._ib.cancelOrder(order)
-            except Exception:
-                logger.debug("preview_order: uuid=%s what-if cancel skipped", preview_uuid, exc_info=True)
+            if trades:
+                try:
+                    await self._wait_for_order_request(session, operation=f"preview_order:cancel:{request.symbol}")
+                    ib.cancelOrder(order)
+                except BaseException as exc:
+                    self._record_interruption(envelope, exc, attempted, trades)
+                    if isinstance(exc, asyncio.CancelledError):
+                        await self._cache_envelope(envelope, ttl_seconds=0)
+                        raise
+                    logger.debug("preview_order: uuid=%s what-if cancel skipped", preview_uuid, exc_info=True)
 
         envelope.status = OrderStatus.PENDING
         envelope.response = result.model_dump()
@@ -783,6 +888,8 @@ class IBKROrderClient:
     async def place_bracket_order(self, request: BracketOrderRequest) -> BracketOrderResponse:
         """Place a parent order with attached take-profit and stop-loss orders."""
         await self._connection.ensure_connected()
+        session = capture_ibkr_session(self._connection)
+        ib = session[1]
         order_uuid = str(_uuid.uuid4())
         logger.info(
             "place_bracket_order: uuid=%s symbol=%s action=%s qty=%s",
@@ -807,15 +914,15 @@ class IBKROrderClient:
             exchange=request.exchange,
             currency=request.currency,
         )
-        qualified = await self._connection.with_retry(
-            lambda: self._ib.qualifyContractsAsync(contract),
+        qualified = await self._session_read(
+            session, lambda: ib.qualifyContractsAsync(contract),
             operation=f"qualify_bracket_contract:{request.symbol}",
         )
         if not qualified:
             raise IBKROrderError(f"Could not qualify contract for {request.symbol}")
         contract = qualified[0]
 
-        bracket = self._ib.bracketOrder(
+        bracket = ib.bracketOrder(
             action=request.action.value,
             quantity=request.quantity,
             limitPrice=request.limit_price or 0.0,
@@ -835,13 +942,20 @@ class IBKROrderClient:
             order.orderRef = order_uuid
 
         trades = []
+        attempted: list[Any] = []
         try:
             for index, order in enumerate(bracket.orders):
-                await wait_for_ibkr_request(self._connection, operation=f"place_bracket_order:{request.symbol}:{index}")
-                trades.append(self._ib.placeOrder(contract, order))
-        except Exception:
-            envelope.status = OrderStatus.INACTIVE
-            envelope.response = {"error": "bracket order submission failed"}
+                await self._wait_for_order_request(session, operation=f"place_bracket_order:{request.symbol}:{index}")
+                attempted.append(order)
+                trades.append(ib.placeOrder(contract, order))
+                require_ibkr_session(self._connection, session)
+        except BaseException as exc:
+            self._record_interruption(envelope, exc, attempted, trades)
+            envelope.response = {
+                "error": str(exc) or type(exc).__name__,
+                "orders_placed": len(trades),
+                "orders": envelope.metadata["last_known_orders"],
+            }
             await self._cache_envelope(envelope, ttl_seconds=0)
             raise
 
@@ -864,6 +978,8 @@ class IBKROrderClient:
     async def place_oca_group(self, request: OcaGroupRequest) -> list[OcaOrderResponse]:
         """Place an OCA group after qualifying every leg up front."""
         await self._connection.ensure_connected()
+        session = capture_ibkr_session(self._connection)
+        ib = session[1]
         order_uuid = str(_uuid.uuid4())
         group_name = request.oca_group or f"oca_{_uuid.uuid4().hex[:8]}"
         logger.info("place_oca_group: uuid=%s group=%s orders=%d", order_uuid, group_name, len(request.orders))
@@ -887,8 +1003,8 @@ class IBKROrderClient:
                 currency=item.currency,
             )
             try:
-                qualified = await self._connection.with_retry(
-                    lambda c=contract, s=item.symbol: self._ib.qualifyContractsAsync(c),
+                qualified = await self._session_read(
+                    session, lambda c=contract: ib.qualifyContractsAsync(c),
                     operation=f"qualify_oca_contract:{item.symbol}",
                 )
             except Exception as exc:
@@ -912,6 +1028,8 @@ class IBKROrderClient:
             Order = SimpleNamespace
 
         responses: list[OcaOrderResponse] = []
+        attempted: list[Any] = []
+        trades: list[Any] = []
         try:
             for item, contract in zip(request.orders, qualified_contracts, strict=True):
                 order = Order()
@@ -928,8 +1046,10 @@ class IBKROrderClient:
                     order.account = request.account
                     order.acctCode = request.account
 
-                await wait_for_ibkr_request(self._connection, operation=f"place_oca_order:{item.symbol}")
-                trade = self._ib.placeOrder(contract, order)
+                await self._wait_for_order_request(session, operation=f"place_oca_order:{item.symbol}")
+                attempted.append(order)
+                trade = ib.placeOrder(contract, order)
+                trades.append(trade)
                 responses.append(
                     OcaOrderResponse(
                         symbol=item.symbol,
@@ -940,9 +1060,13 @@ class IBKROrderClient:
                         order_uuid=order_uuid,
                     )
                 )
-        except Exception:
-            envelope.status = OrderStatus.INACTIVE
-            envelope.response = {"error": "OCA group submission failed after qualification"}
+                require_ibkr_session(self._connection, session)
+        except BaseException as exc:
+            self._record_interruption(envelope, exc, attempted, trades)
+            envelope.response = {
+                "error": str(exc) or type(exc).__name__,
+                "orders": [item.model_dump(mode="json") for item in responses],
+            }
             await self._cache_envelope(envelope, ttl_seconds=0)
             raise
 
@@ -963,10 +1087,12 @@ class IBKROrderClient:
         on the connected TWS/IB Gateway instance.
         """
         await self._connection.ensure_connected()
+        session = capture_ibkr_session(self._connection)
+        ib = session[1]
         logger.warning("cancel_all_orders: issuing global cancel for all open orders")
 
-        await wait_for_ibkr_request(self._connection, operation="global_cancel")
-        self._ib.reqGlobalCancel()
+        await self._wait_for_order_request(session, operation="global_cancel")
+        ib.reqGlobalCancel()
 
         logger.info("cancel_all_orders: global cancel requested")
         return {
@@ -1030,6 +1156,8 @@ class IBKROrderClient:
             manual_order_time: Manual order time for position transfer.
         """
         await self._connection.ensure_connected()
+        session = capture_ibkr_session(self._connection)
+        ib = session[1]
         action_label = "exercise" if exercise_action == 1 else "lapse"
         logger.warning(
             "exercise_option: symbol=%s right=%s strike=%.2f expiry=%s action=%s qty=%d account=%s",
@@ -1051,21 +1179,21 @@ class IBKROrderClient:
         contract.right = right.upper()
 
         # Qualify the contract
-        qualified = await self._connection.with_retry(
-            lambda: self._ib.qualifyContractsAsync(contract),
+        qualified = await self._session_read(
+            session, lambda: ib.qualifyContractsAsync(contract),
             operation=f"qualify_exercise_option:{symbol}",
         )
         if qualified:
             contract = qualified[0]
 
-        await wait_for_ibkr_request(self._connection, operation=f"exercise_option:{symbol}")
+        await self._wait_for_order_request(session, operation=f"exercise_option:{symbol}")
         exercise_kwargs: dict[str, Any] = {
             "exerciseAction": exercise_action,
             "exerciseQuantity": quantity,
             "account": account,
             "override": override,
         }
-        if "manualOrderTime" in inspect.signature(self._ib.exerciseOptions).parameters:
+        if "manualOrderTime" in inspect.signature(ib.exerciseOptions).parameters:
             exercise_kwargs["manualOrderTime"] = manual_order_time
         elif manual_order_time:
             logger.warning(
@@ -1073,7 +1201,8 @@ class IBKROrderClient:
                 "does not expose manualOrderTime",
                 manual_order_time,
             )
-        self._ib.exerciseOptions(contract, **exercise_kwargs)
+        require_ibkr_session(self._connection, session)
+        ib.exerciseOptions(contract, **exercise_kwargs)
 
         logger.info(
             "exercise_option: %s requested for %s %s %.2f %s qty=%d",

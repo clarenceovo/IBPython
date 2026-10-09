@@ -33,6 +33,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from src.config import config_constant as constants
 from src.config.settings import Settings, load_settings
+from src.feeds.exceptions import IBKRConnectionDisabledError
 from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,9 @@ def _get_mcp_shared_state_lock() -> asyncio.Lock:
 async def _build_mcp_shared_state(settings: Settings) -> _MCPSharedState:
     mcp_settings = settings.model_copy(update={"ibkr_client_id": settings.ibkr_mcp_client_id})
     state = build_rest_app_state(mcp_settings)
+    connection = getattr(state.feed, "_connection", None)
+    if connection is not None:
+        connection.client_role = "mcp"
 
     redis_connected = False
     questdb_connected = False
@@ -104,6 +108,8 @@ async def _build_mcp_shared_state(settings: Settings) -> _MCPSharedState:
         await state.feed.connect()
         ibkr_connected = True
         logger.info("MCP server: IBKR feed connected")
+    except IBKRConnectionDisabledError:
+        logger.info("MCP server: IBKR connection disabled; Redis watcher remains active")
     except Exception:
         logger.exception("MCP server: IBKR feed connection failed (tools requiring live IBKR will reconnect lazily)")
 
@@ -273,6 +279,13 @@ def _require_redis(ctx: Context) -> dict[str, Any] | None:
 
 def _require_ibkr(ctx: Context) -> dict[str, Any] | None:
     """Return an error dict if IBKR feed is not connected, else None."""
+    feed = _state(ctx).feed
+    connection = getattr(feed, "_connection", None)
+    if connection is not None:
+        if not connection.connection_enabled:
+            return {"error": "IBKR connection disabled by Redis control switch"}
+        # The Redis watcher can restore a connection after this context was created.
+        return None if connection.is_connected else {"error": "IBKR feed is not available"}
     if not ctx.request_context.lifespan_context.get("ibkr_connected"):
         return {"error": "IBKR feed is not available"}
     return None

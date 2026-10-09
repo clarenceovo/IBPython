@@ -11,6 +11,10 @@ class IBKRConnectionError(IBKRError):
     pass
 
 
+class IBKRConnectionDisabledError(IBKRConnectionError):
+    """IBKR connections are intentionally disabled by the shared Redis switch."""
+
+
 class IBKRPacingError(IBKRError):
     """Historical data pacing violation."""
     pass
@@ -60,6 +64,7 @@ class ConnectionStatus:
 
     CONNECTED = "connected"
     DISCONNECTED = "disconnected"
+    DISABLED = "disabled"
     DOWN = "down"
 
 

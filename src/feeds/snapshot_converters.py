@@ -63,6 +63,7 @@ def ticker_to_snapshot(
             ts = datetime.now(timezone.utc)
     else:
         ts = timestamp
+    halted = _safe_float(getattr(ticker, "halted", None))
     return EquitySnapshot(
         symbol=symbol,
         exchange=exchange,
@@ -77,13 +78,13 @@ def ticker_to_snapshot(
         ask_size=_safe_float(getattr(ticker, "askSize", None)),
         last_size=_safe_float(getattr(ticker, "lastSize", None)),
         volume=_safe_float(getattr(ticker, "volume", None)),
-        open=_safe_float(getattr(ticker, "open_", None)),
+        open=_safe_float(getattr(ticker, "open", getattr(ticker, "open_", None))),
         high=_safe_float(getattr(ticker, "high", None)),
         low=_safe_float(getattr(ticker, "low", None)),
         close=_safe_float(getattr(ticker, "close", None)),
         vwap=_safe_float(getattr(ticker, "vwap", None)),
         mark_price=_safe_float(getattr(ticker, "markPrice", None)),
-        halted=getattr(ticker, "halted", None),
+        halted=bool(halted) if halted in {0, 1, 2} else None,
     )
 
 

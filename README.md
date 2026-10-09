@@ -229,6 +229,46 @@ QuestDB remains the default scheduler/snapshotter market-data store. To route OH
 
 `IBKRRestApp` is a thin async HTTP bridge over the Pydantic DTOs in `src/feeds`. It keeps business logic in the feed/transport layer and exposes a clean API surface for notebooks, dashboards, services, and internal tools. It does not open QuestDB/MySQL connections; durable market-data persistence and historical store reads belong to the scheduler/snapshotter side.
 
+The API uses FastAPI **0.142.2**. Open `http://localhost:8000/dashboard/` for
+the read-only research dashboard: equity quotes/dividends/shortability,
+optional news, per-instrument historical batch diagnostics, and API health.
+It uses local HTML/CSS/JavaScript and same-origin API calls, so the same URL
+works with your server hostname on a private network. Market data is loaded
+only when requested. If `IBKR_API_BEARER_TOKEN` is configured, enter it in
+Connection; the token stays only in page memory. Only the dashboard's fixed
+static files are accessible without a token; API endpoints remain protected.
+
+`getMarketPanelDetailed`, `getUniverseBarsDetailed`, and `getEquityOverview`
+are documented in [the business API guide](src/webapp/docs/business_api_examples.md).
+The existing panel/universe list response formats remain unchanged.
+
+Control all IBPython TWS/Gateway clients sharing Redis with
+`PUT /api/v1/system/ibkr/connection` and a JSON body:
+
+```json
+{"enabled": false}
+```
+
+`false` disposes of the clients and blocks reconnects. Send `{"enabled": true}`
+to create fresh connections. `GET` on the same URL returns the flag and the
+API process's current connection status; enabling returns before socket setup
+finishes, so check until the status is `connected`. Existing API bearer auth
+applies. The API remains alive while disabled; live IBKR calls report the
+disabled state, and cached research data remains readable.
+
+The JSON is stored without expiry at Redis key `IBKR:ConnectionControl`.
+API, MCP, and scheduler processes watch the same key every second. You can
+also change it directly, for example
+`redis-cli SET IBKR:ConnectionControl '{"enabled":false}'`.
+Use the same Redis database and `IBKR_CONNECTION_CONTROL_REDIS_KEY` across
+processes; `IBKR_CONNECTION_CONTROL_POLL_SECONDS` changes the polling interval.
+An absent key initially preserves normal enabled behavior. Invalid JSON or
+unreachable Redis disables connections; deleting the key does not re-enable a
+running disabled client. An explicit `{"enabled":true}` restores it.
+This disconnects the IBPython clients, leaving TWS/Gateway and broker orders
+running. Notebooks can share the switch by passing their Redis transport to
+`IBKRFeedClient(redis=redis)`.
+
 Main route groups:
 
 - `/api/v1/business/*`: research-friendly wrappers for curves, news, market panels, returns, option skew, commodity futures, and portfolio risk

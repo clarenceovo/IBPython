@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -16,7 +16,8 @@ from src.webapp.openapi_markdown import markdown_openapi_examples
 from src.webapp.routers.business_shared import (
     MarketPanelRequest,
     UniverseBarsRequest,
-    load_many_ohlcv,
+    DetailedBarsResponse,
+    load_many_ohlcv_detailed,
     symbol_to_ohlcv_request,
 )
 
@@ -68,15 +69,28 @@ async def get_market_panel(
     ],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[OHLCVBar]:
-    async def load() -> list[OHLCVBar]:
+    return (await get_market_panel_detailed(payload, state)).flattened_bars()
+
+
+@router.post(
+    "/getMarketPanelDetailed",
+    response_model=DetailedBarsResponse,
+    summary="Load bars with an explicit result for each requested instrument",
+)
+async def get_market_panel_detailed(
+    payload: Annotated[MarketPanelRequest, Body(openapi_examples=markdown_openapi_examples("business.getMarketPanel"))],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> DetailedBarsResponse:
+    async def load() -> DetailedBarsResponse:
         requests = [symbol_to_ohlcv_request(item, payload) for item in payload.symbols]
-        return await load_many_ohlcv(requests, payload, state)
+        return await load_many_ohlcv_detailed(requests, payload, state)
 
     if payload.use_ttl_cache:
         return await state.market_data_cache.get_or_set(
-            stable_cache_key("business_market_panel", payload),
+            stable_cache_key("business_market_panel_detailed", payload),
             load,
             ttl_seconds=payload.cache_ttl_seconds,
+            cache_if=DetailedBarsResponse.cacheable,
         )
     return await load()
 
@@ -93,8 +107,22 @@ async def get_universe_bars(
     ],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[OHLCVBar]:
-    async def load() -> list[OHLCVBar]:
+    return (await get_universe_bars_detailed(payload, state)).flattened_bars()
+
+
+@router.post(
+    "/getUniverseBarsDetailed",
+    response_model=DetailedBarsResponse,
+    summary="Load universe bars with per-instrument availability",
+)
+async def get_universe_bars_detailed(
+    payload: Annotated[UniverseBarsRequest, Body(openapi_examples=markdown_openapi_examples("business.getUniverseBars"))],
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> DetailedBarsResponse:
+    async def load() -> DetailedBarsResponse:
         symbols = await _resolve_universe_symbols(payload, state)
+        if not symbols:
+            return DetailedBarsResponse(results=[])
         panel = MarketPanelRequest(
             symbols=symbols,
             asset_class=payload.asset_class,
@@ -111,13 +139,14 @@ async def get_universe_bars(
             use_ttl_cache=False,
         )
         requests = [symbol_to_ohlcv_request(item, panel) for item in panel.symbols[: payload.max_symbols]]
-        return await load_many_ohlcv(requests, panel, state)
+        return await load_many_ohlcv_detailed(requests, panel, state)
 
     if payload.use_ttl_cache:
         return await state.market_data_cache.get_or_set(
-            stable_cache_key("business_universe_bars", payload),
+            stable_cache_key("business_universe_bars_detailed", payload),
             load,
             ttl_seconds=payload.cache_ttl_seconds,
+            cache_if=DetailedBarsResponse.cacheable,
         )
     return await load()
 
@@ -134,8 +163,17 @@ async def get_returns(
     ],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> ReturnsResponse:
-    bars = await get_market_panel(payload, state)
-    return _bars_to_returns(asset_class=payload.asset_class, bar_size=payload.bar_size, bars=bars)
+    panel = await get_market_panel_detailed(payload, state)
+    symbol_counts = Counter(symbol for result in panel.results for symbol in {bar.symbol for bar in result.bars})
+    ambiguous = {symbol for symbol, count in symbol_counts.items() if count > 1}
+    bars = [bar for result in panel.results for bar in result.bars if bar.symbol not in ambiguous]
+    response = _bars_to_returns(asset_class=payload.asset_class, bar_size=payload.bar_size, bars=bars)
+    response.warnings.extend(
+        f"{result.requested_symbol} (request {result.input_index}): {result.error or 'no bars returned'}"
+        for result in panel.results if result.status != "success"
+    )
+    response.warnings.extend(f"{symbol}: omitted ambiguous returns from multiple instrument requests" for symbol in sorted(ambiguous))
+    return response
 
 
 async def _resolve_universe_symbols(payload: UniverseBarsRequest, state: IBKRRestAppState) -> list[str]:
