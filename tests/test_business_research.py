@@ -118,6 +118,8 @@ def test_overview_defaults_zero_values_cached_times_and_contract_identity():
         assert state.feed.provider_calls == 0
         assert len(state.feed.cancelled_equity_tickers) == 1
         second = client.post('/api/v1/business/getEquityOverview', json={'symbol': 'spy'}).json()
+        assert first.pop('from_cache') is False
+        assert second.pop('from_cache') is True
         assert second == first
         state.feed.load_equity_shortability.assert_awaited_once()
         assert state.feed.load_equity_shortability.call_args.args[0].con_id == 8314

@@ -32,12 +32,13 @@ def setup_client(deliver=None):
         return lease
 
     connection = SimpleNamespace(
-        ib=ib, ensure_connected=AsyncMock(), _background_tasks=set(),
+        ib=ib, ensure_connected=AsyncMock(), _cleanup_tasks=set(),
         wait_for_ibkr_request=AsyncMock(), acquire_market_data_line=acquire,
     )
     connection.market_data_request_id = IBKRConnectionManager.market_data_request_id.__get__(connection)
     connection.forget_market_data_ticker = IBKRConnectionManager.forget_market_data_ticker.__get__(connection)
     connection.retain_background_task = IBKRConnectionManager.retain_background_task.__get__(connection)
+    connection._consume_task = IBKRConnectionManager._consume_task
     historical = SimpleNamespace(qualify_contract=AsyncMock(return_value=Stock("AAPL", "SMART", "USD", conId=265598)))
     client = EquityReferenceClient(connection, historical)
     return client, connection, ib, leases
