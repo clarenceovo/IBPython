@@ -58,6 +58,45 @@ class OrderStatus(StrEnum):
 # Order placement
 # ---------------------------------------------------------------------------
 
+class ExecutionAttribution(BaseModel):
+    """Decision benchmarks in quote currency; never inferred from an order limit."""
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    strategy_id: str = Field(min_length=1)
+    book_id: str | None = Field(default=None, min_length=1)
+    decision_id: str | None = Field(default=None, min_length=1)
+    parent_order_uuid: str | None = Field(default=None, min_length=1)
+    decision_at: datetime | None = None
+    decision_price: float | None = Field(default=None, gt=0)
+    arrival_at: datetime | None = None
+    arrival_bid: float | None = Field(default=None, gt=0)
+    arrival_ask: float | None = Field(default=None, gt=0)
+    benchmark_currency: str = Field(min_length=1)
+
+    @field_validator("decision_at", "arrival_at")
+    @classmethod
+    def aware_times(cls, value: datetime | None) -> datetime | None:
+        if value is not None:
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError("benchmark times must include a timezone")
+            return value.astimezone(timezone.utc)
+        return value
+
+    @model_validator(mode="after")
+    def valid_benchmarks(self) -> ExecutionAttribution:
+        if (self.decision_price is None) != (self.decision_at is None):
+            raise ValueError("decision_price and decision_at must be supplied together")
+        if (self.arrival_bid is None) != (self.arrival_ask is None):
+            raise ValueError("arrival_bid and arrival_ask must be supplied together")
+        if (self.arrival_bid is None) != (self.arrival_at is None):
+            raise ValueError("arrival quotes require arrival_at")
+        if self.arrival_bid is not None and self.arrival_ask is not None and self.arrival_bid > self.arrival_ask:
+            raise ValueError("arrival bid cannot exceed ask")
+        if self.decision_at and self.arrival_at and self.arrival_at < self.decision_at:
+            raise ValueError("arrival_at cannot precede decision_at")
+        return self
+
+
 class PlaceOrderRequest(BaseModel):
     """Request body for placing a new order."""
 
@@ -92,6 +131,7 @@ class PlaceOrderRequest(BaseModel):
     limit_price_offset: float | None = Field(default=None, gt=0)
     outside_rth: bool = False
     idempotency_key: str | None = Field(default=None, min_length=1)
+    attribution: ExecutionAttribution | None = None
 
     @field_validator("symbol", mode="before")
     @classmethod
@@ -283,6 +323,7 @@ class BracketOrderRequest(BaseModel):
     exchange: str = Field(default="SMART", min_length=1)
     currency: str = Field(default="USD", min_length=1)
     account: str = ""
+    attribution: ExecutionAttribution | None = None
 
     @field_validator("symbol", "asset_class", "exchange", "currency", "account", mode="before")
     @classmethod
@@ -329,6 +370,7 @@ class OcaOrderItem(BaseModel):
     asset_class: str = Field(default="EQUITY", min_length=1)
     exchange: str = Field(default="SMART", min_length=1)
     currency: str = Field(default="USD", min_length=1)
+    attribution: ExecutionAttribution | None = None
 
     @field_validator("symbol", "asset_class", "exchange", "currency", mode="before")
     @classmethod
@@ -423,7 +465,7 @@ class ExecutionRequest(BaseModel):
 class ExecutionDetail(BaseModel):
     """A single execution/fill."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     exec_id: str
     order_id: int
@@ -436,6 +478,14 @@ class ExecutionDetail(BaseModel):
     realized_pnl: float | None = None
     exchange: str | None = None
     fill_time: datetime | None = None
+    account_id: str = ""
+    client_id: int | None = None
+    perm_id: int | None = None
+    order_ref: str | None = None
+    con_id: int | None = None
+    currency: str | None = None
+    commission_currency: str | None = None
+    multiplier: float | None = None
 
 
 class ExecutionResponse(BaseModel):
@@ -558,6 +608,9 @@ def normalize_execution(fill: Any) -> ExecutionDetail:
     contract = getattr(fill, "contract", None) or SimpleNamespaceHelper()
     execution = getattr(fill, "execution", None) or SimpleNamespaceHelper()
     commission_report = getattr(fill, "commissionReport", None) or SimpleNamespaceHelper()
+    commission = _safe_float(getattr(commission_report, "commission", None))
+    if (hasattr(commission_report, "execId") and not commission_report.execId) or (commission is not None and (not math.isfinite(commission) or abs(commission) > 1e300)):
+        commission = None
     return ExecutionDetail(
         exec_id=getattr(execution, "execId", ""),
         order_id=getattr(execution, "orderId", 0),
@@ -566,10 +619,19 @@ def normalize_execution(fill: Any) -> ExecutionDetail:
         side=getattr(execution, "side", ""),
         quantity=float(getattr(execution, "shares", 0)),
         price=float(getattr(execution, "price", 0)),
-        commission=_safe_float(getattr(commission_report, "commission", None)),
+        commission=commission,
         realized_pnl=_safe_float(getattr(commission_report, "realizedPNL", None)),
         exchange=getattr(execution, "exchange", ""),
         fill_time=_parse_ibkr_fill_time(getattr(execution, "time", None)),
+        account_id=getattr(execution, "acctNumber", "") or "",
+        client_id=getattr(execution, "clientId", None),
+        perm_id=getattr(execution, "permId", None),
+        order_ref=getattr(execution, "orderRef", None) or None,
+        con_id=getattr(contract, "conId", None),
+        currency=getattr(contract, "currency", None) or None,
+        commission_currency=getattr(commission_report, "currency", None) or None,
+        multiplier=(_safe_float(getattr(contract, "multiplier", None))
+                    or (1.0 if getattr(contract, "secType", "") in {"STK", "CASH", "CRYPTO"} else None)),
     )
 
 

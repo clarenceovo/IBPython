@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from src.feeds.models import OHLCVBar, OHLCVRequest
+from src.feeds.quality_repair import run_quality_repairs
 from src.feeds.ohlcv_loader import estimate_expected_bars
 from src.feeds.snapshotter import SnapshotWatchlist
 from src.transport.metrics import metrics
@@ -41,6 +42,24 @@ class SnapshotAPIError(RuntimeError):
         super().__init__(message)
         self.status_code = status_code
         self.failure_category = failure_category
+
+
+class DataQualityRepairJobHandler:
+    job_type = "data_quality_repair"
+
+    def __init__(self, loader: Any, archive: Any) -> None:
+        self.loader, self.archive = loader, archive
+
+    async def __call__(self, job: SchedulerJobDefinition) -> SchedulerRunResult:
+        limit = int(job.params.get("limit", 1))
+        if not 1 <= limit <= 10:
+            raise ValueError("repair limit must be between 1 and 10")
+        results = await run_quality_repairs(self.archive, self.loader, limit=limit,
+                                           persist=_coerce_bool(job.params.get("persist"), default=True))
+        failures = sum(r.last_error is not None for r in results)
+        return SchedulerRunResult(status="failed" if failures else "success",
+                                  metrics={"repairs_attempted": len(results), "repairs_failed": failures,
+                                           "repairs_completed": len(results) - failures})
 
 
 class MarketSnapshotJobHandler:
@@ -368,7 +387,12 @@ class OHLCVSnapshotJobHandler:
                 failure_category="unexpected",
             )
         bars = [_ohlcv_bar_from_api_payload(bar, request) for bar in bars_payload]
-        if persist and bars:
+        if getattr(self.loader, "analytics_store", None) is not None:
+            result = await self.loader.process_bars(bars, request, persist=persist, cache_latest=False)
+            if result.primary_persistence in {"failed", "no_store"}:
+                raise RuntimeError(result.persistence_error or "primary OHLCV store is unavailable")
+            bars = result.bars
+        elif persist and bars:
             await self.loader.persist_bars(bars)
         cache_warning = await self._cache_latest_bar(request, bars[-1]) if cache_latest and bars else None
         latest_timestamp = max((bar.timestamp for bar in bars), default=None)

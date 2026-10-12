@@ -27,6 +27,9 @@ from src.feeds.orders import (
     WhatIfOrderResponse,
 )
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
+from datetime import datetime
+from src.feeds.research import aware_utc
+from src.feeds.tca import TCAReport, build_tca_report
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +84,25 @@ async def require_order_bearer_token(
 # ------------------------------------------------------------------
 # Order lifecycle
 # ------------------------------------------------------------------
+
+@router.get("/tca", response_model=TCAReport)
+async def transaction_cost_analysis(
+    account_id: str = Query(..., min_length=1), strategy_id: str | None = None,
+    start: datetime | None = None, end: datetime | None = None,
+    state: IBKRRestAppState = Depends(require_order_bearer_token),
+) -> TCAReport:
+    """Analyze archived executions; sync /orders/executions after reconnects."""
+    if state.analytics_store is None:
+        raise HTTPException(503, "execution analytics archive is not configured")
+    try:
+        start = aware_utc(start) if start else None
+        end = aware_utc(end) if end else None
+        if start and end and end <= start:
+            raise ValueError("end must follow start")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    envelopes, executions = await state.analytics_store.execution_inputs(account_id)
+    return build_tca_report(account_id, envelopes, executions, strategy_id=strategy_id, start=start, end=end)
 
 @router.post("/place", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
 async def place_order(

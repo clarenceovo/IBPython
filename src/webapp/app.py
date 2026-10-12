@@ -32,6 +32,7 @@ from src.webapp.routers import (
     market_data_realtime,
     market_data_analytics,
     orders,
+    research,
     reference_data,
     scanner,
     snapshot,
@@ -257,6 +258,7 @@ def create_app(
     fastapi_app.include_router(reference_data.router, prefix="/api/v1")
     fastapi_app.include_router(account.router, prefix="/api/v1")
     fastapi_app.include_router(orders.router, prefix="/api/v1")
+    fastapi_app.include_router(research.router, prefix="/api/v1")
     fastapi_app.include_router(scanner.router, prefix="/api/v1")
     fastapi_app.include_router(streaming.router, prefix="/api/v1")
     fastapi_app.include_router(snapshot.router, prefix="/api/v1")

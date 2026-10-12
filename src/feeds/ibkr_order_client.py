@@ -19,6 +19,7 @@ import logging
 import uuid as _uuid
 from types import SimpleNamespace
 from typing import Any
+from src.transport.analytics_store import AnalyticsStore
 
 from src.feeds.ibkr_connection import (
     IBKRConnectionManager,
@@ -91,9 +92,54 @@ class IBKROrderClient:
         self,
         connection: IBKRConnectionManager,
         redis: Any | None = None,
+        analytics_store: AnalyticsStore | None = None,
     ) -> None:
         self._connection = connection
         self._redis = redis
+        self._analytics_store = analytics_store
+        self._analytics_tasks: set[asyncio.Task[Any]] = set()
+        self._analytics_ib: Any | None = None
+        if analytics_store is not None:
+            connection.add_session_start_callback(self._bind_execution_events)
+
+    def _bind_execution_events(self, ib: Any) -> None:
+        if ib is self._analytics_ib:
+            return
+        if self._analytics_ib is not None:
+            for name in ("execDetailsEvent", "commissionReportEvent"):
+                event = getattr(self._analytics_ib, name, None)
+                if event is not None:
+                    event -= self._on_execution_event
+        self._analytics_ib = ib
+        for name in ("execDetailsEvent", "commissionReportEvent"):
+            event = getattr(ib, name, None)
+            if event is not None:
+                event += self._on_execution_event
+
+    def _on_execution_event(self, trade: Any, fill: Any, *args: Any) -> None:
+        if self._analytics_store is None:
+            return
+        try:
+            execution = normalize_execution(fill)
+            report = getattr(fill, "commissionReport", None)
+            if not getattr(report, "execId", ""):
+                execution = execution.model_copy(update={"commission": None, "commission_currency": None})
+            if not execution.order_ref and trade is not None:
+                execution = execution.model_copy(update={"order_ref": getattr(getattr(trade, "order", None), "orderRef", None)})
+            task = asyncio.create_task(self._analytics_store.save_executions([execution]))
+            self._analytics_tasks.add(task)
+            task.add_done_callback(self._analytics_done)
+        except Exception:
+            logger.exception("execution analytics event could not be captured")
+
+    def _analytics_done(self, task: asyncio.Task[Any]) -> None:
+        self._analytics_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("execution analytics write failed", exc_info=task.exception())
+
+    async def drain_analytics(self) -> None:
+        if self._analytics_tasks:
+            await asyncio.gather(*tuple(self._analytics_tasks), return_exceptions=True)
 
     @property
     def _ib(self) -> Any:
@@ -104,6 +150,12 @@ class IBKROrderClient:
     # ------------------------------------------------------------------
 
     async def _cache_envelope(self, envelope: OrderEnvelope, *, ttl_seconds: int | None = None) -> str | None:
+        if self._analytics_store is not None:
+            envelope.metadata["client_id"] = self._connection.client_id
+            try:
+                await self._analytics_store.save_order_context(envelope)
+            except Exception:
+                logger.exception("order attribution archive failed for uuid=%s", envelope.order_uuid)
         """Cache an OrderEnvelope to Redis. Returns the Redis key or None on failure."""
         if self._redis is None:
             return None
@@ -664,7 +716,10 @@ class IBKROrderClient:
             order.totalQuantity = modifications.quantity
         if modifications.tif is not None:
             order.tif = modifications.tif.value
-        order.orderRef = modify_uuid
+        # A mutation UUID identifies this action; the broker order keeps the
+        # original reference so later fills retain their decision attribution.
+        order.orderRef = getattr(target_trade.order, "orderRef", "") or modify_uuid
+        envelope.parent_uuid = order.orderRef if order.orderRef != modify_uuid else None
 
         attempted: list[Any] = []
         trades: list[Any] = []
@@ -826,6 +881,8 @@ class IBKROrderClient:
         )
 
         executions = [normalize_execution(fill) for fill in (fills or [])]
+        if self._analytics_store is not None:
+            await self._analytics_store.save_executions(executions)
         logger.info("load_executions: %d fills loaded", len(executions))
 
         return ExecutionResponse(

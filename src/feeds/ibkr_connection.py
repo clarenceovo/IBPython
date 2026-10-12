@@ -192,6 +192,7 @@ class IBKRConnectionManager:
         self._reconnect_task: asyncio.Task[None] | None = None
         self._cleanup_tasks: set[asyncio.Task[Any]] = set()
         self._session_end_callbacks: list[Any] = []
+        self._session_start_callbacks: list[Any] = []
         self.generation = 0
         self.session_ended = asyncio.Event()
         self._closed = False
@@ -325,6 +326,8 @@ class IBKRConnectionManager:
             set_mode = getattr(ib, "reqMarketDataType", None)
             if callable(set_mode):
                 set_mode(self.market_data_type)
+            for callback in self._session_start_callbacks:
+                callback(ib)
             if self._on_connected is not None:
                 await self._on_connected()
             self._require_generation(generation)
@@ -342,6 +345,12 @@ class IBKRConnectionManager:
     def _consume_task(task: asyncio.Task[Any]) -> None:
         if not task.cancelled():
             task.exception()
+
+    def add_session_start_callback(self, callback: Any) -> None:
+        """Bind listeners to every replacement IB client, before trading resumes."""
+        self._session_start_callbacks.append(callback)
+        if self._ib is not None:
+            callback(self._ib)
 
     def _stop_connection(self, *, stop_control: bool) -> set[asyncio.Task[Any]]:
         self._shutting_down = True

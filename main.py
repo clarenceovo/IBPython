@@ -19,6 +19,8 @@ from src.transport.mysql_client import MySQLClient
 from src.transport.questdb_client import QuestDBClient
 from src.transport.redis_client import MarketDataRedisClient
 from src.transport.scheduler import GenericScheduler, IndexCompositionReloadJobHandler, MarketSnapshotJobHandler, OHLCVSnapshotJobHandler
+from src.transport.analytics_store import AnalyticsStore
+from src.transport.scheduler_handlers import DataQualityRepairJobHandler
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +118,10 @@ async def main() -> None:
         local_job_directory="schedulejob",
         job_reload_interval_seconds=60,
     )
-    loader = OHLCVLoader(ibkr, store=store, redis=redis)
+    archive = AnalyticsStore(settings.analytics_archive_path)
+    loader = OHLCVLoader(ibkr, store=store, redis=redis, analytics_store=archive)
+    repair_handler = DataQualityRepairJobHandler(loader, archive)
+    scheduler.register_handler(repair_handler.job_type, repair_handler)
     snapshot_handler = MarketSnapshotJobHandler(loader)
     scheduler.register_handler(snapshot_handler.job_type, snapshot_handler)
     ohlcv_snapshot_handler = OHLCVSnapshotJobHandler(
@@ -169,7 +174,7 @@ async def main() -> None:
                 ",".join(sorted({job.job_type for job in jobs})),
             )
 
-            unknown_types = {job.job_type for job in jobs} - {"market_snapshot", "ohlcv_snapshot", "index_composition_reload"}
+            unknown_types = {job.job_type for job in jobs} - {"market_snapshot", "ohlcv_snapshot", "index_composition_reload", "data_quality_repair"}
             if unknown_types:
                 logger.warning(
                     "unknown job types detected that may not receive IBKR/storage connections: %s",
@@ -245,12 +250,12 @@ def _looks_like_index_provider(provider: Any) -> bool:
 
 
 def _jobs_require_ibkr(jobs: list[Any]) -> bool:
-    return any(job.job_type == MarketSnapshotJobHandler.job_type for job in jobs)
+    return any(job.job_type in {MarketSnapshotJobHandler.job_type, DataQualityRepairJobHandler.job_type} for job in jobs)
 
 
 def _jobs_require_market_store(jobs: list[Any]) -> bool:
     return any(
-        job.job_type == MarketSnapshotJobHandler.job_type and _job_param_bool(job.params.get("persist"), default=True)
+        job.job_type in {MarketSnapshotJobHandler.job_type, DataQualityRepairJobHandler.job_type} and _job_param_bool(job.params.get("persist"), default=True)
         for job in jobs
     )
 

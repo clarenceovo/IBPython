@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     )
 
     redis_url: str = Field(default=constants.DEFAULT_REDIS_URL, alias=constants.REDIS_URL_ENV)
+    analytics_archive_path: str = Field(default="data/analytics.sqlite3", alias="ANALYTICS_ARCHIVE_PATH", min_length=1)
     redis_password: str = Field(default=constants.DEFAULT_REDIS_PASSWORD, alias=constants.REDIS_PASSWORD_ENV)
     ibkr_rest_base_url: str = Field(default=constants.DEFAULT_IBKR_REST_BASE_URL, alias=constants.IBKR_REST_BASE_URL_ENV)
 

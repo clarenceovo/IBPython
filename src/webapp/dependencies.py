@@ -17,6 +17,7 @@ from src.feeds.ohlcv_loader import OHLCVLoader
 from src.transport.ibkr_rate_limit import IBKRRateLimitController
 from src.transport.redis_client import MarketDataRedisClient
 from src.webapp.cache import AsyncTTLCache
+from src.transport.analytics_store import AnalyticsStore
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ class IBKRRestAppState:
     market_data_cache: AsyncTTLCache
     event_contracts: IBKRWebAPIClient
     fixed_income_reference_provider: FixedIncomeReferenceProvider | None = None
+    analytics_store: AnalyticsStore | None = None
 
     async def connect(self) -> None:
         try:
@@ -73,6 +75,7 @@ class IBKRRestAppState:
 
 
 def build_rest_app_state(settings: Settings) -> IBKRRestAppState:
+    analytics_store = AnalyticsStore(settings.analytics_archive_path)
     redis = MarketDataRedisClient(settings.redis_url, password=settings.redis_password)
     rate_limiter = IBKRRateLimitController(
         redis,
@@ -92,8 +95,9 @@ def build_rest_app_state(settings: Settings) -> IBKRRestAppState:
         connection_control_key=settings.ibkr_connection_control_redis_key,
         connection_control_poll_seconds=settings.ibkr_connection_control_poll_seconds,
         client_role="api",
+        analytics_store=analytics_store,
     )
-    loader = OHLCVLoader(feed, store=None, redis=redis)
+    loader = OHLCVLoader(feed, store=None, redis=redis, analytics_store=analytics_store)
     market_data_cache = AsyncTTLCache(
         ttl_seconds=settings.ibkr_rest_market_data_ttl_seconds,
         max_size=settings.ibkr_rest_market_data_cache_maxsize,
@@ -113,6 +117,7 @@ def build_rest_app_state(settings: Settings) -> IBKRRestAppState:
         market_data_cache=market_data_cache,
         event_contracts=event_contracts,
         fixed_income_reference_provider=fixed_income_reference_provider,
+        analytics_store=analytics_store,
     )
 
 

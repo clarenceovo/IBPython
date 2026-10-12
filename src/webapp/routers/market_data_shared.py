@@ -552,8 +552,8 @@ async def load_ohlcv_with_controls(
         except HistoricalRequestTooLargeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        if cache_latest and bars:
-            await state.loader.cache_latest_bar(bars[-1])
+        result = await state.loader.process_bars(bars, request, persist=False, cache_latest=cache_latest)
+        bars = result.bars
 
         if use_ttl_cache and not persist:
             await state.market_data_cache.set(key, bars, ttl_seconds=cache_ttl_seconds)

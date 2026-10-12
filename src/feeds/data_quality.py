@@ -72,10 +72,18 @@ def validate_ohlcv_bars(
     *,
     request: OHLCVRequest,
     stale_after_seconds: float | None = None,
+    sessions: list[tuple[datetime, datetime]] | None = None,
+    checked_at: datetime | None = None,
 ) -> DataQualityReport:
+    checked_at = checked_at or datetime.now(timezone.utc)
     issues: list[DataQualityIssue] = []
     if not bars:
-        return DataQualityReport(symbol=request.symbol, bar_size=request.bar_size, total_bars=0)
+        # An empty known calendar can legitimately represent a closed market.
+        if sessions != []:
+            issues.append(DataQualityIssue(code="empty_dataset", severity=DataQualitySeverity.WARNING,
+                                           message="no bars returned; coverage cannot be established", symbol=request.symbol))
+        return DataQualityReport(symbol=request.symbol, bar_size=request.bar_size, total_bars=0,
+                                 checked_at=checked_at, issues=tuple(issues))
 
     expected_seconds = _bar_size_to_seconds(request.bar_size)
     identity_counts = Counter((ohlcv_contract_key(bar), bar.timestamp) for bar in bars)
@@ -93,6 +101,10 @@ def validate_ohlcv_bars(
             )
 
     for previous, current in zip(bars, bars[1:], strict=False):
+        if previous.timestamp.tzinfo is None or current.timestamp.tzinfo is None:
+            continue  # Naive timestamps are reported below; do not mix time bases.
+        if ohlcv_contract_key(previous) != ohlcv_contract_key(current):
+            continue
         if current.timestamp < previous.timestamp:
             issues.append(
                 DataQualityIssue(
@@ -106,25 +118,53 @@ def validate_ohlcv_bars(
             )
         if expected_seconds is not None and current.timestamp > previous.timestamp:
             gap_seconds = (current.timestamp - previous.timestamp).total_seconds()
-            if gap_seconds > expected_seconds * 1.5:
+            # Daily/weekly/monthly timestamps do not describe a fixed intraday
+            # grid. Without a calendar, gaps are suspected rather than confirmed.
+            missing = None
+            if sessions is not None and expected_seconds < 86400:
+                missing = _missing_session_slots(previous.timestamp, current.timestamp, expected_seconds, sessions)
+            if gap_seconds > expected_seconds * 1.5 and (missing is None or missing > 0):
                 issues.append(
                     DataQualityIssue(
-                        code="missing_interval_gap",
+                        code="missing_interval_gap" if missing is None else "missing_session_bars",
                         severity=DataQualitySeverity.WARNING,
                         message=f"gap {gap_seconds:g}s exceeds expected bar interval {expected_seconds:g}s",
                         symbol=current.symbol,
                         timestamp=current.timestamp,
                         contract_key=ohlcv_contract_key(current),
-                        metadata={"gap_seconds": gap_seconds, "expected_seconds": expected_seconds},
+                        metadata={"gap_seconds": gap_seconds, "expected_seconds": expected_seconds,
+                                  "calendar_verified": missing is not None, "missing_bars": missing},
                     )
                 )
 
     for bar in bars:
         issues.extend(_bar_value_issues(bar))
 
+    if sessions is not None and expected_seconds is not None and expected_seconds < 86400:
+        for session_start, session_end in sessions:
+            lower = max(session_start, request.start_datetime) if request.start_datetime else session_start
+            upper = min(session_end, request.end_datetime) if request.end_datetime else session_end
+            first_index = max(0, math.ceil((lower - session_start).total_seconds() / expected_seconds))
+            stop_index = math.ceil((upper - session_start).total_seconds() / expected_seconds)
+            observed = set()
+            for bar in bars:
+                if bar.timestamp.tzinfo is None or not lower <= bar.timestamp < upper:
+                    continue
+                index = (bar.timestamp - session_start).total_seconds() / expected_seconds
+                if abs(index - round(index)) < 1e-6:
+                    observed.add(round(index))
+            expected = max(0, stop_index - first_index)
+            missing = expected - len(observed)
+            if missing > 0:
+                issues.append(DataQualityIssue(code="incomplete_session_coverage", severity=DataQualitySeverity.WARNING,
+                    message=f"session has {missing} missing bar starts including window boundaries", symbol=request.symbol,
+                    metadata={"session_start": session_start.isoformat(), "session_end": session_end.isoformat(),
+                              "expected_bars": expected, "observed_bars": len(observed), "missing_bars": missing,
+                              "calendar_verified": True}))
+
     if stale_after_seconds is not None and bars:
         latest = max(bar.timestamp for bar in bars)
-        age_seconds = (datetime.now(timezone.utc) - latest).total_seconds()
+        age_seconds = (checked_at - latest).total_seconds() if latest.tzinfo else 0
         if age_seconds > stale_after_seconds:
             issues.append(
                 DataQualityIssue(
@@ -141,8 +181,23 @@ def validate_ohlcv_bars(
         symbol=request.symbol,
         bar_size=request.bar_size,
         total_bars=len(bars),
+        checked_at=checked_at,
         issues=tuple(issues),
     )
+
+
+def _missing_session_slots(previous: datetime, current: datetime, seconds: float,
+                           sessions: list[tuple[datetime, datetime]]) -> int:
+    """Count missing bar starts on each session's grid, excluding closed periods."""
+    slots = 0
+    for start, end in sessions:
+        if end <= previous or start >= current:
+            continue
+        first = max(0, math.floor((previous - start).total_seconds() / seconds) + 1)
+        stop = min(math.ceil((current - start).total_seconds() / seconds),
+                   math.ceil((end - start).total_seconds() / seconds))
+        slots += max(0, stop - first)
+    return slots
 
 
 def _bar_value_issues(bar: OHLCVBar) -> list[DataQualityIssue]:

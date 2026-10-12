@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import logging
+from datetime import timezone
 from typing import Protocol
 
 from src.feeds.data_quality import DataQualityReport, validate_ohlcv_bars
 from src.feeds.models import OHLCVBar, OHLCVRequest
 from src.transport.market_data_store import MarketOHLCVStore
+from src.feeds.research import OHLCVLoadResult, TradingSession, utc_now
+from src.transport.analytics_store import AnalyticsStore
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +28,13 @@ class OHLCVLoader:
         store: MarketOHLCVStore | None = None,
         questdb: MarketOHLCVStore | None = None,
         redis: object | None = None,
+        analytics_store: AnalyticsStore | None = None,
     ) -> None:
         self.feed = feed
         self.store = store or questdb
         self.questdb = self.store
         self.redis = redis
+        self.analytics_store = analytics_store
         self.last_quality_report: DataQualityReport | None = None
 
     async def load(
@@ -39,30 +44,72 @@ class OHLCVLoader:
         persist: bool = True,
         cache_latest: bool = True,
     ) -> list[OHLCVBar]:
-        bars = await self.feed.load_historical_ohlcv(request)
-        bars.sort(key=lambda bar: bar.timestamp)
-        self.last_quality_report = validate_ohlcv_bars(bars, request=request)
-        if self.last_quality_report.issues:
-            logger.warning("OHLCV data quality report: %s", self.last_quality_report.summary())
-        if self.last_quality_report.has_fatal:
-            raise RuntimeError(f"fatal OHLCV data quality issue(s): {self.last_quality_report.summary()}")
+        result = await self.load_detailed(request, persist=persist, cache_latest=cache_latest)
+        return result.bars
 
-        if persist and bars and self.store is not None:
+    async def load_detailed(
+        self, request: OHLCVRequest, *, persist: bool = True, cache_latest: bool = True,
+        sessions: list[TradingSession] | None = None, stale_after_seconds: float | None = None,
+        enqueue_repair: bool = True,
+    ) -> OHLCVLoadResult:
+        if self.analytics_store is not None and request.end_datetime is None and not request.continuous:
+            request = request.model_copy(update={"end_datetime": utc_now()})
+        bars = await self.feed.load_historical_ohlcv(request)
+        return await self.process_bars(bars, request, persist=persist, cache_latest=cache_latest,
+                                       sessions=sessions, stale_after_seconds=stale_after_seconds,
+                                       enqueue_repair=enqueue_repair)
+
+    async def process_bars(
+        self, bars: list[OHLCVBar], request: OHLCVRequest, *, persist: bool = False, cache_latest: bool = True,
+        sessions: list[TradingSession] | None = None, stale_after_seconds: float | None = None,
+        enqueue_repair: bool = True,
+    ) -> OHLCVLoadResult:
+        # Copy the list so validation and provenance do not mutate a feed's cache.
+        bars = sorted(bars, key=lambda b: b.timestamp.replace(tzinfo=timezone.utc) if b.timestamp.tzinfo is None else b.timestamp)
+        if sessions is None and "trading_sessions" in request.metadata:
+            sessions = [TradingSession.model_validate(s) for s in request.metadata["trading_sessions"]]
+        if sessions is not None:
+            request = request.model_copy(update={"metadata": {**request.metadata,
+                "trading_sessions": [s.model_dump(mode="json") for s in sessions]}})
+        if stale_after_seconds is None:
+            stale_after_seconds = request.metadata.get("stale_after_seconds")
+        intervals = [(s.start, s.end) for s in sessions] if sessions is not None else None
+        quality = validate_ohlcv_bars(bars, request=request, sessions=intervals, stale_after_seconds=stale_after_seconds)
+        self.last_quality_report = quality  # Legacy scheduler compatibility; detailed results are per-call.
+        if quality.issues:
+            logger.warning("OHLCV data quality report: %s", quality.summary())
+        status = "quarantined" if quality.has_fatal else ("no_store" if persist and self.store is None else "not_requested")
+        error = None
+
+        if not quality.has_fatal and persist and bars and self.store is not None:
             try:
                 await self.store.insert_bars(bars)
-            except Exception:
-                logger.exception(
-                    "QuestDB insert failed for %s %s bars; skipping Redis cache to avoid stale data",
-                    request.symbol,
-                    request.bar_size,
-                )
-                # DB write failed — do NOT cache to Redis, return bars anyway
-                return bars
+                # QuestDB ILP/TCP submission is not a durable server acknowledgement.
+                status = "submitted"
+            except Exception as exc:
+                logger.exception("OHLCV persistence failed for %s", request.symbol)
+                status, error = "failed", str(exc)
 
-        if cache_latest and bars and self.redis is not None:
+        manifest = None
+        if self.analytics_store is not None:
+            manifest = await self.analytics_store.archive_dataset(bars, request, quality, status, error,
+                                                                   enqueue_repair=enqueue_repair)
+        if quality.has_fatal:
+            raise RuntimeError(f"fatal OHLCV data quality issue(s): {quality.summary()}; dataset_id={manifest.dataset_id if manifest else None}")
+
+        if manifest is not None:
+            # Provenance travels with cached bars; never infer it from last_quality_report.
+            bars = [b.model_copy(update={"metadata": {**b.metadata, "research_capture": {
+                "dataset_id": manifest.dataset_id, "captured_at": manifest.captured_at.isoformat(),
+                "series_key": manifest.series_key, "primary_persistence": status,
+                "archive_persistence": "stored", "quality": quality.summary(),
+            }}}) for b in bars]
+
+        if status != "failed" and cache_latest and bars and self.redis is not None:
             await self.cache_latest_bar(bars[-1])
 
-        return bars
+        return OHLCVLoadResult(bars=bars, quality=quality, manifest=manifest, primary_persistence=status,
+                              archive_persistence="stored" if manifest else "disabled", persistence_error=error)
 
     async def persist_bars(self, bars: list[OHLCVBar]) -> None:
         """Persist a list of bars to the configured OHLCV store."""

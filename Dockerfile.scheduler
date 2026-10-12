@@ -21,7 +21,8 @@ COPY schedulejob ./schedulejob
 COPY PROJECT_SETUP_ARCHITECTURE.md .
 COPY README.md .
 
-RUN adduser --disabled-password --gecos "" appuser
+RUN adduser --disabled-password --gecos "" appuser \
+    && mkdir -p /app/data && chown appuser:appuser /app/data
 USER appuser
 
 CMD ["python", "main.py"]

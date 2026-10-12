@@ -205,6 +205,7 @@ class IBKRFeedClient:
         connection_control_key: str = constants.DEFAULT_IBKR_CONNECTION_CONTROL_REDIS_KEY,
         connection_control_poll_seconds: float = constants.DEFAULT_IBKR_CONNECTION_CONTROL_POLL_SECONDS,
         client_role: str = "notebook",
+        analytics_store: Any | None = None,
     ) -> None:
         self._circuit_breaker = CircuitBreaker(
             failure_threshold=5,
@@ -247,7 +248,7 @@ class IBKRFeedClient:
         self._options = IBKROptionsFeedClient(self._connection, self._historical)
         self._account = IBKRAccountFeedClient(self._connection)
         self._reference = IBKRReferenceFeedClient(self._connection, self._historical)
-        self._order_client = IBKROrderClient(self._connection, redis=redis)
+        self._order_client = IBKROrderClient(self._connection, redis=redis, analytics_store=analytics_store)
         self._marketdata_ext = IBKRMarketDataExtClient(self._connection)
         self._equity_reference = EquityReferenceClient(self._connection, self._historical)
 
@@ -315,6 +316,7 @@ class IBKRFeedClient:
 
     async def disconnect(self) -> None:
         await self._connection.disconnect()
+        await self._order_client.drain_analytics()
 
     async def __aenter__(self) -> "IBKRFeedClient":
         try:
