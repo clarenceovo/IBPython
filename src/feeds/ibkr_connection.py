@@ -36,8 +36,8 @@ class IBKRConnectionSwitch(BaseModel):
     enabled: StrictBool
 
 
-def _ib_insync_compatible_loop() -> asyncio.AbstractEventLoop:
-    """Return the loop ib_insync should use for socket futures."""
+def _ib_async_compatible_loop() -> asyncio.AbstractEventLoop:
+    """Return the loop ib_async should use for socket futures."""
 
     try:
         return asyncio.get_running_loop()
@@ -45,10 +45,10 @@ def _ib_insync_compatible_loop() -> asyncio.AbstractEventLoop:
         return asyncio.get_event_loop_policy().get_event_loop()
 
 
-def _patch_ib_insync_loop_getters() -> None:
-    """Force ib_insync internals to use the currently running loop.
+def _patch_ib_async_loop_getters() -> None:
+    """Force ib_async internals to use the currently running loop.
 
-    ib_insync 0.9.x uses ``asyncio.get_event_loop_policy().get_event_loop()``
+    ib_async 0.9.x uses ``asyncio.get_event_loop_policy().get_event_loop()``
     through module-level ``getLoop`` aliases. Under ASGI servers this can
     resolve to a policy/default loop while the request is running on another
     loop, producing "Future attached to a different loop". Rebinding these
@@ -57,28 +57,86 @@ def _patch_ib_insync_loop_getters() -> None:
     """
 
     try:
-        import ib_insync.client as ib_client
-        import ib_insync.connection as ib_connection
-        import ib_insync.util as ib_util
-        import ib_insync.wrapper as ib_wrapper
+        import ib_async.client as ib_client
+        import ib_async.connection as ib_connection
+        import ib_async.util as ib_util
+        import ib_async.wrapper as ib_wrapper
     except ImportError:
         return
 
-    ib_util.getLoop = _ib_insync_compatible_loop
-    ib_connection.getLoop = _ib_insync_compatible_loop
-    ib_client.getLoop = _ib_insync_compatible_loop
-    ib_wrapper.getLoop = _ib_insync_compatible_loop
+    ib_util.getLoop = _ib_async_compatible_loop
+    ib_connection.getLoop = _ib_async_compatible_loop
+    ib_client.getLoop = _ib_async_compatible_loop
+    ib_wrapper.getLoop = _ib_async_compatible_loop
+
+
+def _safe_contract_hash(contract: Any) -> int | None:
+    """Hash key used by ib_async 2.x wrapper ticker registries."""
+    try:
+        return hash(contract)
+    except TypeError:
+        return None
+
+
+def _ticker_request_id(ib: Any, ticker: Any) -> int | None:
+    """Best-effort wrapper lookup for a ticker's market-data request id."""
+    try:
+        value = ib.wrapper.ticker2ReqId["mktData"].get(ticker)
+        return int(value) if value is not None else None
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+
+
+def request_market_data_with_req_id(ib: Any, contract: Any, **req_kwargs: Any) -> tuple[Any, int | None]:
+    """Subscribe and return ``(ticker, req_id)``.
+
+    ib_async 2.x keys wrapper tickers by ``hash(contract)`` (effectively the
+    conId), so concurrent subscriptions for the same contract share one ticker
+    and the wrapper's ticker-to-reqId map keeps only the newest reqId. Capture
+    the reqId at send time by intercepting the client call. ``ib.reqMktData``
+    is synchronous, so the swap is atomic across tasks. Stub clients without a
+    ``client.reqMktData`` transport fall back to a plain subscribe plus
+    best-effort wrapper lookup.
+    """
+    real_send = getattr(getattr(ib, "client", None), "reqMktData", None)
+    if not callable(real_send):
+        ticker = ib.reqMktData(contract, **req_kwargs)
+        return ticker, _ticker_request_id(ib, ticker)
+
+    captured: list[int] = []
+
+    def send_with_capture(req_id: int, *args: Any, **kwargs: Any) -> Any:
+        captured.append(req_id)
+        return real_send(req_id, *args, **kwargs)
+
+    ib.client.reqMktData = send_with_capture  # type: ignore[assignment]
+    try:
+        ticker = ib.reqMktData(contract, **req_kwargs)
+    finally:
+        ib.client.reqMktData = real_send  # type: ignore[assignment]
+    req_id: int | None = captured[0] if captured else None
+    if req_id is None:
+        req_id = _ticker_request_id(ib, ticker)
+    return ticker, req_id
 
 
 def _maybe_apply_nest_asyncio() -> None:
     """Patch nested event loops only when the current loop supports it.
 
     Uvicorn with ``uvicorn[standard]`` may default to uvloop, which
-    ``nest_asyncio`` cannot patch.  The API runner forces ``--loop asyncio``,
+    ``nest_asyncio`` cannot patch. The API runner forces ``--loop asyncio``,
     but this guard keeps connection attempts from failing before they even
     reach the IBKR socket if a different runner is used.
-    """
 
+    Python 3.14 skips the patch: nest_asyncio 1.6.0 predates the 3.14 event
+    loop internals and patching it deadlocks tasks (``asyncio.timeout`` then
+    reports "Timeout should be used inside a task"). ib_async 2.x works
+    without the patch.
+    """
+    import sys
+
+    if sys.version_info >= (3, 14):
+        return
     try:
         import nest_asyncio
     except ImportError:
@@ -216,7 +274,7 @@ class IBKRConnectionManager:
 
     @property
     def is_connected(self) -> bool:
-        """Whether the underlying ib_insync IB instance is connected."""
+        """Whether the underlying ib_async IB instance is connected."""
         return self._ib is not None and self._ib.isConnected()
 
     @property
@@ -304,9 +362,9 @@ class IBKRConnectionManager:
         if self.is_connected:
             return
         self._disconnect_stale_client()
-        from ib_insync import IB
+        from ib_async import IB
 
-        _patch_ib_insync_loop_getters()
+        _patch_ib_async_loop_getters()
         _maybe_apply_nest_asyncio()
         ib = IB()
         self._ib = ib
@@ -758,7 +816,7 @@ class IBKRConnectionManager:
     def market_data_request_id(self, ib: Any, ticker: Any) -> int:
         """Return the request id for a live market-data ticker.
 
-        ``ib_insync`` does not expose this id on ``Ticker``. Keep access to its
+        ``ib_async`` does not expose this id on ``Ticker``. Keep access to its
         request registry inside the connection boundary so feed clients do not
         depend on wrapper internals.
         """
@@ -768,11 +826,23 @@ class IBKRConnectionManager:
         return int(request_id)
 
     def forget_market_data_ticker(self, ib: Any, contract: Any, ticker: Any, request_id: int | None) -> None:
-        """Drop retained wrapper state for a request-owned cancelled ticker."""
+        """Drop retained wrapper state for a request-owned cancelled ticker.
+
+        ib_insync keys ``wrapper.tickers`` by ``id(contract)``; ib_async 2.x
+        keys it by ``hash(contract)``. Pop both so the call works on either
+        library. Direct reqId cancels skip ``endTicker``, so pop the wrapper
+        bookkeeping that it would have cleaned.
+        """
         wrapper = ib.wrapper
         if request_id is not None:
             wrapper.reqId2Ticker.pop(request_id, None)
-        wrapper.tickers.pop(id(contract), None)
+            wrapper._reqId2Contract.pop(request_id, None)
+        for key in (id(contract), _safe_contract_hash(contract)):
+            if key is not None:
+                wrapper.tickers.pop(key, None)
+        tick_type_map = wrapper.ticker2ReqId.get("mktData")
+        if tick_type_map is not None:
+            tick_type_map.pop(ticker, None)
         wrapper.pendingTickers.discard(ticker)
 
     def retain_background_task(self, task: asyncio.Task[None]) -> None:
@@ -785,7 +855,7 @@ class IBKRConnectionManager:
         self._dispose_ib_client(reason="stale client")
 
     def _dispose_ib_client(self, *, reason: str) -> None:
-        """Fully release the current ib_insync client and detach callbacks."""
+        """Fully release the current ib_async client and detach callbacks."""
         ib, self._ib = self._ib, None
         if ib is not None:
             self._close_ib_client(ib, reason=reason)

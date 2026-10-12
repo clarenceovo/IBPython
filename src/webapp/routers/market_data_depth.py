@@ -57,7 +57,7 @@ class UnifiedMarketDepthRequest(BaseModel):
         default=5,
         ge=1,
         le=5,
-        description="Depth levels per side. IBKR/ib_insync supports at most five rows per side.",
+        description="Depth levels per side. IBKR/ib_async supports at most five rows per side.",
     )
     is_smart_depth: bool | None = Field(
         default=None,

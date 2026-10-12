@@ -25,6 +25,9 @@ x-app-env: &app-env
   TELEGRAM_LOG_LEVEL: ${TELEGRAM_LOG_LEVEL:-WARNING}
   IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS: ${IBKR_REST_OHLCV_RATE_LIMIT_RETRY_DELAY_SECONDS:-60}
   IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT: ${IBKR_REST_OHLCV_RATE_LIMIT_RETRY_COUNT:-1}
+  OTEL_ENABLED: ${OTEL_ENABLED:-false}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-ibpython-rest}
 
 services:
   ibkr-rest-app:
@@ -58,7 +61,7 @@ services:
           cpus: "0.5"
           memory: 256M
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/system/live"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/system/live', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 5

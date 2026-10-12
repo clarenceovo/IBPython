@@ -89,7 +89,7 @@ from src.feeds.snapshotter import FXOptionSnapshot
 # Sub-client imports
 from src.feeds.ibkr_connection import (
     IBKRConnectionManager,
-    _patch_ib_insync_loop_getters,
+    _patch_ib_async_loop_getters,
     _maybe_apply_nest_asyncio,
     _root_cause_message,
     _last_ibkr_error_message,

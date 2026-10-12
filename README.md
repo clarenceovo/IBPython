@@ -4,7 +4,7 @@ Production-oriented IBKR market data, transport, scheduler, and REST API layer f
 
 ## What This Provides
 
-- Async IBKR TWS / IB Gateway adapter through `ib_insync`
+- Async IBKR TWS / IB Gateway adapter through `ib_async`
 - Unified OHLCV DTOs across equities, FX, futures, bonds, indices, crypto, and options
 - Option-chain discovery and option analytics DTOs
 - Fundamental, economic-event, and news DTOs
@@ -18,7 +18,7 @@ Production-oriented IBKR market data, transport, scheduler, and REST API layer f
 
 ## Requirements
 
-- Python 3.13+
+- Python 3.14. The project runs on the maintained `ib_async` fork; the archived `ib_insync` package does not work on 3.14 because its `eventkit` dependency creates an event loop at import time.
 - IBKR TWS or IB Gateway running locally or on a reachable host
 - Redis
 - QuestDB
@@ -40,7 +40,7 @@ Start TWS or IB Gateway, confirm API access is enabled, then run the REST API:
 make run-api
 ```
 
-`make run-api` forces uvicorn to use the standard `asyncio` loop. This matters for `ib_insync`; uvicorn's `uvloop` backend can conflict with nested event-loop patching and prevent the API from connecting even when notebooks can.
+`make run-api` forces uvicorn to use the standard `asyncio` loop. This matters for `ib_async`; uvicorn's `uvloop` backend can conflict with nested event-loop patching and prevent the API from connecting even when notebooks can. The runtime requirements install plain `uvicorn` (no `[standard]` extras), so `uvloop` is not present in production images at all.
 
 Open:
 
@@ -204,6 +204,19 @@ Compose uses separate Dockerfiles:
 
 `Dockerfile` remains an API-compatible default for tools that expect the conventional filename.
 
+Images stay lean:
+
+- `requirements.txt` covers runtime packages only. `pandas` and `gunicorn` are not used by any service and are not installed; notebooks get `pandas` from `requirements-dev.txt`.
+- Images ship no `curl`. The `ibkr-rest-app` healthcheck runs a Python `urllib` one-liner, so the `slim` base image needs no extra apt packages.
+
+## Observability (OpenTelemetry)
+
+Tracing is opt-in and off by default. Enable it with `OTEL_ENABLED=true` and point `OTEL_EXPORTER_OTLP_ENDPOINT` at an OTLP/HTTP collector (for example `http://jaeger:4318`). A base endpoint gets `/v1/traces` appended automatically. `OTEL_SERVICE_NAME` defaults to `ibpython-rest`.
+
+When enabled, the API exports spans for the ASGI request path, outbound `httpx` calls (IBKR REST), and `redis` commands. The exporter is OTLP/HTTP only — no gRPC dependency, so images stay slim. When disabled, no OpenTelemetry module is imported at all.
+
+Compose passes `OTEL_ENABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT`, and `OTEL_SERVICE_NAME` through to the app container.
+
 The Compose app services set `IBKR_HOST` from `IBKR_DOCKER_HOST`, defaulting to `host.docker.internal`, which lets containers reach TWS or IB Gateway running on the host machine through Docker Desktop. Override `IBKR_DOCKER_HOST` and `IBKR_DOCKER_PORT` if IB Gateway runs elsewhere.
 
 The scheduler uses `IBKR_DOCKER_REST_BASE_URL` inside Compose, defaulting to `http://ibkr-rest-app:8000`, so it calls the FastAPI service over the Docker network instead of container-local `localhost`.
@@ -274,7 +287,7 @@ Main route groups:
 - `/api/v1/business/*`: research-friendly wrappers for curves, news, market panels, returns, option skew, commodity futures, and portfolio risk
 - `/api/v1/business/event-contracts/*`: ForecastEx/CME Event Contract discovery, snapshots, history, websocket message helpers, and guarded Web API order tickets
 - `/api/v1/business/fixed-income/*`: bond futures quotes, CTD analytics, futures-implied curves, and cash/futures curve comparison
-- `/api/v1/system/*`: health, readiness, rate-limit diagnostics, TTL cache controls, and gateway capability reporting
+- `/api/v1/system/*`: health, readiness, rate-limit diagnostics, TTL cache controls, gateway capability reporting, and the shared IBKR connection control switch
 - `/api/v1/market-data/*`: OHLCV, latest Redis bars, option analytics, commodity futures/options, bond yield history, equity shortability/dividends reference
 - `/api/v1/reference-data/*`: option chains, deprecated fundamentals (410), WSH events/economic calendar, news
 - `/api/v1/account/*`: account summary, live positions, portfolio, PnL snapshots
@@ -292,7 +305,10 @@ GET  /api/v1/business/getNewsProviders
 POST /api/v1/business/getSymbolNews
 POST /api/v1/business/getNewsArticle
 POST /api/v1/business/getMarketPanel
+POST /api/v1/business/getMarketPanelDetailed
 POST /api/v1/business/getUniverseBars
+POST /api/v1/business/getUniverseBarsDetailed
+POST /api/v1/business/getEquityOverview
 POST /api/v1/business/getReturns
 POST /api/v1/business/getOptionSkew
 POST /api/v1/business/commodities/getFutures
@@ -300,12 +316,16 @@ POST /api/v1/business/portfolio/getRiskSnapshot
 POST /api/v1/business/fixed-income/getBondFutureQuotes
 POST /api/v1/business/fixed-income/getCTD
 POST /api/v1/business/fixed-income/getFuturesImpliedCurve
+POST /api/v1/business/fixed-income/getBondYieldCurve
 POST /api/v1/business/fixed-income/getCashBondCurve
 POST /api/v1/business/fixed-income/getCurveComparison
+POST /api/v1/business/fixed-income/getFedFundsFuturesRate
 GET  /api/v1/system/health
 GET  /api/v1/system/readiness
 GET  /api/v1/system/rate-limits
 GET  /api/v1/system/cache/market-data
+GET  /api/v1/system/ibkr/connection
+PUT  /api/v1/system/ibkr/connection
 POST /api/v1/market-data/ohlcv
 POST /api/v1/market-data/ohlcv/equity
 POST /api/v1/market-data/ohlcv/futures
@@ -1197,8 +1217,10 @@ python3 -m json.tool schedulejob/reload_g10_index_composition.json >/dev/null
 Current expected test status:
 
 ```text
-393 passed
+694 passed, 1 skipped
 ```
+
+The suite needs no TWS, IB Gateway, Redis, or database. All broker and transport interactions are mocked, and a full run takes about 15 seconds.
 
 ## Important Quant And IBKR Caveats
 

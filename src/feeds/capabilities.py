@@ -20,7 +20,7 @@ class FeatureCapability(BaseModel):
 
 
 class GatewayCapabilities(BaseModel):
-    client_package: str = "ib-insync"
+    client_package: str = "ib-async"
     client_version: str | None
     connected: bool
     negotiated_server_protocol: int | None
@@ -51,6 +51,6 @@ def gateway_capabilities(connection: Any) -> GatewayCapabilities:
         implemented=False, client_supported=False, availability="unsupported", reason=FUNDAMENTALS_REMOVED,
     )
     return GatewayCapabilities(
-        client_version=version("ib-insync"), connected=connected,
+        client_version=version("ib-async"), connected=connected,
         negotiated_server_protocol=protocol, features=features,
     )

@@ -218,7 +218,7 @@ class WSHEventDataRequest(BaseModel):
         return value.strftime("%Y%m%d")
 
     def to_wsh_event_data_kwargs(self) -> dict[str, Any]:
-        """Build kwargs for ib_insync.WshEventData using documented IBKR fields."""
+        """Build kwargs for ib_async.WshEventData using documented IBKR fields."""
         kwargs: dict[str, Any] = {}
         if self.con_id is not None:
             kwargs["conId"] = self.con_id

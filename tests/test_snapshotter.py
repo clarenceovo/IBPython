@@ -34,7 +34,7 @@ from src.webapp.app import create_app
 # ---------------------------------------------------------------------------
 
 class FakeTicker:
-    """Minimal ib_insync-compatible ticker for testing."""
+    """Minimal ib_async-compatible ticker for testing."""
 
     def __init__(self, **kwargs):
         self.contract = FakeContract()

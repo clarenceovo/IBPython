@@ -27,6 +27,7 @@ from src.feeds.ibkr_connection import (
     IBKRConnectionManager,
     acquire_market_data_line,
     capture_ibkr_session,
+    request_market_data_with_req_id,
     require_ibkr_session,
     wait_for_ibkr_request,
 )
@@ -82,9 +83,9 @@ def _float_or_none(value: Any) -> float | None:
 
 def _build_wsh_event_data(request: WSHEventDataRequest) -> Any:
     try:
-        from ib_insync import WshEventData
+        from ib_async import WshEventData
     except ImportError as exc:
-        raise RuntimeError("ib_insync is required for WSH event data requests") from exc
+        raise RuntimeError("ib_async is required for WSH event data requests") from exc
     return WshEventData(**request.to_wsh_event_data_kwargs())
 
 
@@ -139,7 +140,7 @@ class IBKRReferenceFeedClient:
         self._connection = connection
         self._historical = historical_client
         self._wsh_metadata_loaded = False
-        self._market_data_leases_by_ticker_id: dict[int, tuple[Any, Any, Any]] = {}
+        self._market_data_leases_by_ticker_id: dict[int, tuple[Any, Any, Any, int | None]] = {}
         register = getattr(connection, "add_session_end_callback", None)
         if callable(register):
             register(self._session_ended)
@@ -147,7 +148,7 @@ class IBKRReferenceFeedClient:
     def _session_ended(self, ib: Any) -> Any:
         self._wsh_metadata_loaded = False
         leases = []
-        for ticker_id, (owner, _, lease) in list(self._market_data_leases_by_ticker_id.items()):
+        for ticker_id, (owner, _, lease, _req_id) in list(self._market_data_leases_by_ticker_id.items()):
             if owner is ib:
                 self._market_data_leases_by_ticker_id.pop(ticker_id)
                 leases.append(lease)
@@ -313,9 +314,9 @@ class IBKRReferenceFeedClient:
         await self._connection.ensure_connected()
 
         try:
-            from ib_insync import Contract
+            from ib_async import Contract
         except ImportError as exc:
-            raise RuntimeError("ib_insync is required") from exc
+            raise RuntimeError("ib_async is required") from exc
 
         contract_kwargs: dict[str, Any] = {}
         if request.con_id:
@@ -393,9 +394,9 @@ class IBKRReferenceFeedClient:
         await self._connection.ensure_connected()
 
         try:
-            from ib_insync import ScannerSubscription, TagValue
+            from ib_async import ScannerSubscription, TagValue
         except ImportError as exc:
-            raise RuntimeError("ib_insync is required for market scanner requests") from exc
+            raise RuntimeError("ib_async is required for market scanner requests") from exc
 
         subscription = ScannerSubscription(
             numberOfRows=request.max_results,
@@ -438,14 +439,15 @@ class IBKRReferenceFeedClient:
         try:
             await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
             require_ibkr_session(self._connection, session)
-            ticker = ib.reqMktData(
+            ticker, req_id = request_market_data_with_req_id(
+                ib,
                 contract,
                 genericTickList="",
                 snapshot=False,
                 regulatorySnapshot=False,
                 mktDataOptions=[],
             )
-            self._market_data_leases_by_ticker_id[id(ticker)] = (ib, ticker, lease)
+            self._market_data_leases_by_ticker_id[id(ticker)] = (ib, ticker, lease, req_id)
             await asyncio.sleep(0.5)
             require_ibkr_session(self._connection, session)
             return ticker
@@ -479,7 +481,7 @@ class IBKRReferenceFeedClient:
                 lease = None
                 lease_owned = False
                 try:
-                    from ib_insync import Contract
+                    from ib_async import Contract
 
                     kwargs: dict[str, Any] = {
                         "secType": "STK",
@@ -501,11 +503,12 @@ class IBKRReferenceFeedClient:
                     )
                     await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
                     require_ibkr_session(self._connection, session)
-                    ticker = ib.reqMktData(
-                        contract, genericTickList="", snapshot=True,
+                    ticker, req_id = request_market_data_with_req_id(
+                        contract=contract, ib=ib,
+                        genericTickList="", snapshot=True,
                         regulatorySnapshot=False, mktDataOptions=[],
                     )
-                    self._market_data_leases_by_ticker_id[id(ticker)] = (ib, ticker, lease)
+                    self._market_data_leases_by_ticker_id[id(ticker)] = (ib, ticker, lease, req_id)
                     subscribed_tickers.append(ticker)
                     lease_owned = True
                     ticker_contract = getattr(ticker, "contract", contract)
@@ -541,7 +544,7 @@ class IBKRReferenceFeedClient:
                                 ticker_lookup = getattr(ib, "ticker", None)
                                 recovered = ticker_lookup(contract) if callable(ticker_lookup) else None
                                 if recovered is not None:
-                                    self._market_data_leases_by_ticker_id[id(recovered)] = (ib, recovered, lease)
+                                    self._market_data_leases_by_ticker_id[id(recovered)] = (ib, recovered, lease, None)
                                     await self.cancel_equity_tickers([recovered])
                                 else:
                                     await lease.release()
@@ -571,10 +574,9 @@ class IBKRReferenceFeedClient:
             owned = self._market_data_leases_by_ticker_id.pop(id(ticker), None)
             if owned is None:
                 return
-            ib, _, lease = owned
+            ib, _, lease, request_id = owned
             contract = getattr(ticker, "contract", None)
-            request_id = None
-            if getattr(ib, "wrapper", None) is not None:
+            if request_id is None and getattr(ib, "wrapper", None) is not None:
                 try:
                     request_id = self._connection.market_data_request_id(ib, ticker)
                 except Exception:
@@ -586,7 +588,13 @@ class IBKRReferenceFeedClient:
                     # Cancellation still has to be sent when pacing fails or times out.
                     if contract is not None:
                         try:
-                            ib.cancelMktData(contract)
+                            if request_id is not None:
+                                # Direct reqId cancel: ib_async 2.x keys tickers by
+                                # hash(contract), so contract-based cancel cannot resolve
+                                # individual subscriptions for the same contract.
+                                ib.client.cancelMktData(request_id)
+                            else:
+                                ib.cancelMktData(contract)
                         finally:
                             if getattr(ib, "wrapper", None) is not None:
                                 self._connection.forget_market_data_ticker(ib, contract, ticker, request_id)

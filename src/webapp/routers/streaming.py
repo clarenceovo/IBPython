@@ -147,7 +147,7 @@ def _safe_float(value: Any) -> float | None:
 
 
 def _ticker_to_snapshot(ticker: Any, spec: ContractSpec) -> StreamingTickerSnapshot:
-    """Convert an ib_insync Ticker to a StreamingTickerSnapshot."""
+    """Convert an ib_async Ticker to a StreamingTickerSnapshot."""
     # Prefer the ticker's own timestamp; fall back to wall clock with a warning.
     ticker_time = getattr(ticker, "time", None)
     if ticker_time is not None:

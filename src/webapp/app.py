@@ -319,6 +319,10 @@ def create_app(
         logger.exception("unhandled RuntimeError in request: %s", exc)
         return JSONResponse(status_code=500, content={"detail": "Internal error"})
 
+    from src.webapp.telemetry import configure_opentelemetry
+
+    configure_opentelemetry(resolved_settings, app=fastapi_app)
+
     return fastapi_app
 
 
@@ -326,7 +330,7 @@ def get_app() -> FastAPI:
     """Uvicorn factory entrypoint.
 
     Return a fresh FastAPI object and build transport state inside lifespan so
-    ib_insync, locks, and socket futures are owned by uvicorn's active loop.
+    ib_async, locks, and socket futures are owned by uvicorn's active loop.
     """
 
     return create_app()

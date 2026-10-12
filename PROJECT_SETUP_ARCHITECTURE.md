@@ -41,6 +41,7 @@ src/
     scheduler_calendar.py   # Cron parsing and next-run calculation helpers
   webapp/
     app.py                  # IBKRRestApp FastAPI application factory
+    telemetry.py            # Optional OpenTelemetry tracing (opt-in via OTEL_ENABLED)
     dependencies.py         # API-owned IBKR, Redis, loader, and cache state
     cache.py                # Async TTL cache with per-key single-flight protection
     routers/
@@ -53,6 +54,7 @@ schedulejob/
 Dockerfile                # Backward-compatible API image default
 Dockerfile.api            # FastAPI service image
 Dockerfile.scheduler      # Scheduler worker service image
+Dockerfile.mcp            # MCP server image (streamable HTTP transport)
 docker-compose.yml
 tests/
 notebooks/
@@ -252,7 +254,7 @@ Run locally:
 uvicorn src.webapp.app:get_app --host 0.0.0.0 --port 8000 --factory --loop asyncio --lifespan on
 ```
 
-The API runner intentionally uses `--loop asyncio`. `uvicorn[standard]` may otherwise select `uvloop`, and `ib_insync`/`nest_asyncio` can fail before reaching the IBKR socket under uvloop. `make run-api` does not use hot reload, which is safer for IBKR client sessions. Use `make run-api-dev` for local reload workflows. If notebooks connect but the API reports IBKR unavailable, first confirm the API is running with the standard asyncio loop and a unique `IBKR_CLIENT_ID`.
+The API runner intentionally uses `--loop asyncio`. Runtime images install plain `uvicorn` (no `[standard]` extras), so `uvloop` cannot be selected at all; `ib_async`/`nest_asyncio` can fail before reaching the IBKR socket under uvloop. `make run-api` does not use hot reload, which is safer for IBKR client sessions. Use `make run-api-dev` for local reload workflows. If notebooks connect but the API reports IBKR unavailable, first confirm the API is running with the standard asyncio loop and a unique `IBKR_CLIENT_ID`.
 
 Router split:
 
@@ -701,7 +703,7 @@ Options analytics are represented in `src/feeds/options.py`:
 - `OptionSkewSurfaceRequest`: bounded per-maturity skew scan seeded from the option-chain endpoint.
 - `OptionMaturitySkew`: one expiry's put-minus-call IV skew plus the largest call/put open-interest strikes.
 
-IBKR exposes option Greeks through option computation market data fields such as `bidGreeks`, `askGreeks`, `lastGreeks`, and `modelGreeks` in `ib_insync`. Option volume/open-interest style values require generic ticks. The project default asks for:
+IBKR exposes option Greeks through option computation market data fields such as `bidGreeks`, `askGreeks`, `lastGreeks`, and `modelGreeks` in `ib_async`. Option volume/open-interest style values require generic ticks. The project default asks for:
 
 | Generic tick | Meaning |
 |---:|---|
@@ -729,7 +731,7 @@ POST /api/v1/market-data/options/skew
 IBKR has three relevant API surfaces:
 
 - TWS `reqFundamentalData`: legacy/deprecated company fundamental reports returned as XML. Supported report types in this project are `ReportSnapshot`, `ReportsFinSummary`, `ReportRatios`, `ReportsFinStatements`, `ReportsOwnership`, `CalendarReport`, and `RESC`.
-- TWS Wall Street Horizon: corporate/event calendar metadata and events returned as JSON through `getWshMetaDataAsync` and `getWshEventDataAsync` in `ib_insync`. This requires a Wall Street Horizon subscription, and metadata must be requested before event data.
+- TWS Wall Street Horizon: corporate/event calendar metadata and events returned as JSON through `getWshMetaDataAsync` and `getWshEventDataAsync` in `ib_async`. This requires a Wall Street Horizon subscription, and metadata must be requested before event data.
 - Client Portal Forecast/Event Contracts: economic-indicator-related tradable event contract metadata such as category trees. This is not a macroeconomic time-series endpoint.
 
 This project stores these as explicit data contracts in `src/feeds/fundamental_data.py`:
@@ -855,7 +857,7 @@ Primary sources:
 - [Legacy TWS API Available Tick Types](https://interactivebrokers.github.io/tws-api/tick_types.html)
 - [Legacy TWS API News](https://interactivebrokers.github.io/tws-api/news.html)
 - [Legacy TWS API EClient Reference](https://interactivebrokers.github.io/tws-api/classIBApi_1_1EClient.html)
-- [ib_insync API Reference](https://ib-insync.readthedocs.io/api.html)
+- [ib_async API Reference](https://ib-insync.readthedocs.io/api.html)
 
 Documented standards:
 

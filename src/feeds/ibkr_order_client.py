@@ -3,7 +3,7 @@
 This module follows the same sub-client pattern as ``ibkr_account_feed.py``:
 - Constructor takes an ``IBKRConnectionManager``
 - All methods are async
-- Uses ``self._ib`` to access the ib_insync IB instance
+- Uses ``self._ib`` to access the ib_async IB instance
 - Uses ``self._connection.with_retry()`` for retry logic
 
 Every order action is UUID-tagged and cached to Redis for auditability and
@@ -215,7 +215,7 @@ class IBKROrderClient:
     # ------------------------------------------------------------------
 
     def _build_ibkr_contract(self, request: PlaceOrderRequest) -> Any:
-        """Build an ib_insync Contract from a PlaceOrderRequest."""
+        """Build an ib_async Contract from a PlaceOrderRequest."""
         asset_class = _asset_class_from_sec_type(request.sec_type)
         if asset_class is not None:
             spec = ContractSpec(
@@ -234,7 +234,7 @@ class IBKROrderClient:
             try:
                 return build_ibkr_contract(spec)
             except RuntimeError:
-                logger.debug("ib_insync Contract unavailable; using simple contract namespace", exc_info=True)
+                logger.debug("ib_async Contract unavailable; using simple contract namespace", exc_info=True)
                 return SimpleNamespace(
                     symbol=spec.symbol,
                     secType=request.sec_type,
@@ -249,10 +249,10 @@ class IBKROrderClient:
                     conId=spec.con_id or 0,
                 )
         try:
-            from ib_insync import Contract
+            from ib_async import Contract
             contract = Contract()
         except ImportError:
-            logger.debug("ib_insync Contract unavailable; using simple contract namespace", exc_info=True)
+            logger.debug("ib_async Contract unavailable; using simple contract namespace", exc_info=True)
             contract = SimpleNamespace()
         contract.symbol = request.symbol
         contract.secType = request.sec_type
@@ -261,12 +261,12 @@ class IBKROrderClient:
         return contract
 
     def _build_ibkr_order(self, request: PlaceOrderRequest, *, what_if: bool = False) -> Any:
-        """Build an ib_insync Order from a PlaceOrderRequest."""
+        """Build an ib_async Order from a PlaceOrderRequest."""
         try:
-            from ib_insync import Order
+            from ib_async import Order
             order = Order()
         except ImportError:
-            logger.debug("ib_insync Order unavailable; using simple order namespace", exc_info=True)
+            logger.debug("ib_async Order unavailable; using simple order namespace", exc_info=True)
             order = SimpleNamespace()
         order.action = request.action.value
         order.orderType = request.order_type.value
@@ -432,7 +432,7 @@ class IBKROrderClient:
     ) -> OrderStatus:
         """Wait for an order to reach a terminal or submitted status.
 
-        Uses ib_insync's ``trade.statusEvent`` for event-driven notification
+        Uses ib_async's ``trade.statusEvent`` for event-driven notification
         instead of polling. Falls back to checking the current status on timeout.
         Terminal states: filled, cancelled, api cancelled, inactive.
         Target states: submitted, presubmitted.
@@ -484,7 +484,7 @@ class IBKROrderClient:
     async def place_order(self, request: PlaceOrderRequest) -> OrderResponse:
         """Submit a new order to IBKR.
 
-        Creates the ib_insync Contract and Order from the request, places
+        Creates the ib_async Contract and Order from the request, places
         the order, waits briefly for acknowledgment, and returns the result.
         The order is UUID-tagged and cached to Redis for auditability.
 
@@ -857,10 +857,10 @@ class IBKROrderClient:
             request.since,
         )
         try:
-            from ib_insync import ExecutionFilter
+            from ib_async import ExecutionFilter
             exec_filter = ExecutionFilter()
         except ImportError:
-            logger.debug("ib_insync ExecutionFilter unavailable; using simple namespace", exc_info=True)
+            logger.debug("ib_async ExecutionFilter unavailable; using simple namespace", exc_info=True)
             exec_filter = SimpleNamespace()
         if request.account_id:
             exec_filter.acctCode = request.account_id
@@ -931,7 +931,7 @@ class IBKROrderClient:
     def _simple_contract(cls, *, symbol: str, asset_class: str, exchange: str, currency: str) -> Any:
         sec_type = cls._sec_type_from_asset_class(asset_class)
         try:
-            from ib_insync import Contract
+            from ib_async import Contract
             return Contract(
                 symbol=symbol,
                 secType=sec_type,
@@ -939,7 +939,7 @@ class IBKROrderClient:
                 currency=currency,
             )
         except ImportError:
-            logger.debug("ib_insync Contract unavailable; using simple contract namespace", exc_info=True)
+            logger.debug("ib_async Contract unavailable; using simple contract namespace", exc_info=True)
             return SimpleNamespace(symbol=symbol, secType=sec_type, exchange=exchange, currency=currency, conId=0)
 
     async def place_bracket_order(self, request: BracketOrderRequest) -> BracketOrderResponse:
@@ -1079,9 +1079,9 @@ class IBKROrderClient:
             raise IBKROrderError("OCA group rejected before submission: " + "; ".join(qualification_errors))
 
         try:
-            from ib_insync import Order
+            from ib_async import Order
         except ImportError:
-            logger.debug("ib_insync Order unavailable; using simple order namespace", exc_info=True)
+            logger.debug("ib_async Order unavailable; using simple order namespace", exc_info=True)
             Order = SimpleNamespace
 
         responses: list[OcaOrderResponse] = []
@@ -1222,10 +1222,10 @@ class IBKROrderClient:
         )
 
         try:
-            from ib_insync import Option as IBKROption
+            from ib_async import Option as IBKROption
             contract = IBKROption()
         except ImportError:
-            logger.debug("ib_insync Option unavailable; using simple option namespace", exc_info=True)
+            logger.debug("ib_async Option unavailable; using simple option namespace", exc_info=True)
             contract = SimpleNamespace()
         contract.symbol = symbol.upper()
         contract.secType = "OPT"
@@ -1254,7 +1254,7 @@ class IBKROrderClient:
             exercise_kwargs["manualOrderTime"] = manual_order_time
         elif manual_order_time:
             logger.warning(
-                "exercise_option: manual_order_time=%s ignored because installed ib_insync exerciseOptions() "
+                "exercise_option: manual_order_time=%s ignored because installed ib_async exerciseOptions() "
                 "does not expose manualOrderTime",
                 manual_order_time,
             )

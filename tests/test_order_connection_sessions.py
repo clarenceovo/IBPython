@@ -177,7 +177,7 @@ def test_interrupted_ack_preserves_order_id_and_idempotency_reservation():
 
 def test_preview_cleanup_never_cancels_order_on_replacement():
     async def run():
-        client, connection, original, replacement, _ = make_client()
+        client, connection, original, replacement, redis = make_client()
 
         async def pace(*, operation, weight=1):
             if operation == "preview_order:cancel:AAPL":

@@ -557,7 +557,7 @@ class TestIBKRMarketDataExtTickByTick:
         )
         key = ("MSFT", "STK", "SMART")
         client._tick_buffers[key].append(tick)
-        # Callback would fire in real scenario via ib_insync event
+        # Callback would fire in real scenario via ib_async event
         # Here we just test the buffer append worked
         ticks = client.get_latest_ticks("MSFT")
         assert len(ticks) == 1
@@ -864,7 +864,7 @@ class TestIBKRMarketDataExtHeadTimestamp:
 class FakeIBImpliedVol:
     """IB mock for IV/option price calculations.
 
-    Mimics ib_insync's TickOptionComputation NamedTuple return shape:
+    Mimics ib_async's TickOptionComputation NamedTuple return shape:
     (reqId, tickAttrib, impliedVol, delta, optPrice, pvDividend, gamma, vega, theta, undPrice)
     """
 
