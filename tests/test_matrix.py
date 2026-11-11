@@ -60,14 +60,18 @@ async def test_build_matrix_payload_shape() -> None:
     publishers[0]({"price": 1})
 
     payload = matrix.build_matrix_payload(
-        hub, service="IBPython", version="9.9.9", connection_stats={"connections_active": 2, "frames_dropped_total": 1}
+        hub,
+        service="IBPython",
+        version="9.9.9",
+        stats={"ws": {"connections_active": 2, "frames_dropped_total": 1}, "gatekeeper": {"denied_total": 3}},
     )
 
     assert payload["service"] == "IBPython"
     assert payload["version"] == "9.9.9"
     assert payload["host"] and payload["pid"] > 0
     assert payload["uptime_seconds"] >= 0.0
-    assert payload["ws"] == {"connections_active": 2, "frames_dropped_total": 1}
+    assert payload["stats"]["ws"] == {"connections_active": 2, "frames_dropped_total": 1}
+    assert payload["stats"]["gatekeeper"] == {"denied_total": 3}
     assert payload["topics"][0]["topic"] == "ticks.ES"
     assert payload["topics"][0]["published"] == 1
     assert "ibkr_request_duration" in payload["metrics"]  # Prometheus text present

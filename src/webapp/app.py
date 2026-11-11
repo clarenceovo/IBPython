@@ -19,7 +19,8 @@ from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
 from src.webapp.middleware.correlation import CorrelationIdFilter, CorrelationIdMiddleware
 from src.webapp.middleware.request_timeout import RequestTimeoutMiddleware
 from src.webapp.middleware.body_limit import RequestBodyLimitMiddleware
-from src.webapp.middleware.security import SecurityHeadersMiddleware, RateLimiterMiddleware
+from src.webapp.middleware.security import SecurityHeadersMiddleware
+from src.webapp.middleware.rate_limit import RateLimiterMiddleware, RateLimitGatekeeper
 from src.webapp.ws_broker import broker
 from src.webapp.routers import (
     account,
@@ -142,7 +143,10 @@ def create_app(
             service=resolved_settings.matrix_service_name,
             version=APP_VERSION,
             interval_seconds=resolved_settings.matrix_publish_interval_seconds,
-            connection_stats=websocket.connection_stats,
+            stats_provider=lambda: {
+                "ws": websocket.connection_stats(),
+                "gatekeeper": rate_gatekeeper.snapshot(),
+            },
         )
         try:
             start_control = getattr(app_state.feed, "start_connection_control", None)
@@ -161,6 +165,7 @@ def create_app(
             streaming.stop_cleanup_task()
             matrix_task.cancel()
             await asyncio.gather(matrix_task, return_exceptions=True)
+            await rate_gatekeeper.close()
             await app_state.close()
 
     fastapi_app = FastAPI(
@@ -237,12 +242,15 @@ def create_app(
     if resolved_settings.ibkr_api_bearer_token:
         fastapi_app.add_middleware(APIBearerAuthMiddleware, expected_token=resolved_settings.ibkr_api_bearer_token)
 
-    # HTTP rate limiter — per-IP with Redis or in-process token bucket
+    # HTTP rate limiter — per-IP gatekeeper with Redis or in-process state
+    rate_gatekeeper = RateLimitGatekeeper(resolved_settings.ibkr_rest_rate_limit_per_minute)
+    rate_gatekeeper.configure_redis(
+        resolved_settings.redis_url,
+        resolved_settings.redis_password,
+    )
     fastapi_app.add_middleware(
         RateLimiterMiddleware,
-        redis_url=resolved_settings.redis_url,
-        redis_password=resolved_settings.redis_password,
-        rate_limit_per_minute=resolved_settings.ibkr_rest_rate_limit_per_minute,
+        gatekeeper=rate_gatekeeper,
         trusted_proxies=resolved_settings.ibkr_rest_trusted_proxies,
     )
 

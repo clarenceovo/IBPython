@@ -77,9 +77,9 @@ def build_matrix_payload(
     hub: Any,
     service: str,
     version: str,
-    connection_stats: dict[str, Any] | None = None,
+    stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Assemble the Matrix snapshot: identity, WS stats, topics, metrics, logs."""
+    """Assemble the Matrix snapshot: identity, stats, topics, metrics, logs."""
     return {
         "service": service,
         "version": version,
@@ -88,7 +88,7 @@ def build_matrix_payload(
         "started_at": datetime.fromtimestamp(_STARTED_AT, tz=timezone.utc).isoformat(),
         "updated_at": datetime.now(tz=timezone.utc).isoformat(),
         "uptime_seconds": round(time.time() - _STARTED_AT, 1),
-        "ws": dict(connection_stats or {}),
+        "stats": dict(stats or {}),
         "topics": hub.topic_status() if hub is not None else [],
         "metrics": metrics.expose(),
         "logs": _log_buffer.snapshot() if _log_buffer is not None else [],
@@ -102,7 +102,7 @@ async def matrix_publish_loop(
     service: str,
     version: str,
     interval_seconds: float,
-    connection_stats: Callable[[], dict[str, Any]] | None = None,
+    stats_provider: Callable[[], dict[str, Any]] | None = None,
 ) -> None:
     """Write the Matrix snapshot to Redis until cancelled."""
     install_log_buffer()
@@ -110,7 +110,7 @@ async def matrix_publish_loop(
     ttl = int(interval_seconds * 3) + 30
     while True:
         payload = build_matrix_payload(
-            hub, service, version, connection_stats() if connection_stats is not None else None
+            hub, service, version, stats_provider() if stats_provider is not None else None
         )
         try:
             await redis.set_raw(key, json.dumps(payload), ex=ttl)
@@ -128,7 +128,7 @@ def start_matrix_publisher(
     service: str,
     version: str,
     interval_seconds: float,
-    connection_stats: Callable[[], dict[str, Any]] | None = None,
+    stats_provider: Callable[[], dict[str, Any]] | None = None,
 ) -> asyncio.Task[None]:
     """Start the publish loop as a named background task."""
     task = asyncio.create_task(
@@ -138,7 +138,7 @@ def start_matrix_publisher(
             service=service,
             version=version,
             interval_seconds=interval_seconds,
-            connection_stats=connection_stats,
+            stats_provider=stats_provider,
         )
     )
     task.set_name("matrix-publisher")

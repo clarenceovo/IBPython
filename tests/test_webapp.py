@@ -2538,7 +2538,7 @@ def test_api_bearer_auth_enabled_rejects_empty_token() -> None:
 
 
 def test_rate_limiter_ignores_forwarded_ip_from_untrusted_peer() -> None:
-    from src.webapp.middleware.security import RateLimiterMiddleware
+    from src.webapp.middleware.rate_limit import RateLimiterMiddleware
 
     limiter = RateLimiterMiddleware(lambda scope, receive, send: None, trusted_proxies="")
     scope = {
@@ -2551,7 +2551,7 @@ def test_rate_limiter_ignores_forwarded_ip_from_untrusted_peer() -> None:
 
 
 def test_rate_limiter_honors_forwarded_ip_from_trusted_peer() -> None:
-    from src.webapp.middleware.security import RateLimiterMiddleware
+    from src.webapp.middleware.rate_limit import RateLimiterMiddleware
 
     limiter = RateLimiterMiddleware(lambda scope, receive, send: None, trusted_proxies="127.0.0.1/32")
     scope = {
