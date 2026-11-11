@@ -2718,6 +2718,38 @@ async def get_news_bulletins(
         return [{"error": str(e)}]
 
 
+@mcp.tool()
+async def resolve_symbol(
+    ctx: Context,
+    symbol: str,
+    asset_class: str | None = None,
+    exchange: str | None = None,
+    currency: str | None = None,
+) -> dict[str, Any]:
+    """Resolve any ticker notation into normalized IBKR contract fields.
+
+    Accepts equity suffix notations (0700.HK, 7203.T, BRK.B), FX pairs
+    (EURUSD, EUR.USD, EUR-USD, EUR/USD), crypto roots (BTC, ETHUSD),
+    futures notations (ESZ26, ESZ2026, ES1!, ES=F, -ES), and index aliases
+    (^GSPC -> SPX). Returns the canonical symbol, asset class, exchange,
+    currency, primary exchange, contract fields, and the matched rule.
+
+    Args:
+        symbol: Raw ticker in any supported notation
+        asset_class: Optional asset class pin (equity, fx, future, crypto, index, option, bond)
+        exchange: Optional exchange override
+        currency: Optional currency override
+    """
+    from src.feeds.symbol_resolver import resolve_symbol as _resolve_symbol
+
+    try:
+        pinned = _parse_asset_class(asset_class) if asset_class else None
+        resolved = _resolve_symbol(symbol, asset_class=pinned, exchange=exchange, currency=currency)
+        return resolved.describe()
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # RESOURCES — Static reference data
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2793,6 +2825,7 @@ def get_server_status() -> str:
             "scan_market — IBKR market scanner with customizable filters",
             "get_scanner_parameters — IBKR scanner parameter options",
             "get_news_bulletins — IBKR system news bulletins",
+            "resolve_symbol — Universal ticker resolution to IBKR contract fields",
         ],
         "databases": {
             "questdb": "Time-series OHLCV, snapshots, tick data",

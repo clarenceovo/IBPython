@@ -277,6 +277,8 @@ Consolidated endpoints return many data sections in one call. Sections run concu
 
 - `GET /api/v1/business/consolidated/overview?account_id=` — account summary, account PnL, live positions, portfolio items, and open orders (read-only) in one payload.
 - `GET /api/v1/market-data/consolidated/symbol/{symbol}?exchange=SMART&currency=USD&sections=` — latest equity snapshot, latest ticks, market depth, and trading schedule for one symbol. `sections=snapshot,ticks` runs a subset; unknown names return `422`.
+- `GET /api/v1/market-data/consolidated/resolve/{symbol}` — universal symbol resolution: returns the canonical IBKR contract fields, asset class, exchange, currency, and the matched rule for any supported notation. Invalid notations return `422`.
+- `GET /api/v1/market-data/consolidated/universal/{symbol}` — universal market data for every asset class. The symbol resolves first (`ESZ26`, `EUR.USD`, `BTC`, `0700.HK`, `^GSPC`, `ES1!` all work), then OHLCV, ticks, depth, trading schedule, and equity snapshot sections run where applicable. Non-applicable sections report `skipped` with the reason. The MCP `resolve_symbol` tool exposes the same converter.
 
 Every response carries `requested_at` plus a `sections` map: `{status: ok|error|skipped, latency_ms, error}` per section.
 

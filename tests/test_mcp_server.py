@@ -51,7 +51,7 @@ def test_tool_count():
             for d in node.decorator_list
         )
     ]
-    assert len(tools) == 64, f"Expected 64 MCP tools, found {len(tools)}: {tools}"
+    assert len(tools) == 65, f"Expected 65 MCP tools, found {len(tools)}: {tools}"
 
 
 def test_resource_count():
@@ -125,6 +125,7 @@ def test_expected_tools_present():
         "get_ibkr_rate_limits",
         "get_scheduler_health",
         "get_cache_stats",
+        "resolve_symbol",
     }
     missing = expected - tools
     assert not missing, f"Missing tools: {missing}"
