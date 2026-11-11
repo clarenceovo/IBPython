@@ -291,6 +291,25 @@ Both subscribe through the facade, poll at `interval` seconds, deduplicate uncha
 
 - `DELETE /api/v1/streaming/subscriptions` — cancel every tracked streaming subscription plus feed-level tick-by-tick subscriptions; returns `{"cancelled": N}`.
 
+### WebSocket Feed Channel
+
+`WS /api/v1/ws/market-data` — one socket, many realtime channels, JSON text frames. The universal symbol resolver accepts any notation (`ESZ26`, `EUR.USD`, `BTC`, `0700.HK`), so a subscribe carries no asset-class boilerplate.
+
+Client → server:
+
+```json
+{"action": "subscribe", "channel": "ticks", "symbol": "ESZ26", "tick_type": "ALL_LAST"}
+{"action": "subscribe", "channel": "quotes", "symbol": "AAPL", "interval_seconds": 0.5}
+{"action": "subscribe", "channel": "bars", "symbol": "EURUSD", "what_to_show": "MIDPOINT"}
+{"action": "unsubscribe", "channel": "ticks", "symbol": "ESZ26"}
+{"action": "status"}
+{"action": "ping"}
+```
+
+Server → client: `subscribed` (with the resolved contract fields), `quotes`/`ticks`/`bars` data frames (each with `server_ts`), `unsubscribed`, `status`, `pong`, and `error` frames that never close the socket.
+
+Channels: `quotes` (ticker snapshot polling via reqMktData), `ticks` (tick-by-tick trades/quotes/midpoints), `bars` (5-second realtime bars). Limits: 32 subscriptions per connection; the outbound queue drops the oldest frame under pressure. Disconnect tears down every subscription and releases IBKR market-data lines.
+
 The API uses FastAPI **0.142.2**. Open `http://localhost:8000/dashboard/` for
 the read-only research dashboard: equity quotes/dividends/shortability,
 optional news, per-instrument historical batch diagnostics, and API health.
