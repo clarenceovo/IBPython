@@ -15,6 +15,7 @@ Python service over TWS API (ib_async) plus IBKR Web API. It serves market data,
 - `src/webapp/routers/account.py` — account data plus live PnL SSE streams (`/account/pnl/*/stream`). Poll-and-dedupe; release on disconnect.
 - `src/webapp/routers/streaming.py` — SSE ticker subscriptions plus `DELETE /streaming/subscriptions` cancel-all.
 - `src/webapp/routers/websocket.py` — `WS /ws/market-data`: one socket, subscribe/unsubscribe JSON protocol, quotes/ticks/bars channels. Uses the universal resolver; per-connection outbox with drop-oldest; full teardown on disconnect.
+- `src/webapp/ws_broker.py` — topic pub/sub broker. Topics are refcounted: first subscriber starts the upstream IBKR stream, last unsubscribe stops it. Fan-out to per-subscriber queues; per-topic sequence numbers expose gaps; slow clients drop only their own frames.
 - `src/mcp_server.py` — MCP tools over the same feed state.
 - `src/feeds/` — IBKR clients. `ibkr_feed.py` is the facade. Sub-clients: `ibkr_order_client.py` (orders), `ibkr_account_feed.py`, `ibkr_options_feed.py`, `ibkr_historical.py`, `event_contracts.py` (Web API).
 - `src/transport/` — Redis, QuestDB, MySQL, metrics, scheduler.

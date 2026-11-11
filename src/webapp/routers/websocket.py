@@ -1,48 +1,31 @@
-"""Realtime WebSocket feed channel: subscribe/unsubscribe JSON protocol over one socket.
+"""Realtime WebSocket feed channel: topic pub/sub over one socket.
 
-Protocol (JSON text frames, endpoint ``/api/v1/ws/market-data``)
----------------------------------------------------------------
+Protocol (JSON text frames), client to server:
 
-Client -> server frames:
+    {"action": "subscribe", "channel": "quotes", "symbol": "AAPL", "interval_seconds": 0.5}
+    {"action": "subscribe", "channel": "ticks", "symbol": "ESZ26", "tick_type": "ALL_LAST"}
+    {"action": "subscribe", "channel": "bars", "symbol": "EURUSD", "what_to_show": "MIDPOINT"}
+    {"action": "unsubscribe", "channel": "ticks", "symbol": "ESZ26"}
+    {"action": "status"}
+    {"action": "ping"}
 
-- ``{"action": "subscribe", "channel": "quotes"|"ticks"|"bars", "symbol": "<any notation>",
-   "asset_class": "equity|fx|future|crypto|index|option|bond" (optional),
-   "exchange": "..." (optional), "currency": "..." (optional),
-   "interval_seconds": 0.5 (optional, quotes only),
-   "tick_type": "ALL_LAST|LAST|BID_ASK|MIDPOINT" (optional, ticks only),
-   "what_to_show": "TRADES" (optional, bars only),
-   "max_updates": 0 (optional, 0 = unlimited, auto-unsubscribe when reached)}``
-- ``{"action": "unsubscribe", "channel": ..., "symbol": ...}``
-- ``{"action": "status"}``
-- ``{"action": "ping"}``
+Server to client:
 
-Server -> client frames:
+    {"type": "subscribed", "channel", "symbol", "topic", "subscribers", "resolved"}
+    {"type": "quotes"|"ticks"|"bars", "symbol", "topic", "seq", "data", "server_ts"}
+    {"type": "unsubscribed", "channel", "symbol"}
+    {"type": "status", "subscriptions": [...], "topics": [...]}
+    {"type": "pong"}
+    {"type": "error", "action", "detail"}
 
-- ``{"type": "subscribed", "channel", "symbol", "resolved": <describe() dict>}``
-- ``{"type": "unsubscribed", "channel", "symbol"}``
-- ``{"type": "error", "action", "detail"}`` for malformed frames, unknown actions,
-  unknown channels, symbol resolution failures, duplicate keys, and limits.
-- ``{"type": "quotes", "symbol", "data": <snapshot dict>, "server_ts"}``
-- ``{"type": "ticks", "symbol", "data": <tick dict>, "server_ts"}``
-- ``{"type": "bars", "symbol", "data": <bar dict>, "server_ts"}``
-- ``{"type": "status", "subscriptions": [{"channel", "symbol", ...}]}``
-- ``{"type": "pong"}``
-
-Example session::
-
-    > {"action": "subscribe", "channel": "ticks", "symbol": "ESZ26"}
-    < {"type": "subscribed", "channel": "ticks", "symbol": "ESZ26", "resolved": {...}}
-    < {"type": "ticks", "symbol": "ESZ26", "data": {...}, "server_ts": "2026-11-11T18:00:00+00:00"}
-    > {"action": "ping"}
-    < {"type": "pong"}
-    > {"action": "unsubscribe", "channel": "ticks", "symbol": "ESZ26"}
-    < {"type": "unsubscribed", "channel": "ticks", "symbol": "ESZ26"}
-
-Architecture: one connection runs one reader loop (receive text frame, parse,
-dispatch) and one writer task that drains a bounded outbound queue. Each
-subscription owns its producer (a polling task for quotes, a callback
-registration for ticks, a consuming task for bars). Disconnect or fatal
-receive error cancels every producer and releases every feed subscription.
+Pub/sub model: every subscription resolves to a broker topic keyed by channel
+plus contract identity plus stream parameters. The first subscriber starts the
+upstream IBKR stream; the last unsubscribe stops it. All subscribers on one
+topic share one upstream market-data line and receive frames fanned out by the
+broker (see ``src/webapp/ws_broker.py``). Each frame carries a per-topic ``seq``
+so clients detect gaps caused by their own queue overflow. ``interval_seconds``
+applies to the first subscriber of a quotes topic; later subscribers ride that
+cadence and may thin frames client-side.
 """
 
 from __future__ import annotations
@@ -50,7 +33,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -63,38 +45,37 @@ from src.feeds.symbol_resolver import ResolvedSymbol, SymbolResolutionError, res
 from src.feeds.tick_data import TickByTickData, TickType
 from src.webapp.routers.market_data_consolidated import SEC_TYPE_BY_ASSET_CLASS
 from src.webapp.routers.streaming import _resolve_stream_contract, _ticker_to_snapshot
+from src.webapp.ws_broker import MarketDataBroker, TopicKey, broker, topic_name
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["market-data"])
+router = APIRouter()
 
-VALID_CHANNELS: frozenset[str] = frozenset({"quotes", "ticks", "bars"})
+VALID_CHANNELS = ("quotes", "ticks", "bars")
 MAX_SUBSCRIPTIONS_PER_CONNECTION = 32
 OUTBOX_MAXSIZE = 1000
 DEFAULT_QUOTE_INTERVAL_SECONDS = 0.5
 DEFAULT_TICK_TYPE_NAME = "ALL_LAST"
 DEFAULT_WHAT_TO_SHOW = "TRADES"
 
-QueuePut = Callable[[dict[str, Any]], None]
-Cleanup = Callable[[], Awaitable[None]]
+Cleanup = Any
+QueuePut = Any
 
 
 def _now_iso() -> str:
-    """Current UTC time as ISO-8601 for outbound server_ts fields."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(tz=timezone.utc).isoformat()
 
 
 def _parse_asset_class(raw: Any) -> AssetClass | None:
-    """Convert an optional client string to an AssetClass override."""
-    if raw is None or (isinstance(raw, str) and not raw.strip()):
+    if raw is None:
         return None
-    if isinstance(raw, AssetClass):
-        return raw
-    return AssetClass(str(raw).strip().lower())
+    text = str(raw).strip()
+    if not text:
+        return None
+    return AssetClass(text.lower())
 
 
 def _parse_optional_str(raw: Any) -> str | None:
-    """Normalize an optional passthrough string (exchange, currency)."""
     if raw is None:
         return None
     text = str(raw).strip()
@@ -114,49 +95,48 @@ def _parse_tick_type(raw: Any) -> TickType:
 
 @dataclass
 class _Subscription:
-    """One active per-connection feed subscription."""
+    """One connection's attachment to a broker topic."""
 
     channel: str
     symbol: str
     canonical_symbol: str
-    asset_class: AssetClass
-    exchange: str
-    currency: str
+    topic_key: TopicKey
+    asset_class: str = ""
+    exchange: str = ""
+    currency: str = ""
+    subscriber_id: int = 0
     max_updates: int = 0
     updates_sent: int = 0
     stopping: bool = False
     params: dict[str, Any] = field(default_factory=dict)
-    task: asyncio.Task[None] | None = None
-    cleanup: Cleanup | None = None
-    tick_key: tuple[str, str, str] | None = None
 
     def status_frame(self) -> dict[str, Any]:
         info: dict[str, Any] = {
             "channel": self.channel,
             "symbol": self.symbol,
             "canonical_symbol": self.canonical_symbol,
-            "asset_class": self.asset_class.value,
+            "asset_class": self.asset_class,
             "exchange": self.exchange,
             "currency": self.currency,
+            "topic": topic_name(self.topic_key),
             "updates_sent": self.updates_sent,
         }
         info.update(self.params or {})
         return info
 
 
-async def _start_quotes_subscription(
+# ---------------------------------------------------------------------------
+# Upstream factories: one IBKR stream per topic, publishing into the broker
+# ---------------------------------------------------------------------------
+
+
+async def _start_quotes_upstream(
     state: Any,
     resolved: ResolvedSymbol,
     interval_seconds: float,
-    enqueue: QueuePut,
+    publish: Any,
 ) -> Cleanup:
-    """Start the reqMktData-backed quote poller for one quotes subscription.
-
-    Mirrors the SSE router: resolve the ticker contract the way
-    ``streaming.stream_ticker`` does (via ``_resolve_stream_contract`` and
-    ``state.feed.subscribe_ticker``), then poll the ticker object into
-    snapshots until the returned cleanup coroutine runs.
-    """
+    """reqMktData-backed quote poller publishing snapshots to the topic."""
     request = StreamRequest(
         symbol=resolved.canonical_symbol,
         asset_class=resolved.asset_class,
@@ -175,11 +155,11 @@ async def _start_quotes_subscription(
     async def _poll() -> None:
         while True:
             snapshot = _ticker_to_snapshot(ticker, spec)
-            enqueue(snapshot.model_dump(mode="json"))
+            publish(snapshot.model_dump(mode="json"))
             await asyncio.sleep(interval_seconds)
 
     task = asyncio.create_task(_poll())
-    task.set_name(f"ws-quotes-{resolved.canonical_symbol}")
+    task.set_name(f"ws-topic-quotes-{resolved.canonical_symbol}")
 
     async def _cleanup() -> None:
         task.cancel()
@@ -192,12 +172,92 @@ async def _start_quotes_subscription(
     return _cleanup
 
 
-class _Connection:
-    """State for one WebSocket connection: outbox, subscriptions, reader loop."""
+def _make_quotes_upstream(state: Any, resolved: ResolvedSymbol, interval: float):
+    """Build a start-upstream factory for one quotes topic."""
 
-    def __init__(self, ws: WebSocket, state: Any) -> None:
+    async def start(publish: Any) -> Cleanup:
+        return await _start_quotes_upstream(state, resolved, interval, publish)
+
+    return start
+
+
+def _make_ticks_upstream(state: Any, resolved: ResolvedSymbol, tick_type: TickType):
+    """Build a start-upstream factory for one tick-by-tick topic."""
+
+    async def start(publish: Any) -> Cleanup:
+        sec_type = SEC_TYPE_BY_ASSET_CLASS[resolved.asset_class]
+
+        def on_tick(tick: TickByTickData) -> None:
+            dump = getattr(tick, "model_dump", None)
+            publish(dump(mode="json") if callable(dump) else tick)
+
+        await state.feed.start_tick_by_tick(
+            resolved.canonical_symbol,
+            sec_type=sec_type,
+            exchange=resolved.exchange,
+            currency=resolved.currency,
+            tick_type=tick_type,
+            on_tick=on_tick,
+        )
+
+        async def _cleanup() -> None:
+            try:
+                await state.feed.stop_tick_by_tick(resolved.canonical_symbol, sec_type, resolved.exchange)
+            except Exception:
+                logger.warning(
+                    "ws ticks: stop_tick_by_tick failed for %s", resolved.canonical_symbol, exc_info=True
+                )
+
+        return _cleanup
+
+    return start
+
+
+def _make_bars_upstream(state: Any, resolved: ResolvedSymbol, what_to_show: str):
+    """Build a start-upstream factory for one realtime-bars topic."""
+
+    async def start(publish: Any) -> Cleanup:
+        async def consume() -> None:
+            maybe_stream = state.feed.subscribe_realtime_bars(
+                resolved.canonical_symbol,
+                asset_class=resolved.asset_class.value,
+                exchange=resolved.exchange,
+                currency=resolved.currency,
+                what_to_show=what_to_show,
+            )
+            # The facade returns the async generator after awaiting; a raw
+            # async-generator function returns it directly. Support both.
+            stream = maybe_stream if hasattr(maybe_stream, "__aiter__") else await maybe_stream
+            try:
+                async for bar in stream:
+                    publish(dict(bar))
+            finally:
+                close = getattr(stream, "aclose", None)
+                if close is not None:
+                    try:
+                        await close()
+                    except Exception:
+                        logger.debug("ws bars: stream close failed for %s", resolved.canonical_symbol, exc_info=True)
+
+        task = asyncio.create_task(consume())
+        task.set_name(f"ws-topic-bars-{resolved.canonical_symbol}")
+
+        async def _cleanup() -> None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        return _cleanup
+
+    return start
+
+
+class _Connection:
+    """State for one WebSocket connection: outbox, topic attachments, reader loop."""
+
+    def __init__(self, ws: WebSocket, state: Any, hub: MarketDataBroker) -> None:
         self.ws = ws
         self.state = state
+        self.hub = hub
         self.outbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=OUTBOX_MAXSIZE)
         self.subscriptions: dict[tuple[str, str], _Subscription] = {}
         self.dropped_frames = 0
@@ -227,44 +287,43 @@ class _Connection:
     def send_error(self, action: Any, detail: str) -> None:
         self.enqueue({"type": "error", "action": action, "detail": detail})
 
-    def publish(self, sub: _Subscription, data: Any) -> None:
-        """Enqueue one data frame and honor the max_updates limit."""
-        self.enqueue({"type": sub.channel, "symbol": sub.symbol, "data": data, "server_ts": _now_iso()})
-        sub.updates_sent += 1
-        if sub.max_updates > 0 and sub.updates_sent >= sub.max_updates and not sub.stopping:
-            sub.stopping = True
-            asyncio.create_task(self._auto_stop(sub))
+    def _make_deliver(self, sub: _Subscription) -> Any:
+        """Subscriber callback: stamp the client notation and honor max_updates."""
 
-    async def _auto_stop(self, sub: _Subscription) -> None:
+        def deliver(frame: dict[str, Any]) -> None:
+            if sub.stopping:
+                return
+            message = dict(frame)
+            message["symbol"] = sub.symbol
+            self.enqueue(message)
+            sub.updates_sent += 1
+            if sub.max_updates > 0 and sub.updates_sent >= sub.max_updates:
+                sub.stopping = True
+                asyncio.get_running_loop().create_task(self._auto_detach(sub))
+
+        return deliver
+
+    async def _auto_detach(self, sub: _Subscription) -> None:
         key = (sub.channel, sub.canonical_symbol.upper())
         await self.teardown(key, notify=True)
 
     # ------------------------------------------------------------------
-    # Subscription lifecycle
+    # Subscription lifecycle (broker attach/detach)
     # ------------------------------------------------------------------
 
     async def teardown(self, key: tuple[str, str], *, notify: bool) -> _Subscription | None:
-        """Stop one subscription: cancel its task, run cleanup, stop ticks."""
+        """Detach one subscription from its broker topic."""
         sub = self.subscriptions.pop(key, None)
         if sub is None:
             return None
         sub.stopping = True
-        if sub.task is not None and not sub.task.done():
-            sub.task.cancel()
-            await asyncio.gather(sub.task, return_exceptions=True)
-        if sub.cleanup is not None:
-            try:
-                await sub.cleanup()
-            except Exception:
-                logger.warning("ws cleanup failed: channel=%s symbol=%s", sub.channel, sub.symbol, exc_info=True)
-        if sub.tick_key is not None:
-            try:
-                await self.state.feed.stop_tick_by_tick(*sub.tick_key)
-            except Exception:
-                logger.warning("ws stop_tick_by_tick failed: channel=%s symbol=%s", sub.channel, sub.symbol, exc_info=True)
+        remaining = await self.hub.detach(sub.topic_key, sub.subscriber_id)
         if notify:
             self.enqueue({"type": "unsubscribed", "channel": sub.channel, "symbol": sub.symbol})
-        logger.info("ws subscription stopped: channel=%s symbol=%s updates=%d", sub.channel, sub.symbol, sub.updates_sent)
+        logger.info(
+            "ws subscription detached: channel=%s symbol=%s topic=%s updates=%d topic_subscribers_left=%d",
+            sub.channel, sub.symbol, topic_name(sub.topic_key), sub.updates_sent, remaining,
+        )
         return sub
 
     def _find_subscription(self, channel: str, symbol: str) -> tuple[tuple[str, str], _Subscription] | None:
@@ -290,7 +349,11 @@ class _Connection:
         if action == "ping":
             self.enqueue({"type": "pong"})
         elif action == "status":
-            self.enqueue({"type": "status", "subscriptions": [sub.status_frame() for sub in self.subscriptions.values()]})
+            self.enqueue({
+                "type": "status",
+                "subscriptions": [sub.status_frame() for sub in self.subscriptions.values()],
+                "topics": self.hub.topic_status(),
+            })
         elif action == "subscribe":
             await self._handle_subscribe(frame)
         elif action == "unsubscribe":
@@ -330,104 +393,92 @@ class _Connection:
             self.send_error("subscribe", f"already subscribed to {channel} for {resolved.canonical_symbol}")
             return
         try:
-            sub = await self._start_subscription(channel, symbol.strip(), resolved, frame)
+            sub, subscribers = await self._attach(channel, symbol.strip(), resolved, frame)
         except Exception as exc:
             logger.warning("ws subscribe failed: channel=%s symbol=%s", channel, symbol, exc_info=True)
             self.send_error("subscribe", f"failed to start {channel} subscription: {exc}")
             return
         self.subscriptions[key] = sub
-        self.enqueue({"type": "subscribed", "channel": channel, "symbol": sub.symbol, "resolved": resolved.describe()})
-        logger.info("ws subscription started: channel=%s symbol=%s canonical=%s", channel, sub.symbol, sub.canonical_symbol)
+        self.enqueue({
+            "type": "subscribed",
+            "channel": channel,
+            "symbol": sub.symbol,
+            "topic": topic_name(sub.topic_key),
+            "subscribers": subscribers,
+            "resolved": resolved.describe(),
+        })
+        logger.info(
+            "ws subscription attached: channel=%s symbol=%s canonical=%s topic=%s subscribers=%d",
+            channel, sub.symbol, sub.canonical_symbol, topic_name(sub.topic_key), subscribers,
+        )
 
-    async def _start_subscription(self, channel: str, symbol: str, resolved: ResolvedSymbol, frame: dict[str, Any]) -> _Subscription:
+    async def _attach(
+        self, channel: str, symbol: str, resolved: ResolvedSymbol, frame: dict[str, Any]
+    ) -> tuple[_Subscription, int]:
+        """Build the topic key, start/attach the upstream, register the deliver callback."""
         max_updates = frame.get("max_updates") or 0
         if not isinstance(max_updates, int) or isinstance(max_updates, bool) or max_updates < 0:
             raise ValueError("max_updates must be a non-negative integer")
+
+        if channel == "quotes":
+            try:
+                interval = float(frame.get("interval_seconds", DEFAULT_QUOTE_INTERVAL_SECONDS))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("interval_seconds must be a number") from exc
+            if not 0.0 < interval <= 60.0:
+                raise ValueError("interval_seconds must be in (0, 60]")
+            topic_key: TopicKey = (
+                "quotes", resolved.canonical_symbol.upper(),
+                resolved.asset_class.value, resolved.exchange, resolved.currency,
+            )
+            meta = {"interval_seconds": interval, **resolved.describe()}
+            start = _make_quotes_upstream(self.state, resolved, interval)
+            params: dict[str, Any] = {"interval_seconds": interval}
+        elif channel == "ticks":
+            try:
+                tick_type = _parse_tick_type(frame.get("tick_type", DEFAULT_TICK_TYPE_NAME))
+            except (KeyError, ValueError) as exc:
+                raise ValueError(f"invalid tick_type: {frame.get('tick_type')!r}") from exc
+            sec_type = SEC_TYPE_BY_ASSET_CLASS[resolved.asset_class]
+            topic_key = (
+                "ticks", resolved.canonical_symbol.upper(), sec_type, resolved.exchange, tick_type.value,
+            )
+            meta = {"tick_type": tick_type.value, **resolved.describe()}
+            start = _make_ticks_upstream(self.state, resolved, tick_type)
+            params = {"tick_type": tick_type.value}
+        else:
+            what_to_show = str(frame.get("what_to_show") or DEFAULT_WHAT_TO_SHOW).strip()
+            if not what_to_show:
+                raise ValueError("what_to_show must be a non-empty string")
+            topic_key = (
+                "bars", resolved.canonical_symbol.upper(),
+                resolved.asset_class.value, resolved.exchange, resolved.currency, what_to_show,
+            )
+            meta = {"what_to_show": what_to_show, **resolved.describe()}
+            start = _make_bars_upstream(self.state, resolved, what_to_show)
+            params = {"what_to_show": what_to_show}
+
         sub = _Subscription(
             channel=channel,
             symbol=symbol,
             canonical_symbol=resolved.canonical_symbol,
-            asset_class=resolved.asset_class,
+            topic_key=topic_key,
+            asset_class=resolved.asset_class.value,
             exchange=resolved.exchange,
             currency=resolved.currency,
             max_updates=max_updates,
-            params={},
+            params=params,
         )
-        if channel == "quotes":
-            await self._start_quotes(sub, resolved, frame)
-        elif channel == "ticks":
-            await self._start_ticks(sub, resolved, frame)
-        else:
-            await self._start_bars(sub, resolved, frame)
-        return sub
-
-    async def _start_quotes(self, sub: _Subscription, resolved: ResolvedSymbol, frame: dict[str, Any]) -> None:
-        try:
-            interval = float(frame.get("interval_seconds", DEFAULT_QUOTE_INTERVAL_SECONDS))
-        except (TypeError, ValueError) as exc:
-            raise ValueError("interval_seconds must be a number") from exc
-        if not 0.0 < interval <= 60.0:
-            raise ValueError("interval_seconds must be in (0, 60]")
-        sub.params = {"interval_seconds": interval}
-
-        def enqueue(data: Any) -> None:
-            self.publish(sub, data)
-
-        sub.cleanup = await _start_quotes_subscription(self.state, resolved, interval, enqueue)
-
-    async def _start_ticks(self, sub: _Subscription, resolved: ResolvedSymbol, frame: dict[str, Any]) -> None:
-        try:
-            tick_type = _parse_tick_type(frame.get("tick_type", DEFAULT_TICK_TYPE_NAME))
-        except (KeyError, ValueError) as exc:
-            raise ValueError(f"invalid tick_type: {frame.get('tick_type')!r}") from exc
-        sub.params = {"tick_type": tick_type.value}
-        sec_type = SEC_TYPE_BY_ASSET_CLASS[resolved.asset_class]
-
-        def on_tick(tick: TickByTickData) -> None:
-            dump = getattr(tick, "model_dump", None)
-            payload = dump(mode="json") if callable(dump) else tick
-            self.publish(sub, payload)
-
-        await self.state.feed.start_tick_by_tick(
-            resolved.canonical_symbol,
-            sec_type=sec_type,
-            exchange=resolved.exchange,
-            currency=resolved.currency,
-            tick_type=tick_type,
-            on_tick=on_tick,
+        subscriber_id, subscribers = await self.hub.attach(
+            topic_key,
+            channel=channel,
+            start_upstream=start,
+            deliver=self._make_deliver(sub),
+            meta=meta,
         )
-        sub.tick_key = (resolved.canonical_symbol, sec_type, resolved.exchange)
+        sub.subscriber_id = subscriber_id
+        return sub, subscribers
 
-    async def _start_bars(self, sub: _Subscription, resolved: ResolvedSymbol, frame: dict[str, Any]) -> None:
-        what_to_show = str(frame.get("what_to_show") or DEFAULT_WHAT_TO_SHOW).strip()
-        if not what_to_show:
-            raise ValueError("what_to_show must be a non-empty string")
-        sub.params = {"what_to_show": what_to_show}
-
-        async def consume() -> None:
-            maybe_stream = self.state.feed.subscribe_realtime_bars(
-                resolved.canonical_symbol,
-                asset_class=resolved.asset_class.value,
-                exchange=resolved.exchange,
-                currency=resolved.currency,
-                what_to_show=what_to_show,
-            )
-            # The facade returns the async generator after awaiting; a raw
-            # async-generator function returns it directly. Support both.
-            stream = maybe_stream if hasattr(maybe_stream, "__aiter__") else await maybe_stream
-            try:
-                async for bar in stream:
-                    self.publish(sub, dict(bar))
-            finally:
-                close = getattr(stream, "aclose", None)
-                if close is not None:
-                    try:
-                        await close()
-                    except Exception:
-                        logger.debug("ws bars: stream close failed for %s", resolved.canonical_symbol, exc_info=True)
-
-        sub.task = asyncio.create_task(consume())
-        sub.task.set_name(f"ws-bars-{resolved.canonical_symbol}")
 
     async def _handle_unsubscribe(self, frame: dict[str, Any]) -> None:
         channel = frame.get("channel")
@@ -445,54 +496,68 @@ class _Connection:
         key, _ = found
         await self.teardown(key, notify=True)
 
-    # ------------------------------------------------------------------
-    # Main loops
-    # ------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Main loops
+# ---------------------------------------------------------------------------
+
+
+class _ConnectionReader:
+    """Reader/writer wrapper so _Connection methods stay dispatchable in tests."""
+
+    def __init__(self, connection: _Connection) -> None:
+        self.connection = connection
 
     async def writer(self) -> None:
         """Drain the outbound queue and send each frame as JSON text."""
+        connection = self.connection
         while True:
-            message = await self.outbox.get()
-            await self.ws.send_text(json.dumps(message))
+            message = await connection.outbox.get()
+            await connection.ws.send_text(json.dumps(message))
 
     async def run(self) -> None:
         """Reader loop: receive, parse, dispatch; clean up on disconnect."""
+        connection = self.connection
         writer_task = asyncio.create_task(self.writer())
         writer_task.set_name("ws-writer")
         try:
             while True:
-                raw = await self.ws.receive_text()
+                raw = await connection.ws.receive_text()
                 try:
                     frame = json.loads(raw)
                 except json.JSONDecodeError:
-                    self.send_error(None, "malformed JSON frame")
+                    connection.send_error(None, "malformed JSON frame")
                     continue
                 try:
-                    await self.handle_frame(frame)
+                    await connection.handle_frame(frame)
                 except Exception:
                     logger.exception("ws frame dispatch failed")
-                    self.send_error(frame.get("action") if isinstance(frame, dict) else None, "internal dispatch error")
+                    detail_source = frame.get("action") if isinstance(frame, dict) else None
+                    connection.send_error(detail_source, "internal dispatch error")
         except WebSocketDisconnect:
-            logger.info("ws client disconnected (subscriptions=%d dropped=%d)", len(self.subscriptions), self.dropped_frames)
+            logger.info(
+                "ws client disconnected (subscriptions=%d dropped=%d)",
+                len(connection.subscriptions), connection.dropped_frames,
+            )
         except Exception:
             logger.exception("ws reader loop failed")
         finally:
-            for key in list(self.subscriptions):
+            for key in list(connection.subscriptions):
                 try:
-                    await self.teardown(key, notify=False)
+                    await connection.teardown(key, notify=False)
                 except Exception:
                     logger.warning("ws teardown during disconnect failed: key=%s", key, exc_info=True)
             writer_task.cancel()
             await asyncio.gather(writer_task, return_exceptions=True)
             try:
-                await self.ws.close()
+                await connection.ws.close()
             except Exception:
                 logger.debug("ws close after disconnect failed", exc_info=True)
 
 
 @router.websocket("/ws/market-data")
 async def market_data_socket(websocket: WebSocket) -> None:
-    """Realtime market-data feed socket.
+    """Realtime market-data feed socket (topic pub/sub; see module docstring).
 
     State access mirrors ``get_rest_state`` (which reads
     ``request.app.state.ibkr_rest_state``) but through the WebSocket scope,
@@ -500,4 +565,5 @@ async def market_data_socket(websocket: WebSocket) -> None:
     """
     state = websocket.app.state.ibkr_rest_state
     await websocket.accept()
-    await _Connection(websocket, state).run()
+    connection = _Connection(websocket, state, broker)
+    await _ConnectionReader(connection).run()

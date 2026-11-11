@@ -310,6 +310,8 @@ Server → client: `subscribed` (with the resolved contract fields), `quotes`/`t
 
 Channels: `quotes` (ticker snapshot polling via reqMktData), `ticks` (tick-by-tick trades/quotes/midpoints), `bars` (5-second realtime bars). Limits: 32 subscriptions per connection; the outbound queue drops the oldest frame under pressure. Disconnect tears down every subscription and releases IBKR market-data lines.
 
+**Pub/sub model.** Subscriptions resolve to broker topics keyed by channel plus contract identity plus stream parameters (`ticks.ES.FUT.CME.AllLast`). The first subscriber starts the upstream IBKR stream; the last unsubscribe stops it — N clients on one topic share one market-data line. The broker fans each frame out to every subscriber; every frame carries a per-topic `seq`, so a client that sees a gap knows its own queue overflowed. One slow client never blocks the others: each connection owns its bounded outbox and drops only its own frames. The `status` action reports per-topic subscriber counts, sequence numbers, and published-frame totals.
+
 The API uses FastAPI **0.142.2**. Open `http://localhost:8000/dashboard/` for
 the read-only research dashboard: equity quotes/dividends/shortability,
 optional news, per-instrument historical batch diagnostics, and API health.
