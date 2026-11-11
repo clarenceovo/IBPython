@@ -271,6 +271,24 @@ QuestDB remains the default scheduler/snapshotter market-data store. To route OH
 
 `IBKRRestApp` is a thin async HTTP bridge over the Pydantic DTOs in `src/feeds`. It keeps business logic in the feed/transport layer and exposes a clean API surface for notebooks, dashboards, services, and internal tools. It does not open QuestDB/MySQL connections; durable market-data persistence and historical store reads belong to the scheduler/snapshotter side.
 
+### Consolidated Endpoints
+
+Consolidated endpoints return many data sections in one call. Sections run concurrently. A failing section does not fail the response: its field becomes `null` and `sections[key].status` reports `error` with the message. Filter with the `sections` query parameter where supported.
+
+- `GET /api/v1/business/consolidated/overview?account_id=` — account summary, account PnL, live positions, portfolio items, and open orders (read-only) in one payload.
+- `GET /api/v1/market-data/consolidated/symbol/{symbol}?exchange=SMART&currency=USD&sections=` — latest equity snapshot, latest ticks, market depth, and trading schedule for one symbol. `sections=snapshot,ticks` runs a subset; unknown names return `422`.
+
+Every response carries `requested_at` plus a `sections` map: `{status: ok|error|skipped, latency_ms, error}` per section.
+
+### Live PnL Streams
+
+- `GET /api/v1/account/pnl/account/stream?account_id=&interval=1&max_updates=0` — SSE stream of `AccountPnLDTO` snapshots.
+- `GET /api/v1/account/pnl/position/stream?account_id=&con_id=` — SSE stream of `PositionPnLDTO` snapshots for one position.
+
+Both subscribe through the facade, poll at `interval` seconds, deduplicate unchanged payloads, and release the subscription when the client disconnects. `max_updates=0` streams until disconnect.
+
+- `DELETE /api/v1/streaming/subscriptions` — cancel every tracked streaming subscription plus feed-level tick-by-tick subscriptions; returns `{"cancelled": N}`.
+
 The API uses FastAPI **0.142.2**. Open `http://localhost:8000/dashboard/` for
 the read-only research dashboard: equity quotes/dividends/shortability,
 optional news, per-instrument historical batch diagnostics, and API health.

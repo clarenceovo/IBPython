@@ -8,7 +8,11 @@ Python service over TWS API (ib_async) plus IBKR Web API. It serves market data,
 
 ## Layers
 
-- `src/webapp/` — FastAPI app. `routers/` holds all HTTP endpoints. `dependencies.py` builds the shared state (`feed`, `loader`, `redis`, `event_contracts`).
+- `src/webapp/` — FastAPI app. `routers/` holds all HTTP endpoints. `dependencies.py` builds the shared state (`feed`, `loader`, `redis`, `event_contracts`). `consolidated.py` holds the shared section runner for consolidated endpoints.
+- `src/webapp/routers/business_consolidated.py` — `GET /business/consolidated/overview`: account summary, PnL, positions, portfolio, open orders. One call, isolated failures.
+- `src/webapp/routers/market_data_consolidated.py` — `GET /market-data/consolidated/symbol/{symbol}`: snapshot, ticks, depth, trading schedule. Section whitelist via query param.
+- `src/webapp/routers/account.py` — account data plus live PnL SSE streams (`/account/pnl/*/stream`). Poll-and-dedupe; release on disconnect.
+- `src/webapp/routers/streaming.py` — SSE ticker subscriptions plus `DELETE /streaming/subscriptions` cancel-all.
 - `src/mcp_server.py` — MCP tools over the same feed state.
 - `src/feeds/` — IBKR clients. `ibkr_feed.py` is the facade. Sub-clients: `ibkr_order_client.py` (orders), `ibkr_account_feed.py`, `ibkr_options_feed.py`, `ibkr_historical.py`, `event_contracts.py` (Web API).
 - `src/transport/` — Redis, QuestDB, MySQL, metrics, scheduler.

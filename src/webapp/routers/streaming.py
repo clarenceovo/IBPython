@@ -382,3 +382,34 @@ async def stop_subscription(subscription_id: str) -> dict[str, str]:
         sub.stop()
         _pop_subscription_locked(subscription_id)
     return {"status": "stopped", "subscription_id": subscription_id}
+
+
+@router.delete(
+    "/subscriptions",
+    summary="Cancel all active streaming subscriptions",
+    # NOTE: Returns 200 (not 204) because the response body reports how many
+    # subscriptions were cancelled, mirroring stop_subscription's shape.
+)
+async def cancel_all_subscriptions(
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> dict[str, int]:
+    """Stop every tracked SSE subscription and cancel feed-level tick streams."""
+    async with _sub_lock:
+        subscription_ids = list(_active_subscriptions.keys())
+        for subscription_id in subscription_ids:
+            sub = _active_subscriptions.get(subscription_id)
+            if sub is not None:
+                # Signal the SSE generator to stop, then clean up
+                sub.stop()
+                _pop_subscription_locked(subscription_id)
+
+    # Best effort: also release the feed's own tick-by-tick subscriptions.
+    marketdata_ext = getattr(state.feed, "_marketdata_ext", None)
+    cancel_all: Any = getattr(marketdata_ext, "cancel_all_subscriptions", None)
+    if callable(cancel_all):
+        try:
+            await cancel_all()
+        except Exception:
+            logger.warning("feed-level cancel_all_subscriptions failed", exc_info=True)
+
+    return {"cancelled": len(subscription_ids)}
