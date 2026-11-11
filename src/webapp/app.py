@@ -21,8 +21,10 @@ from src.webapp.middleware.security import SecurityHeadersMiddleware, RateLimite
 from src.webapp.routers import (
     account,
     business,
+    business_consolidated,
     fixed_income,
     market_data_bonds,
+    market_data_consolidated,
     market_data_depth,
     market_data_equity,
     market_data_fx,
@@ -246,6 +248,8 @@ def create_app(
             )
 
     fastapi_app.include_router(business.router, prefix="/api/v1")
+    fastapi_app.include_router(business_consolidated.router, prefix="/api/v1")
+    fastapi_app.include_router(market_data_consolidated.router, prefix="/api/v1")
     fastapi_app.include_router(fixed_income.router, prefix="/api/v1")
     fastapi_app.include_router(system.router, prefix="/api/v1")
     fastapi_app.include_router(market_data_equity.router, prefix="/api/v1")
