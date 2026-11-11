@@ -41,6 +41,7 @@ from src.webapp.routers import (
     streaming,
     system,
     tick_data,
+    websocket,
 )
 from src.feeds.ibkr_historical import HistoricalRequestTooLargeError, HistoricalRequestUnsupportedError
 from src.feeds.exceptions import (
@@ -268,6 +269,7 @@ def create_app(
     fastapi_app.include_router(snapshot.router, prefix="/api/v1")
     fastapi_app.include_router(tick_data.router, prefix="/api/v1")
     fastapi_app.include_router(market_data_histogram.router, prefix="/api/v1")
+    fastapi_app.include_router(websocket.router, prefix="/api/v1")
     fastapi_app.include_router(market_data_realtime.router, prefix="/api/v1")
     fastapi_app.include_router(system._market_data_router, prefix="/api/v1")
 
