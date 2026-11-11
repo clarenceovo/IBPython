@@ -69,6 +69,12 @@ READ_ONLY_ORDER_API_MESSAGE = (
 )
 
 
+def _is_deactivated_order(order: Any) -> bool:
+    """TWS API 10.47: reqOpenOrders may return de-activated orders."""
+    raw = str(getattr(order, "status", "") or "").strip().lower()
+    return raw.replace("-", "").replace("_", "").replace(" ", "") == "deactivated"
+
+
 def _is_read_only_api_error(value: Any) -> bool:
     if value is None:
         return False
@@ -301,6 +307,26 @@ class IBKROrderClient:
 
         if request.outside_rth:
             order.outsideRth = True
+
+        # TWS API 10.47 order fields. ib_async 2.1.0 does not model them yet,
+        # so apply defensively: the fields light up once the client catches up.
+        if request.hedge_max_size is not None:
+            if hasattr(order, "hedgeMaxSize"):
+                order.hedgeMaxSize = request.hedge_max_size
+            else:
+                raise IBKROrderError(
+                    "hedge_max_size requires an ib_async release that models "
+                    "Order.hedgeMaxSize (TWS API 10.47); installed client does not."
+                )
+        if request.conditions_include_overnight:
+            if hasattr(order, "conditionsIncludeOvernight"):
+                order.conditionsIncludeOvernight = True
+            else:
+                raise IBKROrderError(
+                    "conditions_include_overnight requires an ib_async release that "
+                    "models Order.conditionsIncludeOvernight (TWS API 10.47); "
+                    "installed client does not."
+                )
 
         return order
 
@@ -833,10 +859,14 @@ class IBKROrderClient:
         )
         return result
 
-    async def load_open_orders(self) -> list[OpenOrder]:
-        """Load all currently open (working) orders."""
+    async def load_open_orders(self, *, include_deactivated: bool = False) -> list[OpenOrder]:
+        """Load all currently open (working) orders.
+
+        TWS API 10.47: reqOpenOrders responses now include de-activated orders.
+        De-activated orders are filtered out unless include_deactivated is set.
+        """
         await self._connection.ensure_connected()
-        logger.info("load_open_orders: starting")
+        logger.info("load_open_orders: starting (include_deactivated=%s)", include_deactivated)
 
         trades = await self._with_order_retry(
             lambda: self._ib.reqOpenOrdersAsync(),
@@ -844,6 +874,8 @@ class IBKROrderClient:
         )
 
         result = [normalize_open_order(trade) for trade in (trades or [])]
+        if not include_deactivated:
+            result = [order for order in result if not _is_deactivated_order(order)]
         logger.info("load_open_orders: %d open orders loaded", len(result))
         return result
 

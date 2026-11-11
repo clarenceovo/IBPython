@@ -50,7 +50,62 @@ def gateway_capabilities(connection: Any) -> GatewayCapabilities:
     features["fundamental_reports"] = FeatureCapability(
         implemented=False, client_supported=False, availability="unsupported", reason=FUNDAMENTALS_REMOVED,
     )
+    features.update(_tws_1047_features())
     return GatewayCapabilities(
         client_version=version("ib-async"), connected=connected,
         negotiated_server_protocol=protocol, features=features,
     )
+
+
+def _tws_1047_features() -> dict[str, FeatureCapability]:
+    """Feature surface introduced in the TWS API 10.4x production line.
+
+    Fields that the installed ib_async does not model yet are reported as
+    client-unsupported so callers can degrade instead of sending dead fields.
+    """
+    order_fields = {"hedgeMaxSize", "conditionsIncludeOvernight"}
+    modeled: set[str] = set()
+    try:  # import guarded: capabilities must stay import-safe without ib_async
+        from ib_async import Order as _IbOrder
+
+        modeled = {name for name in order_fields if hasattr(_IbOrder(), name)}
+    except Exception:  # noqa: BLE001 - missing/older client counts as unmodeled
+        pass
+    features: dict[str, FeatureCapability] = {}
+    features["hedge_max_size"] = FeatureCapability(
+        implemented=True,
+        client_supported="hedgeMaxSize" in modeled,
+        availability="unknown",
+        reason="Order field hedgeMaxSize (TWS API 10.47); REST surface ready, "
+        "wire support arrives with an ib_async release that models the field.",
+    )
+    features["overnight_conditions"] = FeatureCapability(
+        implemented=True,
+        client_supported="conditionsIncludeOvernight" in modeled,
+        availability="unknown",
+        reason="Order field conditionsIncludeOvernight (TWS API 10.47); REST "
+        "surface ready, wire support arrives with an ib_async release that "
+        "models the field.",
+    )
+    features["deactivated_orders_in_open_orders"] = FeatureCapability(
+        implemented=True,
+        client_supported=None,
+        availability="unknown",
+        reason="TWS API 10.47: reqOpenOrders responses include de-activated "
+        "orders; load_open_orders filters them unless include_deactivated is set.",
+    )
+    features["odd_lot_ticks"] = FeatureCapability(
+        implemented=False,
+        client_supported=False,
+        availability="unsupported",
+        reason="Tick types 105-110 (oddLotBid/Ask and sizes) need an ib_async "
+        "decoder release; no local mapping yet.",
+    )
+    features["fractional_last_sizes"] = FeatureCapability(
+        implemented=False,
+        client_supported=False,
+        availability="unsupported",
+        reason="Fractional last sizes in tickSize responses need an ib_async "
+        "decoder release; no local mapping yet.",
+    )
+    return features

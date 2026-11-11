@@ -186,3 +186,17 @@ REDIS_SNAPSHOT_WATCHLIST_KEY_TEMPLATE = "SnapshotWatchlist::{name}"
 REDIS_ORDER_ENVELOPE_KEY_TEMPLATE = "OrderCache::{order_uuid}"
 REDIS_ORDER_ENVELOPE_TTL_SECONDS = 86_400  # 24h default TTL for cached orders
 REDIS_ORDER_ENVELOPE_SCAN_PATTERN = "OrderCache::*"
+
+# ---------------------------------------------------------------------------
+# TWS API alignment baseline (IBKR production release notes, November 2026).
+# The gateway targets the 10.4x production line:
+#   - Fundamental report requests were removed upstream; this gateway serves
+#     410 responses and routes event data through WSH.
+#   - reqOpenOrders responses now include de-activated orders; the order
+#     client filters them unless include_deactivated is requested.
+#   - Order fields hedgeMaxSize and conditionsIncludeOvernight wait on an
+#     ib_async release that models them; capabilities reports their status.
+#   - TWS/Gateway 10.45 clears "Enable ActiveX and Socket Clients" and
+#     "Allow connections from localhost only" between upgrades; re-check
+#     gateway hosts after upgrading.
+TWS_API_BASELINE = "10.47"

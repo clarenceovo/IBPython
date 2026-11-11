@@ -130,6 +130,17 @@ class PlaceOrderRequest(BaseModel):
     trail_stop_price: float | None = Field(default=None, gt=0)
     limit_price_offset: float | None = Field(default=None, gt=0)
     outside_rth: bool = False
+    hedge_max_size: int | None = Field(
+        default=None,
+        gt=0,
+        description="TWS API 10.47 hedgeMaxSize; applied only when the installed "
+        "ib_async models the field on Order.",
+    )
+    conditions_include_overnight: bool = Field(
+        default=False,
+        description="TWS API 10.47 conditionsIncludeOvernight; let conditional "
+        "orders evaluate criteria during overnight sessions.",
+    )
     idempotency_key: str | None = Field(default=None, min_length=1)
     attribution: ExecutionAttribution | None = None
 

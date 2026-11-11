@@ -25,6 +25,34 @@ Production-oriented IBKR market data, transport, scheduler, and REST API layer f
 - MySQL, optional when `MARKET_DATA_DB_BACKEND=mysql`
 - Docker Desktop or Docker Engine, if using Compose
 
+## TWS API Alignment (10.4x)
+
+The gateway tracks the IBKR TWS API 10.4x production line (`TWS_API_BASELINE`
+in `src/config/config_constant.py`):
+
+- **Fundamental reports removed upstream.** `reqFundamentalData` and the
+  `FUNDAMENTAL_RATIOS` tick no longer exist on current TWS builds. The REST
+  surface keeps the request shape but answers `410 Gone`; corporate event
+  data flows through Wall Street Horizon (`WSH`) instead.
+- **`reqOpenOrders` now includes de-activated orders.** `load_open_orders`
+  filters them out unless `include_deactivated=true` is passed.
+- **New order fields `hedgeMaxSize` and `conditionsIncludeOvernight`** are
+  accepted on the REST surface. They raise a clear error until the installed
+  `ib_async` release models them on `Order`; `/system/capabilities` reports
+  live support status.
+- **Odd-lot tick types (105-110), generic tick 787, and fractional last
+  sizes** are server-side changes that require an `ib_async` decoder update;
+  capabilities marks them unsupported until then.
+- **Deployment note (TWS/Gateway 10.45):** upgrades clear "Enable ActiveX
+  and Socket Clients" and "Allow connections from localhost only". Re-check
+  these settings on gateway hosts after any TWS upgrade, and consider the
+  10.40 "Maintain and resubmit orders when connection is restored" setting
+  for order-recovery behaviour.
+- **Per-currency account keys:** TWS now offers the `$LEDGER-` prefix for
+  per-currency values (`reqAccountUpdates`/`reqAccountUpdatesMulti`). The
+  account feed passes keys through unchanged, so enable the setting in TWS
+  only if callers are updated to match.
+
 ## Quick Start
 
 ```bash
