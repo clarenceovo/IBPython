@@ -45,6 +45,11 @@ class IBKROrderError(IBKRError):
     pass
 
 
+class IBKROrdersDisabledError(IBKROrderError):
+    """Order pathways are disabled by the IBKR_ORDERS_ENABLED master switch."""
+    pass
+
+
 class QuestDBWriteError(Exception):
     """QuestDB write operation failed."""
     pass

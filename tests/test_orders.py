@@ -1087,7 +1087,7 @@ class TestOrdersRouter:
 
         class RouterTestState:
             def __init__(self) -> None:
-                self.settings = Settings(ibkr_rest_app_name="TestOrdersApp")
+                self.settings = Settings(ibkr_rest_app_name="TestOrdersApp", ibkr_orders_enabled=True)
                 self.feed = feed
                 self.loader = None  # type: ignore[assignment]
                 self.redis = FakeRedisForRouter()

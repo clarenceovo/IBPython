@@ -240,6 +240,12 @@ def _state(ctx: Context) -> IBKRRestAppState:
     return ctx.request_context.lifespan_context["ibkr_state"]
 
 
+MCP_ORDERS_DISABLED_ERROR = (
+    "order pathways are disabled; set IBKR_ORDERS_ENABLED=true to enable "
+    "place/modify/cancel/bracket/OCA/preview/exercise operations"
+)
+
+
 def _parse_asset_class(asset_class: str) -> Any:
     """Parse MCP asset_class text using AssetClass values, names, and documented aliases."""
     from src.feeds.models import AssetClass
@@ -2035,6 +2041,8 @@ async def get_server_time(ctx: Context) -> dict[str, Any]:
 async def cancel_all_orders(ctx: Context) -> dict[str, Any]:
     """Cancel ALL open orders across all accounts. Use with extreme caution."""
     state = _state(ctx)
+    if not state.settings.ibkr_orders_enabled:
+        return {"error": MCP_ORDERS_DISABLED_ERROR}
     try:
         return await state.feed.cancel_all_orders()
     except Exception as e:
@@ -2085,6 +2093,8 @@ async def exercise_option(
         override: Override exercise restrictions (default False)
     """
     state = _state(ctx)
+    if not state.settings.ibkr_orders_enabled:
+        return {"error": MCP_ORDERS_DISABLED_ERROR}
     try:
         return await state.feed.exercise_option(
             symbol=symbol,
@@ -2123,6 +2133,8 @@ async def modify_order(
     from src.feeds.orders import ModifyOrderRequest, TIF as TIFEnum
 
     state = _state(ctx)
+    if not state.settings.ibkr_orders_enabled:
+        return {"error": MCP_ORDERS_DISABLED_ERROR}
     try:
         tif_enum = TIFEnum(tif) if tif is not None else None
         modifications = ModifyOrderRequest(price=price, quantity=quantity, tif=tif_enum)
@@ -2171,6 +2183,8 @@ async def preview_order(
     from src.feeds.orders import OrderAction, OrderType as OrderTypeEnum, PlaceOrderRequest, TIF as TIFEnum
 
     state = _state(ctx)
+    if not state.settings.ibkr_orders_enabled:
+        return {"error": MCP_ORDERS_DISABLED_ERROR}
     try:
         request = PlaceOrderRequest(
             symbol=symbol,
@@ -2489,6 +2503,8 @@ async def place_bracket_order(
         account: IBKR account ID
     """
     state = _state(ctx)
+    if not state.settings.ibkr_orders_enabled:
+        return {"error": MCP_ORDERS_DISABLED_ERROR}
     try:
         ib = state.feed._connection.ib
         if ib is None:
@@ -2562,6 +2578,8 @@ async def place_oca_group(
         account: IBKR account ID
     """
     state = _state(ctx)
+    if not state.settings.ibkr_orders_enabled:
+        return [{"error": MCP_ORDERS_DISABLED_ERROR}]
     try:
         import uuid
         from ib_async import Contract, Order

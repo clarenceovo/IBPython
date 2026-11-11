@@ -147,6 +147,7 @@ Core variables:
 | `IBKR_WEB_API_COOKIE` | empty | Optional raw Cookie header for an authenticated Client Portal Gateway session |
 | `IBKR_WEB_API_VERIFY_SSL` | `false` | Verify TLS certificates for IBKR Web API calls; local CPGW commonly uses a self-signed cert |
 | `IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED` | `false` | Safety switch for live Event Contract Web API order submission |
+| `IBKR_ORDERS_ENABLED` | `false` | Master switch for all order-writing pathways (place/modify/cancel/bracket/OCA/preview/exercise). Default `false`: the deployment is read-only. Read-only order queries (open/completed orders, executions, cache, TCA) stay available. |
 | `IBKR_REST_CORS_ORIGINS` | empty | Comma-separated allowed CORS origins. When set, enables CORS middleware; when empty (default), no CORS headers are sent. |
 | `IBKR_REST_RATE_LIMIT_PER_MINUTE` | `120` | Per-IP HTTP rate limit (requests per minute). Redis-backed sliding window with in-process token bucket fallback. |
 | `IBKR_REST_TRUSTED_PROXIES` | empty | Comma-separated proxy IPs/CIDRs whose `X-Forwarded-For` / `X-Real-IP` headers may be trusted for rate limiting. Empty means forwarded headers are ignored. |
@@ -477,6 +478,16 @@ redis-cli SET OrderAuth::bearer_token 'replace-with-a-long-random-token'
 ```
 
 If the Redis key is missing or Redis cannot be read, order endpoints fail closed with `503`. If the bearer token is missing or wrong, they return `401`. Swagger exposes this as `OrderBearerAuth`; use the **Authorize** button in `/docs` before trying order routes.
+
+### Order Pathway Master Switch
+
+All order-writing operations are disabled by default. The `IBKR_ORDERS_ENABLED` master switch gates three layers:
+
+- REST endpoints: `/orders/place`, `/orders/{id}/cancel`, `/orders/{id}/modify`, `/orders/preview`, `/orders/bracket`, `/orders/oca`, and `/business/event-contracts/orders/place` return `503` with a `IBKR_ORDERS_ENABLED` hint when the switch is off.
+- MCP tools: `place_bracket_order`, `place_oca_group`, `modify_order`, `preview_order`, `cancel_all_orders`, and `exercise_option` return an error payload instead of submitting.
+- Service layer: `IBKROrderClient` raises `IBKROrdersDisabledError` on every order-writing method, so no caller can bypass the entry layers.
+
+Read-only order queries (`/orders/open`, `/orders/open/all`, `/orders/completed`, `/orders/executions`, `/orders/cache`, TCA) are not gated; they keep working in read-only mode. `/system/capabilities` reports the state as `order_pathways.availability = "disabled"`.
 
 Example order preview:
 

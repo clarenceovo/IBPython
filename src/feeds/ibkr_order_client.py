@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import functools
 import inspect
 import logging
 import uuid as _uuid
@@ -29,7 +30,7 @@ from src.feeds.ibkr_connection import (
 )
 from src.feeds.contracts import ContractSpec, build_ibkr_contract
 from src.feeds.models import AssetClass
-from src.feeds.exceptions import IBKROrderError
+from src.feeds.exceptions import IBKROrderError, IBKROrdersDisabledError
 from src.feeds.orders import (
     BracketOrderRequest,
     BracketOrderResponse,
@@ -68,6 +69,23 @@ READ_ONLY_ORDER_API_MESSAGE = (
     "Disable Read-Only API in TWS/Gateway API settings, reconnect this app, then retry order endpoints."
 )
 
+ORDERS_DISABLED_MESSAGE = (
+    "Order pathways are disabled by the IBKR_ORDERS_ENABLED master switch (default false, read-only). "
+    "Set IBKR_ORDERS_ENABLED=true to enable place/modify/cancel/bracket/OCA/preview/exercise operations."
+)
+
+
+def _require_orders_enabled(method: Any) -> Any:
+    """Guard decorator: refuse order-writing operations when the master switch is off."""
+
+    @functools.wraps(method)
+    async def wrapper(self: "IBKROrderClient", *args: Any, **kwargs: Any) -> Any:
+        if not self._orders_enabled:
+            raise IBKROrdersDisabledError(ORDERS_DISABLED_MESSAGE)
+        return await method(self, *args, **kwargs)
+
+    return wrapper
+
 
 def _is_deactivated_order(order: Any) -> bool:
     """TWS API 10.47: reqOpenOrders may return de-activated orders."""
@@ -99,10 +117,12 @@ class IBKROrderClient:
         connection: IBKRConnectionManager,
         redis: Any | None = None,
         analytics_store: AnalyticsStore | None = None,
+        orders_enabled: bool = True,
     ) -> None:
         self._connection = connection
         self._redis = redis
         self._analytics_store = analytics_store
+        self._orders_enabled = orders_enabled
         self._analytics_tasks: set[asyncio.Task[Any]] = set()
         self._analytics_ib: Any | None = None
         if analytics_store is not None:
@@ -507,6 +527,7 @@ class IBKROrderClient:
     # Public methods — order lifecycle
     # ------------------------------------------------------------------
 
+    @_require_orders_enabled
     async def place_order(self, request: PlaceOrderRequest) -> OrderResponse:
         """Submit a new order to IBKR.
 
@@ -618,6 +639,7 @@ class IBKROrderClient:
 
         return response
 
+    @_require_orders_enabled
     async def cancel_order(self, account_id: str, order_id: int) -> CancelOrderResponse:
         """Cancel an existing order by account ID and order ID."""
         await self._connection.ensure_connected()
@@ -696,6 +718,7 @@ class IBKROrderClient:
         await self._cache_envelope(envelope, ttl_seconds=0)
         return result
 
+    @_require_orders_enabled
     async def modify_order(
         self,
         account_id: str,
@@ -784,6 +807,7 @@ class IBKROrderClient:
 
         return response
 
+    @_require_orders_enabled
     async def preview_order(self, request: PlaceOrderRequest) -> WhatIfOrderResponse:
         """Pre-trade margin and commission preview (what-if order)."""
         await self._connection.ensure_connected()
@@ -974,6 +998,7 @@ class IBKROrderClient:
             logger.debug("ib_async Contract unavailable; using simple contract namespace", exc_info=True)
             return SimpleNamespace(symbol=symbol, secType=sec_type, exchange=exchange, currency=currency, conId=0)
 
+    @_require_orders_enabled
     async def place_bracket_order(self, request: BracketOrderRequest) -> BracketOrderResponse:
         """Place a parent order with attached take-profit and stop-loss orders."""
         await self._connection.ensure_connected()
@@ -1064,6 +1089,7 @@ class IBKROrderClient:
         await self._cache_envelope(envelope, ttl_seconds=0)
         return response
 
+    @_require_orders_enabled
     async def place_oca_group(self, request: OcaGroupRequest) -> list[OcaOrderResponse]:
         """Place an OCA group after qualifying every leg up front."""
         await self._connection.ensure_connected()
@@ -1169,6 +1195,7 @@ class IBKROrderClient:
     # Global cancel
     # ------------------------------------------------------------------
 
+    @_require_orders_enabled
     async def cancel_all_orders(self) -> dict[str, Any]:
         """Cancel all open orders globally via ``reqGlobalCancel()``.
 
@@ -1215,6 +1242,7 @@ class IBKROrderClient:
     # Option exercise / lapse
     # ------------------------------------------------------------------
 
+    @_require_orders_enabled
     async def exercise_option(
         self,
         symbol: str,

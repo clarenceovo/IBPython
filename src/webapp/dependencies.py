@@ -96,6 +96,7 @@ def build_rest_app_state(settings: Settings) -> IBKRRestAppState:
         connection_control_poll_seconds=settings.ibkr_connection_control_poll_seconds,
         client_role="api",
         analytics_store=analytics_store,
+        orders_enabled=settings.ibkr_orders_enabled,
     )
     loader = OHLCVLoader(feed, store=None, redis=redis, analytics_store=analytics_store)
     market_data_cache = AsyncTTLCache(

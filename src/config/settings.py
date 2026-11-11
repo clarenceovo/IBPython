@@ -224,6 +224,11 @@ class Settings(BaseSettings):
         default=constants.DEFAULT_IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED,
         alias=constants.IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED_ENV,
     )
+    ibkr_orders_enabled: bool = Field(
+        default=constants.DEFAULT_IBKR_ORDERS_ENABLED,
+        alias=constants.IBKR_ORDERS_ENABLED_ENV,
+        description="Master switch for all order-writing pathways (place/modify/cancel/bracket/OCA/preview/exercise). Default false: read-only.",
+    )
     mcp_ibkr_idle_disconnect_seconds: float = Field(
         default=constants.DEFAULT_MCP_IBKR_IDLE_DISCONNECT_SECONDS,
         alias=constants.MCP_IBKR_IDLE_DISCONNECT_SECONDS_ENV,

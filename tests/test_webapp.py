@@ -47,6 +47,9 @@ class FakeLoader:
         self.calls = 0
         self.loaded_requests: list[object] = []
 
+    async def process_bars(self, bars: object, request: object, *, persist: bool, cache_latest: bool) -> SimpleNamespace:
+        return SimpleNamespace(bars=bars)
+
     async def load(self, request: object, *, persist: bool, cache_latest: bool) -> list[OHLCVBar]:
         self.calls += 1
         self.loaded_requests.append(request)
@@ -852,12 +855,13 @@ def test_event_contract_live_order_is_disabled_by_default() -> None:
             },
         )
 
-    assert response.status_code == 403
+    assert response.status_code == 503
     assert state.event_contracts.order_requests == []
 
 
 def test_event_contract_live_order_requires_explicit_confirmation_when_enabled() -> None:
     state = FakeState()
+    state.settings.ibkr_orders_enabled = True
     state.settings.ibkr_event_contracts_live_orders_enabled = True
     app = create_app(settings=state.settings, state=state)
     with TestClient(app) as client:
@@ -878,6 +882,7 @@ def test_event_contract_live_order_requires_explicit_confirmation_when_enabled()
 
 def test_event_contract_live_order_submits_when_enabled_confirmed_and_authorized() -> None:
     state = FakeState()
+    state.settings.ibkr_orders_enabled = True
     state.settings.ibkr_event_contracts_live_orders_enabled = True
     app = create_app(settings=state.settings, state=state)
     with TestClient(app) as client:

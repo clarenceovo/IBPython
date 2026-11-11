@@ -15,7 +15,7 @@ FUNDAMENTALS_REMOVED = (
 class FeatureCapability(BaseModel):
     implemented: bool
     client_supported: bool | None
-    availability: Literal["unknown", "unsupported"]
+    availability: Literal["unknown", "unsupported", "disabled"]
     reason: str
 
 
@@ -27,7 +27,7 @@ class GatewayCapabilities(BaseModel):
     features: dict[str, FeatureCapability]
 
 
-def gateway_capabilities(connection: Any) -> GatewayCapabilities:
+def gateway_capabilities(connection: Any, *, orders_enabled: bool = True) -> GatewayCapabilities:
     ib = connection.ib
     connected = connection.is_connected
     protocol = ib.client.serverVersion() if connected else None
@@ -49,6 +49,15 @@ def gateway_capabilities(connection: Any) -> GatewayCapabilities:
         )
     features["fundamental_reports"] = FeatureCapability(
         implemented=False, client_supported=False, availability="unsupported", reason=FUNDAMENTALS_REMOVED,
+    )
+    features["order_pathways"] = FeatureCapability(
+        implemented=True,
+        client_supported=True,
+        availability="unknown" if orders_enabled else "disabled",
+        reason=(
+            "Order-writing pathways (place/modify/cancel/bracket/OCA/preview/exercise) are gated by the "
+            "IBKR_ORDERS_ENABLED master switch; read-only order queries stay available."
+        ),
     )
     features.update(_tws_1047_features())
     return GatewayCapabilities(
