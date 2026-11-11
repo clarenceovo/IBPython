@@ -26,6 +26,7 @@ from src.webapp.routers import (
     account,
     business,
     business_consolidated,
+    event_risk,
     fixed_income,
     market_data_bonds,
     market_data_consolidated,
@@ -38,6 +39,7 @@ from src.webapp.routers import (
     market_data_realtime,
     market_data_analytics,
     orders,
+    portfolio_risk,
     research,
     reference_data,
     scanner,
@@ -288,6 +290,8 @@ def create_app(
     fastapi_app.include_router(research.router, prefix="/api/v1")
     fastapi_app.include_router(scanner.router, prefix="/api/v1")
     fastapi_app.include_router(streaming.router, prefix="/api/v1")
+    fastapi_app.include_router(portfolio_risk.router, prefix="/api/v1")
+    fastapi_app.include_router(event_risk.router, prefix="/api/v1")
     fastapi_app.include_router(snapshot.router, prefix="/api/v1")
     fastapi_app.include_router(tick_data.router, prefix="/api/v1")
     fastapi_app.include_router(market_data_histogram.router, prefix="/api/v1")

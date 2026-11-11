@@ -38,6 +38,13 @@ class LivePositionDTO(BaseModel):
     position: float
     average_cost: float
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Option contract identity (None for non-option positions).
+    strike: float | None = None
+    expiry: str | None = None  # YYYYMMDD or YYYYMM from IBKR
+    right: str | None = None  # C or P
+    multiplier: float | None = None
+    local_symbol: str | None = None
+    underlying_symbol: str | None = None
 
 
 class PortfolioItemDTO(BaseModel):
@@ -56,6 +63,13 @@ class PortfolioItemDTO(BaseModel):
     unrealized_pnl: float | None = None
     realized_pnl: float | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Option contract identity (None for non-option positions).
+    strike: float | None = None
+    expiry: str | None = None
+    right: str | None = None
+    multiplier: float | None = None
+    local_symbol: str | None = None
+    underlying_symbol: str | None = None
 
     @field_validator("market_price", "market_value", "average_cost", "unrealized_pnl", "realized_pnl", mode="before")
     @classmethod
@@ -110,6 +124,25 @@ def group_account_summary(values: list[AccountValueDTO]) -> list[AccountSummaryD
     return [AccountSummaryDTO(account=account, values=items) for account, items in grouped.items()]
 
 
+def _option_identity(contract: Any) -> dict[str, Any]:
+    """Extract option identity fields from an IBKR contract; empty when absent."""
+    strike = getattr(contract, "strike", None) or None
+    expiry = str(getattr(contract, "lastTradeDateOrContractMonth", "") or "").strip() or None
+    right = str(getattr(contract, "right", "") or "").strip().upper() or None
+    raw_multiplier = getattr(contract, "multiplier", None)
+    multiplier = float(raw_multiplier) if raw_multiplier not in (None, "") else None
+    local_symbol = str(getattr(contract, "localSymbol", "") or "").strip() or None
+    underlying = str(getattr(contract, "symbol", "") or "").strip().upper() or None
+    return {
+        "strike": float(strike) if strike is not None else None,
+        "expiry": expiry,
+        "right": right,
+        "multiplier": multiplier,
+        "local_symbol": local_symbol,
+        "underlying_symbol": underlying,
+    }
+
+
 def normalize_positions(positions: list[Any]) -> list[LivePositionDTO]:
     normalized: list[LivePositionDTO] = []
     for item in positions:
@@ -124,6 +157,7 @@ def normalize_positions(positions: list[Any]) -> list[LivePositionDTO]:
                 currency=getattr(contract, "currency", ""),
                 position=float(getattr(item, "position")),
                 average_cost=float(getattr(item, "avgCost")),
+                **_option_identity(contract),
             )
         )
     return normalized
@@ -147,6 +181,7 @@ def normalize_portfolio_items(items: list[Any]) -> list[PortfolioItemDTO]:
                 average_cost=getattr(item, "averageCost", None),
                 unrealized_pnl=getattr(item, "unrealizedPNL", None),
                 realized_pnl=getattr(item, "realizedPNL", None),
+                **_option_identity(contract),
             )
         )
     return normalized
