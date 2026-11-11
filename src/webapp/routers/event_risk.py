@@ -34,7 +34,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.feeds.account import LivePositionDTO
 from src.feeds.contracts import OptionChain, OptionChainRequest
 from src.feeds.models import AssetClass
-from src.feeds.options_models import OptionAnalyticsRequest, OptionAnalyticsSnapshot, OptionContractSpec, OptionRight
+from src.feeds.options_models import (
+    OptionAnalyticsRequest,
+    OptionAnalyticsSnapshot,
+    OptionContractSpec,
+    OptionRight,
+    days_to_expiry,
+    to_option_contract_spec,
+)
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 
 logger = logging.getLogger(__name__)
@@ -220,18 +227,6 @@ def nearest_event(events: list[EventSpec], symbol: str, today: date) -> EventSpe
 # ---------------------------------------------------------------------------
 
 
-def _days_to_expiry(expiry: str, today: date) -> int:
-    """Calendar days from today to a chain expiry string."""
-    try:
-        expiry_date = datetime.strptime(expiry[:8], "%Y%m%d").date()
-    except ValueError:
-        try:
-            expiry_date = datetime.strptime(expiry[:6], "%Y%m").date()
-        except ValueError:
-            return -1
-    return (expiry_date - today).days
-
-
 def _mid_price(snapshot: OptionAnalyticsSnapshot) -> float | None:
     """Call or put leg mid from the snapshot; option_price as fallback."""
     bid = snapshot.bid_greeks.option_price if snapshot.bid_greeks else None
@@ -281,14 +276,14 @@ async def _reference_price(
     chain: OptionChain,
     expiry: str,
     strikes: list[float],
-) -> tuple[float | None, OptionAnalyticsSnapshot]:
+) -> float | None:
     """Underlying price from a mid-strike snapshot; None when unavailable."""
     probe_strike = (min(strikes) + max(strikes)) / 2.0
     snapshot = await _snapshot_for(state, chain, expiry, probe_strike, OptionRight.CALL)
     for source in (snapshot.model_greeks, snapshot.last_greeks, snapshot.bid_greeks, snapshot.ask_greeks):
         if source is not None and source.underlying_price:
-            return source.underlying_price, snapshot
-    return None, snapshot
+            return source.underlying_price
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +323,8 @@ async def get_underlying_event_risk(
     eligible = [
         expiry
         for expiry in chain.expirations
-        if _days_to_expiry(expiry, today) >= payload.min_days_to_expiry
+        if (days := days_to_expiry(expiry, today)) is not None
+        and days >= payload.min_days_to_expiry
     ]
     if not eligible:
         warnings.append(f"no expiry at least {payload.min_days_to_expiry} days out")
@@ -337,7 +333,7 @@ async def get_underlying_event_risk(
     selected = eligible[0]
 
     strikes = list(chain.strikes)
-    reference, _ = await _reference_price(state, chain, selected, strikes)
+    reference = await _reference_price(state, chain, selected, strikes)
     if reference is None:
         warnings.append("underlying price unavailable; ATM strike chosen from chain midpoint")
         reference = (min(strikes) + max(strikes)) / 2.0
@@ -350,7 +346,7 @@ async def get_underlying_event_risk(
     put_price = _mid_price(put_snapshot)
 
     response.selected_expiry = selected
-    response.days_to_expiry = _days_to_expiry(selected, today)
+    response.days_to_expiry = days_to_expiry(selected, today)
     response.atm_strike = atm
     response.underlying_price = reference
 
@@ -384,14 +380,14 @@ async def get_underlying_event_risk(
         response.term_structure.append(
             TermStructurePoint(
                 expiry=expiry,
-                days_to_expiry=_days_to_expiry(expiry, today),
+                days_to_expiry=days_to_expiry(expiry, today),
                 atm_iv=expiry_iv,
             )
         )
 
     if response.atm_iv is not None:
         try:
-            history = await _load_iv_history(state, payload, warnings)
+            history = await _load_iv_history(state, payload)
             if history:
                 rank = iv_rank(response.atm_iv, history)
                 response.iv_history = IVHistoryStats(
@@ -413,7 +409,6 @@ async def get_underlying_event_risk(
 async def _load_iv_history(
     state: IBKRRestAppState,
     payload: UnderlyingEventRiskRequest,
-    warnings: list[str],
 ) -> list[float]:
     """Implied-vol history for the underlying from the OHLCV IV series."""
     from src.feeds.models import OHLCVRequest, normalize_bar_size
@@ -524,21 +519,11 @@ async def _position_vega(
 ) -> float | None:
     """Vega per volatility point for one option position; None on failure."""
     label = f"{position.symbol} {position.expiry} {position.strike}{position.right or ''}"
-    if position.con_id is None or position.expiry is None or position.strike is None:
+    spec = to_option_contract_spec(position, DEFAULT_MULTIPLIER)
+    if spec is None:
         warnings.append(f"option identity incomplete, vega skipped: {label}")
         return None
     try:
-        spec = OptionContractSpec(
-            sec_type=position.sec_type,
-            underlying_symbol=position.underlying_symbol or position.symbol,
-            expiry=position.expiry,
-            strike=position.strike,
-            right=OptionRight((position.right or "C").upper()),
-            exchange=position.exchange or "SMART",
-            currency=position.currency or "USD",
-            multiplier=str(int(position.multiplier or DEFAULT_MULTIPLIER)),
-            con_id=position.con_id,
-        )
         snapshot = await state.feed.load_option_analytics(OptionAnalyticsRequest(contract=spec))
         greeks = snapshot.model_greeks or snapshot.last_greeks or snapshot.bid_greeks or snapshot.ask_greeks
         if greeks is None or greeks.vega is None:

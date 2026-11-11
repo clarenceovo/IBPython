@@ -18,12 +18,7 @@ from src.feeds.options_models import (
     OptionGreekSet,
     OptionGreekSource,
 )
-from src.webapp.routers.portfolio_risk import (
-    UnderlyingRisk,
-    expiry_bucket,
-    hedge_shares,
-    scenario_pnl_for_underlying,
-)
+from src.webapp.routers.portfolio_risk import expiry_bucket, scenario_pnl
 
 COCKPIT_PATH = "/api/v1/portfolio-risk/cockpit"
 
@@ -43,51 +38,26 @@ def test_expiry_bucket_boundaries() -> None:
 
 
 def test_scenario_pnl_pure_linear_exact() -> None:
-    risk = UnderlyingRisk(underlying="SPY", linear_position=100, linear_value=50_000.0)
-    assert scenario_pnl_for_underlying(risk, 10.0, 5.0) == pytest.approx(5_000.0)
-    assert scenario_pnl_for_underlying(risk, -2.0, 0.0) == pytest.approx(-1_000.0)
+    # Linear delta lives only in the linear term: option delta must stay 0.
+    assert scenario_pnl(50_000.0, 0.0, 0.0, 0.0, 100.0, 10.0, 5.0) == pytest.approx(5_000.0)
+    assert scenario_pnl(50_000.0, 0.0, 0.0, 0.0, 100.0, -2.0, 0.0) == pytest.approx(-1_000.0)
 
 
 def test_scenario_pnl_delta_gamma_vega_closed_form() -> None:
-    # net delta 500 shares, gamma position 2.0 per dollar^2, vega 30 $/pt,
-    # spot 100 -> gamma_per_1pct = 2.0 * 100 * 0.01 = 2.0.
-    risk = UnderlyingRisk(
-        underlying="AAPL",
-        spot=100.0,
-        option_position_count=1,
-        net_delta_shares=500.0,
-        gamma_per_1pct=2.0,
-        vega_per_pt=30.0,
-        theta_per_day=-5.0,
-    )
+    # Option delta 500 shares, gamma per 1% = 2.0 dollars, vega 30 $/pt, spot 100.
     # Shock +5% spot, +3 vol pts: dS = 5.
     expected = 500.0 * 5.0 + 0.5 * 2.0 * 25.0 + 30.0 * 3.0
-    assert scenario_pnl_for_underlying(risk, 5.0, 3.0) == pytest.approx(expected)
+    assert scenario_pnl(0.0, 500.0, 2.0, 30.0, 100.0, 5.0, 3.0) == pytest.approx(expected)
 
     # Shock -10% spot, vol flat: dS = -10; gamma term stays positive.
     expected = 500.0 * -10.0 + 0.5 * 2.0 * 100.0
-    assert scenario_pnl_for_underlying(risk, -10.0, 0.0) == pytest.approx(expected)
+    assert scenario_pnl(0.0, 500.0, 2.0, 30.0, 100.0, -10.0, 0.0) == pytest.approx(expected)
 
 
-def test_hedge_shares_flatten_delta() -> None:
-    shares = hedge_shares(1234.6)
-    assert shares == -1235
-    assert abs(1234.6 + shares) < 1.0
-
-
-def test_scenario_pnl_linear_plus_option_stack() -> None:
+def test_scenario_pnl_linear_plus_option_no_double_count() -> None:
     # Stock 100 shares at 100 (value 10,000) plus option delta 100 shares.
-    risk = UnderlyingRisk(
-        underlying="AAPL",
-        spot=100.0,
-        linear_position=100,
-        linear_value=10_000.0,
-        option_position_count=1,
-        net_delta_shares=100.0,
-        gamma_per_1pct=0.0,
-        vega_per_pt=0.0,
-    )
-    assert scenario_pnl_for_underlying(risk, 10.0, 0.0) == pytest.approx(1_000.0 + 1_000.0)
+    # The stock counts once (linear term); option delta counts once.
+    assert scenario_pnl(10_000.0, 100.0, 0.0, 0.0, 100.0, 10.0, 0.0) == pytest.approx(2_000.0)
 
 
 # ---------------------------------------------------------------------------
@@ -232,8 +202,9 @@ def test_cockpit_pipeline_stock_plus_option() -> None:
     cell = next(
         s for s in body["scenarios"] if s["spot_shock_pct"] == 10.0 and s["vol_shock_pts"] == 5.0
     )
-    # Linear 10,000 * 10% = 1,000; delta 200 * 10 = 2,000; gamma 0.5 * 2.0 * 100 = 100; vega 40 * 5 = 200.
-    assert cell["pnl"] == pytest.approx(3_300.0)
+    # Linear 10,000 * 10% = 1,000; option delta 100 * 10 = 1,000; gamma 0.5 * 2.0 * 100 = 100; vega 40 * 5 = 200.
+    # The stock delta appears only in the linear term (no double count).
+    assert cell["pnl"] == pytest.approx(2_300.0)
 
     assert len(body["stress_episodes"]) == 5
     assert body["totals"]["net_vega_per_pt"] == pytest.approx(40.0)

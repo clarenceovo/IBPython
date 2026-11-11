@@ -294,3 +294,36 @@ class OptionSkewSurfaceResponse(BaseModel):
     maturities: tuple[OptionMaturitySkew, ...]
     source: str = Field(default="ibkr", min_length=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+def to_option_contract_spec(position: Any, default_multiplier: float = 100.0) -> OptionContractSpec | None:
+    """Build a contract spec from an option position; None when identity is incomplete."""
+    if position.con_id is None or position.expiry is None or position.strike is None:
+        return None
+    return OptionContractSpec(
+        sec_type=position.sec_type,
+        underlying_symbol=position.underlying_symbol or position.symbol,
+        expiry=position.expiry,
+        strike=position.strike,
+        right=OptionRight((position.right or "C").upper()),
+        exchange=position.exchange or "SMART",
+        currency=position.currency or "USD",
+        multiplier=str(int(position.multiplier or default_multiplier)),
+        con_id=position.con_id,
+    )
+
+
+def days_to_expiry(expiry: str | None, today: date) -> int | None:
+    """Calendar days from today to an IBKR expiry string; None when unparsable."""
+    if not expiry:
+        return None
+    text = expiry.strip()
+    if len(text) == 6:
+        text += "01"
+    if len(text) != 8 or not text.isdigit():
+        return None
+    try:
+        expiry_date = datetime.strptime(text, "%Y%m%d").date()
+    except ValueError:
+        return None
+    return (expiry_date - today).days

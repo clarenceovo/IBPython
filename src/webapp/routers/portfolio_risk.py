@@ -30,7 +30,11 @@ from fastapi import APIRouter, Body, Depends
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.feeds.account import LivePositionDTO, PortfolioItemDTO
-from src.feeds.options_models import OptionAnalyticsRequest, OptionContractSpec, OptionRight
+from src.feeds.options_models import (
+    OptionAnalyticsRequest,
+    days_to_expiry,
+    to_option_contract_spec,
+)
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 
 logger = logging.getLogger(__name__)
@@ -166,22 +170,6 @@ class CockpitResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _expiry_days(expiry: str | None, today: datetime) -> int | None:
-    """Calendar days from today to an IBKR expiry string; None when unparsable."""
-    if not expiry:
-        return None
-    text = expiry.strip()
-    if len(text) == 6:
-        text += "01"
-    if len(text) != 8 or not text.isdigit():
-        return None
-    try:
-        expiry_date = datetime.strptime(text, "%Y%m%d").replace(tzinfo=timezone.utc)
-    except ValueError:
-        return None
-    return (expiry_date - today).days
-
-
 def expiry_bucket(days: int | None) -> str:
     """Classify expiry days into front / next / back buckets."""
     if days is None:
@@ -217,35 +205,28 @@ def _option_greeks_contribution(
     }
 
 
-def scenario_pnl_for_underlying(
-    risk: UnderlyingRisk,
+def scenario_pnl(
+    linear_value: float,
+    option_delta_shares: float,
+    gamma_per_1pct: float,
+    vega_per_pt: float,
+    spot: float | None,
     spot_shock_pct: float,
     vol_shock_pts: float,
 ) -> float:
-    """Delta-gamma-vega P&L for one underlying under one shock pair.
+    """P&L under one shock pair.
 
     Linear part: market value scales with the spot percentage.
-    Option part: delta shares times dS, plus one half gamma times dS
-    squared, plus vega per point times the vol shock.
+    Option part: option delta shares times dS, plus one half gamma times dS
+    squared, plus vega per point times the vol shock. Linear delta lives
+    only in the linear part; counting it in the delta term would double it.
     """
-    pnl = risk.linear_value * spot_shock_pct / 100.0
-    if risk.spot is None:
+    pnl = linear_value * spot_shock_pct / 100.0
+    if spot is None:
         return pnl
-    d_s = risk.spot * spot_shock_pct / 100.0
-    delta_term = risk.net_delta_shares * d_s
-    # gamma_per_1pct is dollars per 1% move; convert back to gamma_position.
-    gamma_position = risk.gamma_per_1pct / (risk.spot * 0.01) if risk.spot > 0 else 0.0
-    gamma_term = 0.5 * gamma_position * d_s * d_s
-    vega_term = risk.vega_per_pt * vol_shock_pts
-    linear_only = risk.linear_position != 0.0 and risk.option_position_count == 0
-    if linear_only:
-        return pnl
-    return pnl + delta_term + gamma_term + vega_term
-
-
-def hedge_shares(net_delta_shares: float) -> int:
-    """Whole shares that flatten a net delta."""
-    return int(round(-net_delta_shares))
+    d_s = spot * spot_shock_pct / 100.0
+    gamma_position = gamma_per_1pct / (spot * 0.01) if spot > 0 else 0.0
+    return pnl + option_delta_shares * d_s + 0.5 * gamma_position * d_s * d_s + vega_per_pt * vol_shock_pts
 
 
 # ---------------------------------------------------------------------------
@@ -267,24 +248,14 @@ async def _resolve_option_greeks(
     state: IBKRRestAppState,
     position: LivePositionDTO,
     warnings: list[str],
-) -> dict[str, float] | None:
+) -> dict[str, Any] | None:
     """Load model Greeks for one option position; None on failure."""
     label = f"{position.symbol} {position.expiry} {position.strike}{position.right or ''}"
-    if position.con_id is None or position.expiry is None or position.strike is None:
+    spec = to_option_contract_spec(position, DEFAULT_MULTIPLIER)
+    if spec is None:
         warnings.append(f"option identity incomplete, Greeks skipped: {label}")
         return None
     try:
-        spec = OptionContractSpec(
-            sec_type=position.sec_type,
-            underlying_symbol=position.underlying_symbol or position.symbol,
-            expiry=position.expiry,
-            strike=position.strike,
-            right=OptionRight((position.right or "C").upper()),
-            exchange=position.exchange or "SMART",
-            currency=position.currency or "USD",
-            multiplier=str(int(position.multiplier or DEFAULT_MULTIPLIER)),
-            con_id=position.con_id,
-        )
         snapshot = await state.feed.load_option_analytics(OptionAnalyticsRequest(contract=spec))
         greeks = snapshot.model_greeks or snapshot.last_greeks or snapshot.bid_greeks or snapshot.ask_greeks
         if greeks is None:
@@ -305,13 +276,15 @@ async def build_cockpit(payload: CockpitRequest, state: IBKRRestAppState) -> Coc
     items = await state.feed.load_portfolio_items(payload.account)
     items_by_con_id = {item.con_id: item for item in items if item.con_id is not None}
 
-    today = datetime.now(tz=timezone.utc)
+    today = datetime.now(tz=timezone.utc).date()
     underlyings: dict[str, UnderlyingRisk] = {}
     gamma_position_sums: dict[str, float] = {}
+    option_delta_sums: dict[str, float] = {}
 
     def _risk(symbol: str) -> UnderlyingRisk:
         key = symbol.upper()
         gamma_position_sums.setdefault(key, 0.0)
+        option_delta_sums.setdefault(key, 0.0)
         return underlyings.setdefault(key, UnderlyingRisk(underlying=key))
 
     for position in positions:
@@ -324,13 +297,14 @@ async def build_cockpit(payload: CockpitRequest, state: IBKRRestAppState) -> Coc
             if contribution is None:
                 continue
             risk.net_delta_shares += contribution["delta_shares"]
+            option_delta_sums[risk.underlying] += contribution["delta_shares"]
             spot_ref = contribution.get("underlying_price")
             if spot_ref:
                 risk.spot = spot_ref
             gamma_position_sums[risk.underlying] += contribution["gamma_position"]
             risk.vega_per_pt += contribution["vega_per_pt"]
             risk.theta_per_day += contribution["theta_per_day"]
-            days = _expiry_days(position.expiry, today)
+            days = days_to_expiry(position.expiry, today)
             bucket_name = expiry_bucket(days)
             for bucket in risk.expiry_buckets:
                 if bucket.bucket == bucket_name:
@@ -373,7 +347,15 @@ async def build_cockpit(payload: CockpitRequest, state: IBKRRestAppState) -> Coc
             if spot_shock == 0.0 and vol_shock == 0.0:
                 continue
             by_underlying = {
-                risk.underlying: scenario_pnl_for_underlying(risk, spot_shock, vol_shock)
+                risk.underlying: scenario_pnl(
+                    risk.linear_value,
+                    option_delta_sums.get(risk.underlying, 0.0),
+                    risk.gamma_per_1pct,
+                    risk.vega_per_pt,
+                    risk.spot,
+                    spot_shock,
+                    vol_shock,
+                )
                 for risk in ordered
             }
             scenarios.append(
@@ -389,7 +371,15 @@ async def build_cockpit(payload: CockpitRequest, state: IBKRRestAppState) -> Coc
     episodes: list[EpisodePnl] = []
     for name, description, spot_shock, vol_shock in STRESS_EPISODES:
         by_underlying = {
-            risk.underlying: scenario_pnl_for_underlying(risk, spot_shock, vol_shock)
+            risk.underlying: scenario_pnl(
+                risk.linear_value,
+                option_delta_sums.get(risk.underlying, 0.0),
+                risk.gamma_per_1pct,
+                risk.vega_per_pt,
+                risk.spot,
+                spot_shock,
+                vol_shock,
+            )
             for risk in ordered
         }
         episodes.append(
@@ -405,7 +395,7 @@ async def build_cockpit(payload: CockpitRequest, state: IBKRRestAppState) -> Coc
 
     hedges: list[HedgeSuggestion] = []
     for risk in ordered:
-        shares = hedge_shares(risk.net_delta_shares)
+        shares = int(round(-risk.net_delta_shares))
         residual = risk.net_delta_shares + shares
         notional = abs(shares) * (risk.spot or 0.0)
         if abs(risk.net_delta_shares) >= HEDGE_MIN_SHARES or notional >= HEDGE_MIN_NOTIONAL:
