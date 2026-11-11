@@ -182,6 +182,12 @@ REDIS_OHLCV_SNAPSHOT_CALENDAR_KEY_TEMPLATE = (
 
 EQUITY_SNAPSHOT_TABLE = "equity_snapshot"
 REDIS_EQUITY_SNAPSHOT_KEY_TEMPLATE = "EquitySnapshot::{symbol}:latest"
+
+# Matrix monitoring snapshot (logs + metrics + pub/sub topic stats per service).
+REDIS_MATRIX_KEY_TEMPLATE = "Matrix:{service}"
+DEFAULT_MATRIX_SERVICE_NAME = "IBPython"
+DEFAULT_MATRIX_PUBLISH_INTERVAL_SECONDS = 10.0
+MATRIX_LOG_BUFFER_SIZE = 200
 FX_OPTION_SNAPSHOT_TABLE = "fx_option_snapshot"
 REDIS_FX_OPTION_SNAPSHOT_KEY_TEMPLATE = "FXOptionSnapshot::{contract_key}:latest"
 REDIS_SNAPSHOT_WATCHLIST_KEY_TEMPLATE = "SnapshotWatchlist::{name}"

@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str = Field(default="", alias="OTEL_EXPORTER_OTLP_ENDPOINT")
     otel_service_name: str = Field(default="ibpython-rest", alias="OTEL_SERVICE_NAME")
 
+    matrix_service_name: str = Field(
+        default=constants.DEFAULT_MATRIX_SERVICE_NAME, alias="MATRIX_SERVICE_NAME", min_length=1
+    )
+    matrix_publish_interval_seconds: float = Field(
+        default=constants.DEFAULT_MATRIX_PUBLISH_INTERVAL_SECONDS, alias="MATRIX_PUBLISH_INTERVAL_SECONDS", gt=0.0
+    )
+
     questdb_host: str = Field(default=constants.DEFAULT_QUESTDB_HOST, alias=constants.QUESTDB_HOST_ENV)
     questdb_port: int = Field(default=constants.DEFAULT_QUESTDB_PORT, alias=constants.QUESTDB_PORT_ENV)
     questdb_write_port: int = Field(default=constants.DEFAULT_QUESTDB_WRITE_PORT, alias=constants.QUESTDB_WRITE_PORT_ENV)

@@ -61,6 +61,27 @@ DEFAULT_WHAT_TO_SHOW = "TRADES"
 Cleanup = Any
 
 
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _ConnectionStats:
+    """Process-wide WS counters for the Matrix snapshot (single event loop)."""
+
+    connections_active: int = 0
+    frames_dropped_total: int = 0
+
+
+_connection_stats = _ConnectionStats()
+
+
+def connection_stats() -> dict[str, int]:
+    return {
+        "connections_active": _connection_stats.connections_active,
+        "frames_dropped_total": _connection_stats.frames_dropped_total,
+    }
+
+
 def _parse_asset_class(raw: Any) -> AssetClass | None:
     if raw is None:
         return None
@@ -277,6 +298,7 @@ class _Connection:
         except asyncio.QueueFull:
             pass
         self.dropped_frames += 1
+        _connection_stats.frames_dropped_total += 1
         logger.warning("ws outbox full; dropped oldest frame (dropped=%d)", self.dropped_frames)
 
     def send_error(self, action: Any, detail: str) -> None:
@@ -509,6 +531,7 @@ class _Connection:
 
     async def run(self) -> None:
         """Reader loop: receive, parse, dispatch; clean up on disconnect."""
+        _connection_stats.connections_active += 1
         writer_task = asyncio.create_task(self.writer())
         writer_task.set_name("ws-writer")
         try:
@@ -533,6 +556,7 @@ class _Connection:
         except Exception:
             logger.exception("ws reader loop failed")
         finally:
+            _connection_stats.connections_active -= 1
             for key in list(self.subscriptions):
                 try:
                     await self.teardown(key, notify=False)

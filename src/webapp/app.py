@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 from pathlib import Path
@@ -13,11 +14,13 @@ from fastapi.responses import JSONResponse
 from src.config.settings import Settings, load_settings
 from src.config.config_constant import APP_VERSION
 from src.transport.metrics import MetricsMiddleware, metrics
+from src.webapp import matrix
 from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
 from src.webapp.middleware.correlation import CorrelationIdFilter, CorrelationIdMiddleware
 from src.webapp.middleware.request_timeout import RequestTimeoutMiddleware
 from src.webapp.middleware.body_limit import RequestBodyLimitMiddleware
 from src.webapp.middleware.security import SecurityHeadersMiddleware, RateLimiterMiddleware
+from src.webapp.ws_broker import broker
 from src.webapp.routers import (
     account,
     business,
@@ -132,6 +135,15 @@ def create_app(
             resolved_settings.ibkr_port,
             resolved_settings.ibkr_client_id,
         )
+        # Matrix monitoring: publish logs + metrics + pub/sub stats to Redis.
+        matrix_task = matrix.start_matrix_publisher(
+            app_state.redis,
+            broker,
+            service=resolved_settings.matrix_service_name,
+            version=APP_VERSION,
+            interval_seconds=resolved_settings.matrix_publish_interval_seconds,
+            connection_stats=websocket.connection_stats,
+        )
         try:
             start_control = getattr(app_state.feed, "start_connection_control", None)
             if callable(start_control):
@@ -147,6 +159,8 @@ def create_app(
             logger.info("IBKRRestApp shutdown requested; closing IBKR and Redis transports")
             # Cancel SSE subscription cleanup task (single-process).
             streaming.stop_cleanup_task()
+            matrix_task.cancel()
+            await asyncio.gather(matrix_task, return_exceptions=True)
             await app_state.close()
 
     fastapi_app = FastAPI(
