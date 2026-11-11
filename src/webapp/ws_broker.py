@@ -13,6 +13,9 @@ Production model:
   client drops only its own frames; fast clients are never blocked.
 - Every published frame carries a per-topic sequence number. A client that
   sees a gap knows it dropped frames (its own queue overflowed).
+- Topic lifecycle transitions (upstream start on first attach, stop on last
+  detach) are serialized under one broker lock. Fan-out publishing is
+  lock-free and never waits on the lifecycle lock.
 
 The broker is transport-agnostic: subscribers are delivery callbacks plus an
 integer id. The WebSocket router registers one callback per connection.
@@ -97,6 +100,11 @@ class MarketDataBroker:
     ) -> tuple[int, int]:
         """Register one subscriber on a topic; start the upstream when first.
 
+        The lock is held across the upstream start so concurrent attaches on
+        one new topic cannot double-start the upstream (feed stop calls are
+        keyed by symbol, not by request id, so a leaked second stream could
+        never be stopped). A failed start rolls the topic back atomically.
+
         Returns ``(subscriber_id, subscriber_count)`` after the attach.
         """
         async with self._lock:
@@ -104,21 +112,24 @@ class MarketDataBroker:
             if topic is None:
                 topic = _Topic(key=key, channel=channel, meta=dict(meta or {}))
                 self._topics[key] = topic
+                try:
+                    topic.upstream_cleanup = await start_upstream(self._make_publish(topic))
+                except BaseException:
+                    self._topics.pop(key, None)
+                    raise
+                logger.info("broker: upstream started topic=%s", topic_name(key))
 
-        if not topic.subscribers:
-            publish = self._make_publish(topic)
-            topic.upstream_cleanup = await start_upstream(publish)
-            logger.info("broker: upstream started topic=%s", topic_name(key))
-
-        subscriber = _Subscriber(subscriber_id=0, deliver=deliver)
-        async with self._lock:
-            subscriber.subscriber_id = topic.next_subscriber_id
+            subscriber_id = topic.next_subscriber_id
             topic.next_subscriber_id += 1
-            topic.subscribers[subscriber.subscriber_id] = subscriber
-        return subscriber.subscriber_id, len(topic.subscribers)
+            topic.subscribers[subscriber_id] = _Subscriber(subscriber_id=subscriber_id, deliver=deliver)
+            return subscriber_id, len(topic.subscribers)
 
     async def detach(self, key: TopicKey, subscriber_id: int) -> int:
         """Remove one subscriber; stop the upstream when the last one leaves.
+
+        The lock is held across the upstream cleanup so the stop of a dying
+        topic cannot interleave with a replacement attach starting the same
+        stream again (the feed would stop the new stream too).
 
         Returns the remaining subscriber count. A topic with zero remaining
         subscribers is removed from the registry after its upstream stops.
@@ -133,14 +144,14 @@ class MarketDataBroker:
                 return remaining
             self._topics.pop(key, None)
 
-        cleanup = topic.upstream_cleanup
-        if cleanup is not None:
-            try:
-                await cleanup()
-            except Exception:
-                logger.warning("broker: upstream cleanup failed topic=%s", topic_name(key), exc_info=True)
-        logger.info("broker: upstream stopped topic=%s (published=%d)", topic_name(key), topic.published)
-        return 0
+            cleanup = topic.upstream_cleanup
+            if cleanup is not None:
+                try:
+                    await cleanup()
+                except Exception:
+                    logger.warning("broker: upstream cleanup failed topic=%s", topic_name(key), exc_info=True)
+            logger.info("broker: upstream stopped topic=%s (published=%d)", topic_name(key), topic.published)
+            return 0
 
     # ------------------------------------------------------------------
     # Fan-out

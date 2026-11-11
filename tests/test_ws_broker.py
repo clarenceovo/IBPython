@@ -82,6 +82,90 @@ async def test_first_subscriber_starts_upstream_last_stops_it() -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_attach_starts_upstream_exactly_once() -> None:
+    hub = MarketDataBroker()
+    starts = 0
+    release = asyncio.Event()
+    asyncio.get_running_loop().call_later(0.05, release.set)
+
+    async def slow_start(publish: Any) -> Any:
+        nonlocal starts
+        starts += 1
+        await release.wait()  # hold the start open to expose check-then-act races
+
+        async def cleanup() -> None:
+            pass
+
+        return cleanup
+
+    results = await asyncio.gather(
+        hub.attach(("ticks", "ES"), channel="ticks", start_upstream=slow_start, deliver=lambda f: None),
+        hub.attach(("ticks", "ES"), channel="ticks", start_upstream=slow_start, deliver=lambda f: None),
+    )
+    assert starts == 1  # exactly one upstream, not one per racer
+    assert [count for _, count in results] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_upstream_start_failure_rolls_back_topic() -> None:
+    hub = MarketDataBroker()
+    attempts = 0
+
+    async def flaky_start(publish: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("boom")
+
+        async def cleanup() -> None:
+            pass
+
+        return cleanup
+
+    with pytest.raises(RuntimeError):
+        await hub.attach(("ticks", "ES"), channel="ticks", start_upstream=flaky_start, deliver=lambda f: None)
+    assert hub.active_topic_count() == 0  # no zombie topic left in the registry
+
+    _, count = await hub.attach(("ticks", "ES"), channel="ticks", start_upstream=flaky_start, deliver=lambda f: None)
+    assert count == 1 and attempts == 2  # the next attach retries the start
+
+
+@pytest.mark.asyncio
+async def test_reattach_waits_for_upstream_stop() -> None:
+    """A replacement attach must not start while the old upstream is stopping.
+
+    Feed stop calls are keyed by symbol, not by request id. An interleaved
+    start would be cancelled by the old stop.
+    """
+    hub = MarketDataBroker()
+    events: list[str] = []
+    release_stop = asyncio.Event()
+    asyncio.get_running_loop().call_later(0.05, release_stop.set)
+
+    def make_start(tag: str) -> Any:
+        async def start(publish: Any) -> Any:
+            events.append(f"start:{tag}")
+
+            async def cleanup() -> None:
+                events.append(f"stop-begin:{tag}")
+                await release_stop.wait()
+                events.append(f"stop-end:{tag}")
+
+            return cleanup
+
+        return start
+
+    await hub.attach(("ticks", "ES"), channel="ticks", start_upstream=make_start("a"), deliver=lambda f: None)
+    detach_task = asyncio.create_task(hub.detach(("ticks", "ES"), 1))
+    await asyncio.sleep(0)  # let the detach enter its cleanup
+    _, count = await hub.attach(("ticks", "ES"), channel="ticks", start_upstream=make_start("b"), deliver=lambda f: None)
+    await detach_task
+
+    assert count == 1
+    assert events == ["start:a", "stop-begin:a", "stop-end:a", "start:b"]
+
+
+@pytest.mark.asyncio
 async def test_fan_out_and_sequence_numbers() -> None:
     hub = MarketDataBroker()
     received_a: list[dict[str, Any]] = []

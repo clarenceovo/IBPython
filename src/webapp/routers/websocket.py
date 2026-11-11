@@ -14,7 +14,7 @@ Server to client:
     {"type": "subscribed", "channel", "symbol", "topic", "subscribers", "resolved"}
     {"type": "quotes"|"ticks"|"bars", "symbol", "topic", "seq", "data", "server_ts"}
     {"type": "unsubscribed", "channel", "symbol"}
-    {"type": "status", "subscriptions": [...], "topics": [...]}
+    {"type": "status", "subscriptions": [...], "topics": [...], "dropped_frames": N}
     {"type": "pong"}
     {"type": "error", "action", "detail"}
 
@@ -348,6 +348,7 @@ class _Connection:
                 "type": "status",
                 "subscriptions": [sub.status_frame() for sub in self.subscriptions.values()],
                 "topics": self.hub.topic_status(),
+                "dropped_frames": self.dropped_frames,
             })
         elif action == "subscribe":
             await self._handle_subscribe(frame)
@@ -498,9 +499,13 @@ class _Connection:
 
     async def writer(self) -> None:
         """Drain the outbound queue and send each frame as JSON text."""
-        while True:
-            message = await self.outbox.get()
-            await self.ws.send_text(json.dumps(message))
+        try:
+            while True:
+                message = await self.outbox.get()
+                await self.ws.send_text(json.dumps(message))
+        except Exception:
+            # The socket is gone; the reader loop notices next and cleans up.
+            logger.info("ws writer exited (dropped=%d)", self.dropped_frames, exc_info=True)
 
     async def run(self) -> None:
         """Reader loop: receive, parse, dispatch; clean up on disconnect."""
