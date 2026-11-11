@@ -45,7 +45,7 @@ from src.feeds.symbol_resolver import ResolvedSymbol, SymbolResolutionError, res
 from src.feeds.tick_data import TickByTickData, TickType
 from src.webapp.routers.market_data_consolidated import SEC_TYPE_BY_ASSET_CLASS
 from src.webapp.routers.streaming import _resolve_stream_contract, _ticker_to_snapshot
-from src.webapp.ws_broker import MarketDataBroker, TopicKey, broker, topic_name
+from src.webapp.ws_broker import MarketDataBroker, TopicKey, _now_iso, broker, topic_name
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +59,6 @@ DEFAULT_TICK_TYPE_NAME = "ALL_LAST"
 DEFAULT_WHAT_TO_SHOW = "TRADES"
 
 Cleanup = Any
-QueuePut = Any
-
-
-def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat()
 
 
 def _parse_asset_class(raw: Any) -> AssetClass | None:
@@ -501,60 +496,49 @@ class _Connection:
 # Main loops
 # ---------------------------------------------------------------------------
 
-
-class _ConnectionReader:
-    """Reader/writer wrapper so _Connection methods stay dispatchable in tests."""
-
-    def __init__(self, connection: _Connection) -> None:
-        self.connection = connection
-
     async def writer(self) -> None:
         """Drain the outbound queue and send each frame as JSON text."""
-        connection = self.connection
         while True:
-            message = await connection.outbox.get()
-            await connection.ws.send_text(json.dumps(message))
+            message = await self.outbox.get()
+            await self.ws.send_text(json.dumps(message))
 
     async def run(self) -> None:
         """Reader loop: receive, parse, dispatch; clean up on disconnect."""
-        connection = self.connection
         writer_task = asyncio.create_task(self.writer())
         writer_task.set_name("ws-writer")
         try:
             while True:
-                raw = await connection.ws.receive_text()
+                raw = await self.ws.receive_text()
                 try:
                     frame = json.loads(raw)
                 except json.JSONDecodeError:
-                    connection.send_error(None, "malformed JSON frame")
+                    self.send_error(None, "malformed JSON frame")
                     continue
                 try:
-                    await connection.handle_frame(frame)
+                    await self.handle_frame(frame)
                 except Exception:
                     logger.exception("ws frame dispatch failed")
                     detail_source = frame.get("action") if isinstance(frame, dict) else None
-                    connection.send_error(detail_source, "internal dispatch error")
+                    self.send_error(detail_source, "internal dispatch error")
         except WebSocketDisconnect:
             logger.info(
                 "ws client disconnected (subscriptions=%d dropped=%d)",
-                len(connection.subscriptions), connection.dropped_frames,
+                len(self.subscriptions), self.dropped_frames,
             )
         except Exception:
             logger.exception("ws reader loop failed")
         finally:
-            for key in list(connection.subscriptions):
+            for key in list(self.subscriptions):
                 try:
-                    await connection.teardown(key, notify=False)
+                    await self.teardown(key, notify=False)
                 except Exception:
                     logger.warning("ws teardown during disconnect failed: key=%s", key, exc_info=True)
             writer_task.cancel()
             await asyncio.gather(writer_task, return_exceptions=True)
             try:
-                await connection.ws.close()
+                await self.ws.close()
             except Exception:
                 logger.debug("ws close after disconnect failed", exc_info=True)
-
-
 @router.websocket("/ws/market-data")
 async def market_data_socket(websocket: WebSocket) -> None:
     """Realtime market-data feed socket (topic pub/sub; see module docstring).
@@ -566,4 +550,4 @@ async def market_data_socket(websocket: WebSocket) -> None:
     state = websocket.app.state.ibkr_rest_state
     await websocket.accept()
     connection = _Connection(websocket, state, broker)
-    await _ConnectionReader(connection).run()
+    await connection.run()

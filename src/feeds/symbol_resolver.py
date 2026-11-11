@@ -48,7 +48,7 @@ CRYPTO_ROOTS: dict[str, str] = {
     "BTC": "BTC", "ETH": "ETH", "LTC": "LTC", "BCH": "BCH",
     "SOL": "SOL", "XRP": "XRP", "ADA": "ADA", "DOGE": "DOGE",
     "DOT": "DOT", "AVAX": "AVAX", "LINK": "LINK", "MATIC": "MATIC",
-    "SHIB": "SHIB", "UNI": "UNI", "ATOM": "ATOM", "LINKUSD": "LINK",
+    "SHIB": "SHIB", "UNI": "UNI", "ATOM": "ATOM",
 }
 
 # Yahoo-style index aliases mapped to IBKR symbols.
@@ -67,7 +67,6 @@ _CURRENCY_CODES: frozenset[str] = frozenset({
 _FUTURES_LOCAL_RE = re.compile(
     r"^(?P<root>[A-Z0-9]{1,6}?)(?P<month>[FGHJKMNQUVXZ])(?P<year>\d{1,4})$"
 )
-_FX_RE = re.compile(r"^(?P<base>[A-Z]{3})[./-](?P<quote>[A-Z]{3})$")
 _FUTURES_CONTINUOUS_SUFFIX_RE = re.compile(r"^(?P<root>[A-Z0-9]{1,6}?)(?P<slot>[12])!$")
 _YAHOO_CONTINUOUS_RE = re.compile(r"^(?P<root>[A-Z0-9]{1,6}?)=F$")
 

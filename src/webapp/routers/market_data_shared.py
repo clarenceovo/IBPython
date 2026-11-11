@@ -12,6 +12,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from src.config.reference_data import is_known_index, resolve_future, resolve_index
 from src.feeds.exchange_resolver import resolve_equity
+from src.feeds.symbol_resolver import _CURRENCY_CODES
 from src.feeds.ibkr_historical import (
     HistoricalRequestTooLargeError,
     ensure_historical_chunk_limit,
@@ -391,27 +392,6 @@ _INTERVAL_ALIASES: dict[str, str] = {
     "1MON": "1 month",
     "1MONTH": "1 month",
 }
-
-_CURRENCY_CODES: frozenset[str] = frozenset(
-    {
-        "AUD",
-        "CAD",
-        "CHF",
-        "CNH",
-        "CNY",
-        "EUR",
-        "GBP",
-        "HKD",
-        "JPY",
-        "MXN",
-        "NOK",
-        "NZD",
-        "SEK",
-        "SGD",
-        "USD",
-        "ZAR",
-    }
-)
 
 
 def normalize_ohlcv_interval(value: str) -> str:

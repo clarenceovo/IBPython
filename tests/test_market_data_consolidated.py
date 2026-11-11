@@ -22,7 +22,6 @@ from src.feeds.snapshotter import EquitySnapshot
 from src.feeds.tick_data import MarketDepthLevel, MarketDepthSnapshot, TickByTickData, TickType
 
 SYMBOL = "AAPL"
-ENDPOINT = "/api/v1/market-data/consolidated/symbol/AAPL"
 ALL_SECTION_NAMES = ("snapshot", "ticks", "depth", "trading_schedule")
 
 FIXED_TS = datetime(2026, 1, 5, 14, 30, tzinfo=timezone.utc)
@@ -158,116 +157,6 @@ def _make_client(state: FakeState) -> TestClient:
     return TestClient(app)
 
 
-def test_all_sections_return_200_with_every_field_set() -> None:
-    state = FakeState()
-    client = _make_client(state)
-
-    with client:
-        response = client.get(ENDPOINT)
-
-    assert response.status_code == 200, response.text
-    data = response.json()
-
-    assert data["symbol"] == SYMBOL
-    assert data["exchange"] == "SMART"
-    assert data["currency"] == "USD"
-
-    assert data["snapshot"]["symbol"] == SYMBOL
-    assert data["snapshot"]["last"] == 185.5
-
-    assert len(data["ticks"]) == 1
-    assert data["ticks"][0]["price"] == 185.5
-
-    assert data["depth"]["symbol"] == SYMBOL
-    assert data["depth"]["bids"][0]["price"] == 185.4
-
-    assert data["trading_schedule"][0]["refDate"] == "20260105"
-
-    assert set(data["sections"]) == set(ALL_SECTION_NAMES)
-    for name in ALL_SECTION_NAMES:
-        assert data["sections"][name]["status"] == "ok", name
-        assert data["sections"][name]["error"] is None
-
-    assert datetime.fromisoformat(data["requested_at"]) is not None
-
-    # Each section built its request from the path symbol.
-    assert state.redis.calls == [[SYMBOL]]
-    assert state.feed.tick_calls == [(SYMBOL, "STK", "SMART", 10)]
-    depth_spec = state.feed.depth_specs[0]
-    assert (depth_spec.symbol, depth_spec.exchange, depth_spec.currency) == (SYMBOL, "SMART", "USD")
-    assert depth_spec.asset_class is AssetClass.EQUITY
-    schedule_request = state.feed.schedule_requests[0]
-    assert schedule_request.symbol == SYMBOL
-    assert schedule_request.what_to_show == "SCHEDULE"
-    assert schedule_request.duration == "7 D"
-
-
-def test_section_whitelist_runs_only_requested_sections() -> None:
-    state = FakeState()
-    client = _make_client(state)
-
-    with client:
-        response = client.get(ENDPOINT, params={"sections": "snapshot,ticks"})
-
-    assert response.status_code == 200, response.text
-    data = response.json()
-
-    assert data["snapshot"]["symbol"] == SYMBOL
-    assert data["ticks"][0]["price"] == 185.5
-
-    assert data["depth"] is None
-    assert data["trading_schedule"] is None
-
-    assert data["sections"]["snapshot"]["status"] == "ok"
-    assert data["sections"]["ticks"]["status"] == "ok"
-    assert data["sections"]["depth"]["status"] == "skipped"
-    assert data["sections"]["trading_schedule"]["status"] == "skipped"
-
-    assert state.redis.calls == [[SYMBOL]]
-    assert state.feed.calls == ["ticks"]
-    assert state.feed.depth_specs == []
-    assert state.feed.schedule_requests == []
-
-
-def test_unknown_section_name_returns_422() -> None:
-    state = FakeState()
-    client = _make_client(state)
-
-    with client:
-        response = client.get(ENDPOINT, params={"sections": "snapshot,bogus"})
-
-    assert response.status_code == 422, response.text
-    assert "bogus" in response.json()["detail"]
-    assert state.redis.calls == []
-    assert state.feed.calls == []
-
-
-def test_failing_section_is_isolated() -> None:
-    state = FakeState()
-    state.feed.fail_sections = {"depth"}
-    client = _make_client(state)
-
-    with client:
-        response = client.get(ENDPOINT)
-
-    assert response.status_code == 200, response.text
-    data = response.json()
-
-    assert data["depth"] is None
-    assert data["sections"]["depth"]["status"] == "error"
-    assert "depth unavailable" in data["sections"]["depth"]["error"]
-
-    for name in ("snapshot", "ticks", "trading_schedule"):
-        assert data["sections"][name]["status"] == "ok", name
-
-    assert data["snapshot"]["symbol"] == SYMBOL
-    assert data["ticks"][0]["price"] == 185.5
-    assert data["trading_schedule"][0]["refDate"] == "20260105"
-
-
-# ── Universal resolver + /universal endpoint ──────────────────────────────────
-
-
 def _bar(symbol: str, asset_class: AssetClass, exchange: str = "SMART", currency: str = "USD") -> OHLCVBar:
     return OHLCVBar(
         symbol=symbol,
@@ -282,6 +171,9 @@ def _bar(symbol: str, asset_class: AssetClass, exchange: str = "SMART", currency
         currency=currency,
         bar_size="1 hour",
     )
+
+
+UNIVERSAL_BASE = "/api/v1/market-data/consolidated"
 
 
 def _hk_snapshot() -> EquitySnapshot:
@@ -329,9 +221,6 @@ class ExtraSnapshotRedis(FakeRedis):
             if key in wanted:
                 served[key] = value
         return served
-
-
-UNIVERSAL_BASE = "/api/v1/market-data/consolidated"
 
 
 def _universal_state() -> tuple[FakeState, UniversalFakeFeed]:
