@@ -22,6 +22,7 @@ calendar day.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Annotated, Any
@@ -46,6 +47,7 @@ OPTION_SEC_TYPES = frozenset({"OPT", "FOP"})
 DEFAULT_SPOT_SHOCKS_PCT = (-10.0, -5.0, -2.0, 2.0, 5.0, 10.0)
 DEFAULT_VOL_SHOCKS_PTS = (-5.0, -3.0, 0.0, 3.0, 5.0)
 DEFAULT_MULTIPLIER = 100.0
+OPTION_GREEK_CONCURRENCY = 8
 
 # Expiry buckets in calendar days.
 FRONT_MAX_DAYS = 45
@@ -136,6 +138,7 @@ class HedgeSuggestion(BaseModel):
     shares_to_trade: int
     residual_delta_shares: float
     hedge_notional: float
+    hedge_unit: str = "delta shares"
 
 
 class CockpitTotals(BaseModel):
@@ -234,9 +237,32 @@ def scenario_pnl(
 # ---------------------------------------------------------------------------
 
 
-def _linear_value(position: LivePositionDTO, items_by_con_id: dict[int, PortfolioItemDTO]) -> float:
+def _portfolio_item_for(
+    position: LivePositionDTO,
+    items_by_con_id: dict[tuple[str, int], PortfolioItemDTO],
+    items_by_symbol: dict[tuple[str, str, str], PortfolioItemDTO],
+) -> PortfolioItemDTO | None:
+    """Portfolio item for a position; con_id match first, symbol fallback.
+
+    Keying by ``(account, con_id)`` keeps FA accounts separate: the same
+    con_id held in two accounts must not borrow the other account's market
+    value or price.
+    """
+    item = None
+    if position.con_id is not None:
+        item = items_by_con_id.get((position.account, position.con_id))
+    if item is None:
+        item = items_by_symbol.get((position.account, position.symbol.upper(), position.sec_type.upper()))
+    return item
+
+
+def _linear_value(
+    position: LivePositionDTO,
+    items_by_con_id: dict[tuple[str, int], PortfolioItemDTO],
+    items_by_symbol: dict[tuple[str, str, str], PortfolioItemDTO],
+) -> float:
     """Market value for a linear position; position times price as fallback."""
-    item = items_by_con_id.get(position.con_id) if position.con_id is not None else None
+    item = _portfolio_item_for(position, items_by_con_id, items_by_symbol)
     if item is not None and item.market_value is not None:
         return item.market_value
     if item is not None and item.market_price is not None:
@@ -273,13 +299,24 @@ async def build_cockpit(payload: CockpitRequest, state: IBKRRestAppState) -> Coc
     """Assemble the risk cockpit from positions and option Greek snapshots."""
     warnings: list[str] = []
     positions = await state.feed.load_live_positions()
-    items = await state.feed.load_portfolio_items(payload.account)
-    items_by_con_id = {item.con_id: item for item in items if item.con_id is not None}
+    # "ALL" is a UI sentinel; only the empty string means all accounts in
+    # ib_async (a literal "ALL" account lookup returns no items).
+    requested_account = "" if payload.account.strip().upper() == "ALL" else payload.account
+    if requested_account:
+        positions = [p for p in positions if p.account == requested_account]
+    items = await state.feed.load_portfolio_items(requested_account)
+    items_by_con_id = {
+        (item.account, item.con_id): item for item in items if item.con_id is not None
+    }
+    items_by_symbol = {
+        (item.account, item.symbol.upper(), item.sec_type.upper()): item for item in items
+    }
 
     today = datetime.now(tz=timezone.utc).date()
     underlyings: dict[str, UnderlyingRisk] = {}
     gamma_position_sums: dict[str, float] = {}
     option_delta_sums: dict[str, float] = {}
+    hedge_units: dict[str, str] = {}
 
     def _risk(symbol: str) -> UnderlyingRisk:
         key = symbol.upper()
@@ -287,13 +324,34 @@ async def build_cockpit(payload: CockpitRequest, state: IBKRRestAppState) -> Coc
         option_delta_sums.setdefault(key, 0.0)
         return underlyings.setdefault(key, UnderlyingRisk(underlying=key))
 
-    for position in positions:
+    # Resolve option Greeks concurrently: sequential per-position round trips
+    # breach the request deadline on option-heavy portfolios. The semaphore
+    # bounds concurrent feed calls; results stay in position order.
+    option_indices = [
+        index for index, p in enumerate(positions) if p.sec_type.upper() in OPTION_SEC_TYPES
+    ]
+    contributions_by_index: dict[int, dict[str, Any] | None] = {}
+    if option_indices and not payload.skip_greeks:
+        semaphore = asyncio.Semaphore(OPTION_GREEK_CONCURRENCY)
+
+        async def _resolve(position: LivePositionDTO) -> dict[str, Any] | None:
+            async with semaphore:
+                return await _resolve_option_greeks(state, position, warnings)
+
+        contributions_by_index = dict(
+            zip(
+                option_indices,
+                await asyncio.gather(*(_resolve(positions[i]) for i in option_indices)),
+            )
+        )
+
+    for index, position in enumerate(positions):
         risk = _risk(position.underlying_symbol or position.symbol)
         if position.sec_type.upper() in OPTION_SEC_TYPES:
             risk.option_position_count += 1
             if payload.skip_greeks:
                 continue
-            contribution = await _resolve_option_greeks(state, position, warnings)
+            contribution = contributions_by_index.get(index)
             if contribution is None:
                 continue
             risk.net_delta_shares += contribution["delta_shares"]
@@ -321,9 +379,14 @@ async def build_cockpit(payload: CockpitRequest, state: IBKRRestAppState) -> Coc
                 )
         else:
             risk.linear_position += position.position
-            risk.linear_value += _linear_value(position, items_by_con_id)
-            risk.net_delta_shares += position.position  # linear delta is 1:1
-            item = items_by_con_id.get(position.con_id) if position.con_id is not None else None
+            risk.linear_value += _linear_value(position, items_by_con_id, items_by_symbol)
+            # Linear delta in share-equivalents: futures carry a contract
+            # multiplier, stocks are 1:1 (option deltas scale the same way).
+            linear_multiplier = position.multiplier or 1.0
+            risk.net_delta_shares += position.position * linear_multiplier
+            if linear_multiplier != 1.0:
+                hedge_units[risk.underlying] = f"delta shares ({position.sec_type.upper()} x{linear_multiplier:g})"
+            item = _portfolio_item_for(position, items_by_con_id, items_by_symbol)
             if item is not None and item.market_price is not None and item.market_price > 0:
                 risk.spot = item.market_price
 
@@ -331,6 +394,10 @@ async def build_cockpit(payload: CockpitRequest, state: IBKRRestAppState) -> Coc
         risk.dollar_delta = risk.net_delta_shares * risk.spot if risk.spot is not None else 0.0
         if risk.spot is not None and risk.spot > 0:
             risk.gamma_per_1pct = gamma_position_sums.get(risk.underlying, 0.0) * risk.spot * 0.01
+        elif option_delta_sums.get(risk.underlying, 0.0) or risk.vega_per_pt:
+            warnings.append(
+                f"spot unavailable for {risk.underlying}; scenario delta/gamma/vega terms skipped"
+            )
 
     ordered = sorted(underlyings.values(), key=lambda risk: risk.underlying)
     totals = CockpitTotals(
@@ -406,6 +473,7 @@ async def build_cockpit(payload: CockpitRequest, state: IBKRRestAppState) -> Coc
                     shares_to_trade=shares,
                     residual_delta_shares=residual,
                     hedge_notional=notional,
+                    hedge_unit=hedge_units.get(risk.underlying, "delta shares"),
                 )
             )
 

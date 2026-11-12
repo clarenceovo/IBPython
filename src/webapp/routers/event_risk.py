@@ -24,7 +24,9 @@ appear in ``no_event_data_symbols``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from datetime import date, datetime, timezone
 from typing import Annotated, Any
 
@@ -52,6 +54,10 @@ OPTION_SEC_TYPES = frozenset({"OPT", "FOP"})
 DEFAULT_MULTIPLIER = 100.0
 STRADDLE_EVENT_FACTOR = 0.8
 OPTION_ANALYTICS_WAIT_SECONDS = 2.0
+# Term-structure fan-out is up to max_expiries x 2 legs inside one request;
+# a shorter wait keeps the total inside the global request deadline.
+TERM_STRUCTURE_WAIT_SECONDS = 1.0
+VEGA_CONCURRENCY = 8
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +218,9 @@ def nearest_event(events: list[EventSpec], symbol: str, today: date) -> EventSpe
     best: EventSpec | None = None
     best_days = None
     for event in events:
-        if symbol.upper() not in event.label.upper():
+        # Word-boundary match: a substring match would let "ES" hit
+        # "TESLA earnings" or "F" hit "CPI FRIDAY".
+        if not re.search(rf"\b{re.escape(symbol.upper())}\b", event.label.upper()):
             continue
         event_days = days_until(event.date, today)
         if event_days < 0:
@@ -250,6 +258,7 @@ async def _snapshot_for(
     expiry: str,
     strike: float,
     right: OptionRight,
+    wait_seconds: float = OPTION_ANALYTICS_WAIT_SECONDS,
 ) -> OptionAnalyticsSnapshot:
     """One analytics snapshot for a chain contract."""
     spec = OptionContractSpec(
@@ -266,7 +275,7 @@ async def _snapshot_for(
     return await state.feed.load_option_analytics(
         OptionAnalyticsRequest(
             contract=spec,
-            snapshot_wait_seconds=OPTION_ANALYTICS_WAIT_SECONDS,
+            snapshot_wait_seconds=wait_seconds,
         )
     )
 
@@ -333,15 +342,29 @@ async def get_underlying_event_risk(
     selected = eligible[0]
 
     strikes = list(chain.strikes)
-    reference = await _reference_price(state, chain, selected, strikes)
+    if not strikes:
+        warnings.append("option chain returned no strikes")
+        response.warnings = warnings
+        return response
+    try:
+        reference = await _reference_price(state, chain, selected, strikes)
+    except Exception as exc:
+        warnings.append(f"underlying price unavailable: {exc}")
+        response.warnings = warnings
+        return response
     if reference is None:
         warnings.append("underlying price unavailable; ATM strike chosen from chain midpoint")
         reference = (min(strikes) + max(strikes)) / 2.0
     atm = _atm_strike(strikes, reference)
 
     multiplier = float(chain.multiplier) if chain.multiplier else DEFAULT_MULTIPLIER
-    call_snapshot = await _snapshot_for(state, chain, selected, atm, OptionRight.CALL)
-    put_snapshot = await _snapshot_for(state, chain, selected, atm, OptionRight.PUT)
+    try:
+        call_snapshot = await _snapshot_for(state, chain, selected, atm, OptionRight.CALL)
+        put_snapshot = await _snapshot_for(state, chain, selected, atm, OptionRight.PUT)
+    except Exception as exc:
+        warnings.append(f"straddle legs unavailable: {exc}")
+        response.warnings = warnings
+        return response
     call_price = _mid_price(call_snapshot)
     put_price = _mid_price(put_snapshot)
 
@@ -366,8 +389,8 @@ async def get_underlying_event_risk(
 
     for expiry in eligible[: payload.max_expiries]:
         try:
-            expiry_call = await _snapshot_for(state, chain, expiry, atm, OptionRight.CALL)
-            expiry_put = await _snapshot_for(state, chain, expiry, atm, OptionRight.PUT)
+            expiry_call = await _snapshot_for(state, chain, expiry, atm, OptionRight.CALL, TERM_STRUCTURE_WAIT_SECONDS)
+            expiry_put = await _snapshot_for(state, chain, expiry, atm, OptionRight.PUT, TERM_STRUCTURE_WAIT_SECONDS)
             ivs = [
                 value
                 for value in (expiry_call.implied_volatility, expiry_put.implied_volatility)
@@ -466,12 +489,25 @@ async def get_event_exposure(
 
     matched_con_ids = 0
     vega_known: dict[str, float | None] = {underlying: None for underlying in vega_by_underlying}
-    for position in option_positions:
+    # Resolve vega concurrently (bounded): sequential per-position round trips
+    # breach the request deadline on option-heavy portfolios; results stay in
+    # position order so the aggregation below is deterministic.
+    event_positions = [
+        p for p in option_positions if (p.underlying_symbol or p.symbol).upper() in event_map
+    ]
+    matched_con_ids = len(event_positions)
+    if event_positions:
+        semaphore = asyncio.Semaphore(VEGA_CONCURRENCY)
+
+        async def _resolve(position: LivePositionDTO) -> float | None:
+            async with semaphore:
+                return await _position_vega(state, position, warnings)
+
+        contributions = await asyncio.gather(*(_resolve(p) for p in event_positions))
+    else:
+        contributions = []
+    for position, contribution in zip(event_positions, contributions):
         underlying = (position.underlying_symbol or position.symbol).upper()
-        if underlying not in event_map:
-            continue
-        matched_con_ids += 1
-        contribution = await _position_vega(state, position, warnings)
         if contribution is None:
             continue
         current = vega_known[underlying] or 0.0

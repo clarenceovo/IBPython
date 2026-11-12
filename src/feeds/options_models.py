@@ -298,14 +298,17 @@ class OptionSkewSurfaceResponse(BaseModel):
 
 def to_option_contract_spec(position: Any, default_multiplier: float = 100.0) -> OptionContractSpec | None:
     """Build a contract spec from an option position; None when identity is incomplete."""
-    if position.con_id is None or position.expiry is None or position.strike is None:
+    right = str(position.right or "").strip().upper()
+    if position.con_id is None or position.expiry is None or position.strike is None or not right:
+        # A missing right must not silently default to CALL: a mislabeled put
+        # flips the delta sign and corrupts every aggregate downstream.
         return None
     return OptionContractSpec(
         sec_type=position.sec_type,
         underlying_symbol=position.underlying_symbol or position.symbol,
         expiry=position.expiry,
         strike=position.strike,
-        right=OptionRight((position.right or "C").upper()),
+        right=OptionRight(right),
         exchange=position.exchange or "SMART",
         currency=position.currency or "USD",
         multiplier=str(int(position.multiplier or default_multiplier)),

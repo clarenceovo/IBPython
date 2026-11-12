@@ -243,6 +243,9 @@ def create_app(
     # API-wide bearer auth — wraps all endpoints when IBKR_API_BEARER_TOKEN is set
     if resolved_settings.ibkr_api_bearer_token:
         fastapi_app.add_middleware(APIBearerAuthMiddleware, expected_token=resolved_settings.ibkr_api_bearer_token)
+    # WebSocket scope bypasses ASGI middleware auth, so the socket handler
+    # reads the token from app.state and enforces it itself.
+    fastapi_app.state.api_bearer_token = resolved_settings.ibkr_api_bearer_token
 
     # HTTP rate limiter — per-IP gatekeeper with Redis or in-process state
     rate_gatekeeper = RateLimitGatekeeper(resolved_settings.ibkr_rest_rate_limit_per_minute)

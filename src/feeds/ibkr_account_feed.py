@@ -70,6 +70,10 @@ class IBKRAccountFeedClient:
     async def load_portfolio_items(self, account: str = "") -> list[PortfolioItemDTO]:
         """Expose current portfolio items from ib_async's local account cache."""
         await self._connection.ensure_connected()
+        # ib_async treats "" as "all accounts"; a literal "ALL" is an account
+        # name lookup that matches nothing, so normalize the UI sentinel here
+        # for every caller.
+        account = "" if account.strip().upper() == "ALL" else account
         logger.info("load_portfolio_items: account=%s", account or "all")
         result = normalize_portfolio_items(self._ib.portfolio(account))
         logger.info("load_portfolio_items: %d items for %s", len(result), account or "all")

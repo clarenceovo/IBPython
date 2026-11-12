@@ -33,9 +33,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -568,6 +570,24 @@ class _Connection:
                 await self.ws.close()
             except Exception:
                 logger.debug("ws close after disconnect failed", exc_info=True)
+_MAX_WS_CONNECTIONS = 64
+_ws_active_connections = 0
+
+
+@asynccontextmanager
+async def _ws_connection_slot() -> AsyncIterator[None]:
+    """Cap concurrent market-data sockets; each may hold up to 32 upstream
+    subscriptions, and IBKR allows ~100 concurrent market-data lines."""
+    global _ws_active_connections
+    if _ws_active_connections >= _MAX_WS_CONNECTIONS:
+        raise WebSocketDisconnect(code=4429)
+    _ws_active_connections += 1
+    try:
+        yield
+    finally:
+        _ws_active_connections -= 1
+
+
 @router.websocket("/ws/market-data")
 async def market_data_socket(websocket: WebSocket) -> None:
     """Realtime market-data feed socket (topic pub/sub; see module docstring).
@@ -575,8 +595,20 @@ async def market_data_socket(websocket: WebSocket) -> None:
     State access mirrors ``get_rest_state`` (which reads
     ``request.app.state.ibkr_rest_state``) but through the WebSocket scope,
     because FastAPI dependency injection does not apply to plain WS handlers.
+
+    The WebSocket scope bypasses ASGI middleware, so bearer auth and a
+    global connection cap are enforced here before the socket runs.
     """
-    state = websocket.app.state.ibkr_rest_state
-    await websocket.accept()
-    connection = _Connection(websocket, state, broker)
-    await connection.run()
+    expected = getattr(websocket.app.state, "api_bearer_token", "")
+    if expected:
+        token = websocket.query_params.get("token") or websocket.headers.get("authorization", "")
+        if not secrets.compare_digest(token.removeprefix("Bearer ").strip(), expected):
+            await websocket.accept()
+            await websocket.close(code=4401)
+            return
+
+    async with _ws_connection_slot():
+        state = websocket.app.state.ibkr_rest_state
+        await websocket.accept()
+        connection = _Connection(websocket, state, broker)
+        await connection.run()

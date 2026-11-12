@@ -64,6 +64,9 @@ class _Topic:
     upstream_cleanup: Callable[[], Awaitable[None]] | None = None
     started_at: str = field(default_factory=_now_iso)
     next_subscriber_id: int = 1
+    starting: bool = False
+    start_failed: bool = False
+    start_evt: asyncio.Event = field(default_factory=asyncio.Event)
 
     def status(self) -> dict[str, Any]:
         info: dict[str, Any] = {
@@ -84,6 +87,10 @@ class MarketDataBroker:
     def __init__(self) -> None:
         self._topics: dict[TopicKey, _Topic] = {}
         self._lock = asyncio.Lock()
+        # Per-key stop-in-flight guards: a dying topic's cleanup runs OUTSIDE
+        # the lock, so a replacement attach must wait for it (feed stop calls
+        # are keyed by symbol and would kill the replacement stream too).
+        self._stopping: dict[TopicKey, asyncio.Event] = {}
 
     # ------------------------------------------------------------------
     # Subscriber lifecycle
@@ -100,39 +107,87 @@ class MarketDataBroker:
     ) -> tuple[int, int]:
         """Register one subscriber on a topic; start the upstream when first.
 
-        The lock is held across the upstream start so concurrent attaches on
-        one new topic cannot double-start the upstream (feed stop calls are
-        keyed by symbol, not by request id, so a leaked second stream could
-        never be stopped). A failed start rolls the topic back atomically.
+        Registry mutation runs under the lock; the upstream start (network
+        I/O) runs OUTSIDE it so one stalled IBKR call cannot freeze every
+        other topic's lifecycle. Invariants are preserved with per-topic
+        guards: concurrent attaches on one new topic wait on the creator's
+        start result; a failed start rolls the topic back atomically.
+        A replacement attach on a key whose stop is still in flight waits
+        for the stop, then retries (feed stops are keyed by symbol).
 
         Returns ``(subscriber_id, subscriber_count)`` after the attach.
         """
-        async with self._lock:
-            topic = self._topics.get(key)
-            if topic is None:
-                topic = _Topic(key=key, channel=channel, meta=dict(meta or {}))
-                self._topics[key] = topic
-                try:
-                    topic.upstream_cleanup = await start_upstream(self._make_publish(topic))
-                except BaseException:
-                    self._topics.pop(key, None)
-                    raise
-                logger.info("broker: upstream started topic=%s", topic_name(key))
+        while True:
+            async with self._lock:
+                stop_evt = self._stopping.get(key)
+                if stop_evt is None:
+                    topic = self._topics.get(key)
+                    if topic is None:
+                        topic = _Topic(key=key, channel=channel, meta=dict(meta or {}))
+                        self._topics[key] = topic
+                        owner = True
+                    else:
+                        owner = False
+                    topic.subscribers[topic.next_subscriber_id] = _Subscriber(
+                        subscriber_id=topic.next_subscriber_id, deliver=deliver
+                    )
+                    subscriber_id = topic.next_subscriber_id
+                    topic.next_subscriber_id += 1
+                    if owner:
+                        topic.starting = True
+                        await_outside = None
+                        break
+                    elif topic.starting:
+                        # Ride on the creator's in-flight start outside the lock.
+                        await_outside = topic.start_evt
+                        break
+                    else:
+                        return subscriber_id, len(topic.subscribers)
+            if stop_evt is not None:
+                await stop_evt.wait()
+                continue
 
-            subscriber_id = topic.next_subscriber_id
-            topic.next_subscriber_id += 1
-            topic.subscribers[subscriber_id] = _Subscriber(subscriber_id=subscriber_id, deliver=deliver)
+        if owner:
+            try:
+                cleanup = await start_upstream(self._make_publish(topic))
+            except BaseException:
+                async with self._lock:
+                    self._topics.pop(key, None)
+                    topic.starting = False
+                    topic.start_failed = True
+                    topic.start_evt.set()
+                raise
+            async with self._lock:
+                topic.upstream_cleanup = cleanup
+                topic.starting = False
+                topic.start_evt.set()
+                logger.info("broker: upstream started topic=%s", topic_name(key))
+                return subscriber_id, len(topic.subscribers)
+
+        # Rider path: wait for the creator's start to finish. (The owner path
+        # always returns above; await_outside is only set for riders.)
+        if await_outside is not None:
+            await await_outside.wait()
+        async with self._lock:
+            alive = self._topics.get(key) is topic and subscriber_id in topic.subscribers
+            if topic.start_failed or not alive:
+                if alive:
+                    topic.subscribers.pop(subscriber_id, None)
+                    if not topic.subscribers:
+                        self._topics.pop(key, None)
+                raise RuntimeError(f"upstream start failed for topic {topic_name(key)}")
             return subscriber_id, len(topic.subscribers)
 
     async def detach(self, key: TopicKey, subscriber_id: int) -> int:
         """Remove one subscriber; stop the upstream when the last one leaves.
 
-        The lock is held across the upstream cleanup so the stop of a dying
-        topic cannot interleave with a replacement attach starting the same
-        stream again (the feed would stop the new stream too).
+        Registry mutation runs under the lock; the upstream cleanup (network
+        I/O) runs OUTSIDE it. A per-key in-flight guard makes replacement
+        attaches wait for the stop so the old cleanup (keyed by symbol at
+        the feed layer) cannot kill a freshly started replacement stream.
 
         Returns the remaining subscriber count. A topic with zero remaining
-        subscribers is removed from the registry after its upstream stops.
+        subscribers is removed from the registry before its upstream stops.
         """
         async with self._lock:
             topic = self._topics.get(key)
@@ -143,15 +198,23 @@ class MarketDataBroker:
             if remaining:
                 return remaining
             self._topics.pop(key, None)
-
+            if key in self._stopping:
+                return 0
+            stop_evt = asyncio.Event()
+            self._stopping[key] = stop_evt
             cleanup = topic.upstream_cleanup
-            if cleanup is not None:
-                try:
-                    await cleanup()
-                except Exception:
-                    logger.warning("broker: upstream cleanup failed topic=%s", topic_name(key), exc_info=True)
-            logger.info("broker: upstream stopped topic=%s (published=%d)", topic_name(key), topic.published)
-            return 0
+
+        if cleanup is not None:
+            try:
+                await cleanup()
+            except Exception:
+                logger.warning("broker: upstream cleanup failed topic=%s", topic_name(key), exc_info=True)
+        async with self._lock:
+            if self._stopping.get(key) is stop_evt:
+                self._stopping.pop(key, None)
+            stop_evt.set()
+        logger.info("broker: upstream stopped topic=%s (published=%d)", topic_name(key), topic.published)
+        return 0
 
     # ------------------------------------------------------------------
     # Fan-out

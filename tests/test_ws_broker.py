@@ -103,7 +103,11 @@ async def test_concurrent_attach_starts_upstream_exactly_once() -> None:
         hub.attach(("ticks", "ES"), channel="ticks", start_upstream=slow_start, deliver=lambda f: None),
     )
     assert starts == 1  # exactly one upstream, not one per racer
-    assert [count for _, count in results] == [1, 2]
+    # Counts are observed at each attach's completion. The creator's start now
+    # runs outside the lock, so the rider registers while the creator waits:
+    # both observe the final count of 2. The invariant is the counts are
+    # consistent and both subscribers are live (gather would raise otherwise).
+    assert sorted(count for _, count in results) in ([1, 2], [2, 2])
 
 
 @pytest.mark.asyncio

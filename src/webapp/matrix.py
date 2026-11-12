@@ -109,10 +109,10 @@ async def matrix_publish_loop(
     key = matrix_key(service)
     ttl = int(interval_seconds * 3) + 30
     while True:
-        payload = build_matrix_payload(
-            hub, service, version, stats_provider() if stats_provider is not None else None
-        )
         try:
+            payload = build_matrix_payload(
+                hub, service, version, stats_provider() if stats_provider is not None else None
+            )
             await redis.set_raw(key, json.dumps(payload), ex=ttl)
         except asyncio.CancelledError:
             raise

@@ -2554,10 +2554,17 @@ def test_rate_limiter_honors_forwarded_ip_from_trusted_peer() -> None:
     from src.webapp.middleware.rate_limit import RateLimiterMiddleware
 
     limiter = RateLimiterMiddleware(lambda scope, receive, send: None, trusted_proxies="127.0.0.1/32")
+    # Single entry: appended by our proxy = the real client IP.
     scope = {
         "type": "http",
         "client": ("127.0.0.1", 12345),
         "headers": [(b"x-forwarded-for", b"203.0.113.10, 10.0.0.10")],
     }
 
+    # Multi-entry chain: the LEFTMOST entry is client-declared and spoofable;
+    # the RIGHTMOST is what our trusted proxy actually saw, so that wins.
+    assert limiter._get_client_ip(scope) == "10.0.0.10"
+    # Junk entries (non-IP bytes must never become Redis key material) are
+    # skipped in favour of the next valid hop from the right.
+    scope["headers"] = [(b"x-forwarded-for", b"<script>, 203.0.113.10")]
     assert limiter._get_client_ip(scope) == "203.0.113.10"

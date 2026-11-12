@@ -113,6 +113,9 @@ class RateLimitGatekeeper:
         if count == 1:
             await redis.expire(window_key, _WINDOW_SECONDS)
         reset = max(1, await redis.ttl(window_key))
+        if reset < 0:  # orphaned key (crash between INCR/EXPIRE): heal it
+            await redis.expire(window_key, _WINDOW_SECONDS)
+            reset = _WINDOW_SECONDS
         if count <= self.limit_per_minute:
             self.allowed_total += 1
             return _Decision(True, 0, self.limit_per_minute, self.limit_per_minute - count, reset)
@@ -123,6 +126,8 @@ class RateLimitGatekeeper:
         strikes_key = f"RateLimit:strikes:{ip}"
         strikes = await redis.incr(strikes_key)
         if strikes == 1:
+            await redis.expire(strikes_key, _STRIKE_WINDOW_SECONDS)
+        elif await redis.ttl(strikes_key) < 0:  # orphaned strikes key: heal
             await redis.expire(strikes_key, _STRIKE_WINDOW_SECONDS)
         block_for = _BLOCK_LADDER_SECONDS[min(strikes, len(_BLOCK_LADDER_SECONDS)) - 1]
         await redis.set(block_key, "1", ex=block_for)
@@ -244,11 +249,17 @@ class RateLimiterMiddleware:
             return peer_ip
 
         headers = dict(scope.get("headers", []))
-        # X-Forwarded-For: client, proxy1, proxy2
+        # X-Forwarded-For: client, proxy1, proxy2 — the rightmost entry was
+        # appended by our own trusted proxy; the leftmost is client-controlled
+        # and spoofable, and unvalidated bytes must never become key material.
         xff = headers.get(b"x-forwarded-for")
         if xff:
-            ip = xff.decode("latin-1").split(",")[0].strip()
-            if ip:
+            for candidate in reversed(xff.decode("latin-1").split(",")):
+                ip = candidate.strip()
+                try:
+                    ip_address(ip)
+                except ValueError:
+                    continue
                 return ip
         xri = headers.get(b"x-real-ip")
         if xri:
