@@ -60,7 +60,7 @@ class FutureOHLCVLoadRequest(MinimalOHLCVLoadControls):
             "EUREX (DAX, ESTX50), ICEEU (FTSE 100), MONEP (FCE)."
         ),
     )
-    currency: str = Field(default="USD", min_length=1)
+    currency: str = Field(default="USD", min_length=1, description="IBKR currency of the futures contract.")
     last_trade_date_or_contract_month: str | None = Field(
         default=None,
         examples=["202606"],
@@ -150,7 +150,7 @@ class CommodityOHLCVLoadRequest(MinimalOHLCVLoadControls):
         gt=0,
         description="Optional IBKR contract id. Can be used instead of contract month.",
     )
-    use_rth: bool = False
+    use_rth: bool = Field(default=False, description="Restrict bars to regular trading hours; commodity sessions run nearly 24h so this defaults to false.")
 
     @model_validator(mode="after")
     def validate_future_identifier(self) -> "CommodityOHLCVLoadRequest":
@@ -202,7 +202,7 @@ class CommodityOptionOHLCVLoadRequest(MinimalOHLCVLoadControls):
         gt=0,
         description="Optional IBKR contract id. Can be used for exact FOP disambiguation.",
     )
-    use_rth: bool = False
+    use_rth: bool = Field(default=False, description="Restrict bars to regular trading hours; futures option sessions run nearly 24h so this defaults to false.")
 
     @field_validator("right", mode="before")
     @classmethod
@@ -254,12 +254,26 @@ class CommodityOptionOHLCVLoadRequest(MinimalOHLCVLoadControls):
 class CommodityOptionAnalyticsLoadRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract: CommodityOptionOHLCVLoadRequest
-    generic_ticks: tuple[str, ...] | list[str] = ("100", "101", "104", "105", "106")
-    snapshot_wait_seconds: float = Field(default=2.0, gt=0)
-    regulatory_snapshot: bool = False
-    use_ttl_cache: bool = True
-    cache_ttl_seconds: float | None = Field(default=None, ge=0)
+    contract: CommodityOptionOHLCVLoadRequest = Field(
+        description="Futures option contract: underlying root, expiry, strike, and right."
+    )
+    generic_ticks: tuple[str, ...] | list[str] = Field(
+        default=("100", "101", "104", "105", "106"),
+        description="IBKR generic tick ids to request (100=OptVolume, 101=OptOpenInterest, 104=HistVol, 105=OptImpVol, 106=OptClose).",
+    )
+    snapshot_wait_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        description="How long to hold the short-lived IBKR market-data subscription while values arrive.",
+    )
+    regulatory_snapshot: bool = Field(
+        default=False,
+        description="Request IBKR regulatory snapshots instead of live subscription ticks (US equity options).",
+    )
+    use_ttl_cache: bool = Field(default=True, description="Serve identical repeated requests from the TTL cache.")
+    cache_ttl_seconds: float | None = Field(
+        default=None, ge=0, description="TTL override in seconds for the response cache. None uses the configured default."
+    )
 
     def to_request(self) -> OptionAnalyticsRequest:
         return OptionAnalyticsRequest(
@@ -273,21 +287,44 @@ class CommodityOptionAnalyticsLoadRequest(BaseModel):
 class CommodityMetadataRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1, examples=["CL"])
-    exchange: str | None = None
-    currency: str | None = None
-    last_trade_date_or_contract_month: str | None = Field(default=None, examples=["202606"])
-    multiplier: str | None = None
-    local_symbol: str | None = None
-    con_id: int | None = Field(default=None, gt=0)
-    what_to_show: str = Field(default="TRADES", min_length=1)
-    use_rth: bool = False
-    include_head_timestamp: bool = True
-    include_trading_schedule: bool = False
-    include_market_rules: bool = True
-    schedule_date: date | None = None
-    use_ttl_cache: bool = True
-    cache_ttl_seconds: float | None = Field(default=300, ge=0)
+    symbol: str = Field(
+        min_length=1,
+        examples=["CL"],
+        description="Commodity futures root, e.g. CL, GC, NG, LE. Auto-resolves common CME Group roots.",
+    )
+    exchange: str | None = Field(default=None, description="Override the auto-resolved commodity exchange.")
+    currency: str | None = Field(default=None, description="Override the auto-resolved commodity currency.")
+    last_trade_date_or_contract_month: str | None = Field(
+        default=None,
+        examples=["202606"],
+        description="IBKR futures contract month or last trade date (YYYYMM or YYYYMMDD). Required unless local_symbol or con_id is given.",
+    )
+    multiplier: str | None = Field(default=None, description="Optional IBKR contract multiplier for disambiguation.")
+    local_symbol: str | None = Field(
+        default=None,
+        description="Optional IBKR local symbol; can replace the contract month.",
+    )
+    con_id: int | None = Field(default=None, gt=0, description="Optional IBKR contract id; can replace the contract month.")
+    what_to_show: str = Field(
+        default="TRADES",
+        min_length=1,
+        description="IBKR data type used for head-timestamp and schedule lookups, e.g. TRADES.",
+    )
+    use_rth: bool = Field(default=False, description="Restrict schedule and head-timestamp lookups to regular trading hours.")
+    include_head_timestamp: bool = Field(default=True, description="Also return the earliest available data date.")
+    include_trading_schedule: bool = Field(
+        default=False,
+        description="Also return one trading-schedule session list starting at schedule_date.",
+    )
+    include_market_rules: bool = Field(default=True, description="Also resolve the contract's market rules (price increments).")
+    schedule_date: date | None = Field(
+        default=None,
+        description="Reference date (ISO date) for the trading-schedule section. Defaults to today.",
+    )
+    use_ttl_cache: bool = Field(default=True, description="Serve identical repeated requests from the TTL cache.")
+    cache_ttl_seconds: float | None = Field(
+        default=300, ge=0, description="TTL override in seconds for the response cache."
+    )
 
     @model_validator(mode="after")
     def validate_future_identifier(self) -> "CommodityMetadataRequest":
@@ -318,34 +355,49 @@ class CommodityMetadataRequest(BaseModel):
 class CommodityMetadataResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str
-    exchange: str
-    currency: str
-    con_id: int | None = None
-    local_symbol: str | None = None
-    trading_class: str | None = None
-    min_tick: float | None = None
-    market_rule_ids: tuple[int, ...] = ()
-    head_timestamp: datetime | None = None
-    trading_sessions: tuple[dict[str, Any], ...] = ()
-    market_rules: tuple[MarketRule, ...] = ()
-    source: str = "ibkr"
+    symbol: str = Field(description="Resolved futures symbol.")
+    exchange: str = Field(description="Resolved IBKR exchange.")
+    currency: str = Field(description="Resolved contract currency.")
+    con_id: int | None = Field(default=None, description="Qualified IBKR contract id.")
+    local_symbol: str | None = Field(default=None, description="IBKR local symbol of the qualified contract.")
+    trading_class: str | None = Field(default=None, description="IBKR trading class of the qualified contract.")
+    min_tick: float | None = Field(default=None, description="Minimum tick size reported by IBKR.")
+    market_rule_ids: tuple[int, ...] = Field(default=(), description="Market rule ids attached to the contract.")
+    head_timestamp: datetime | None = Field(default=None, description="Earliest available data time (UTC) when requested.")
+    trading_sessions: tuple[dict[str, Any], ...] = Field(default=(), description="Trading schedule sessions when requested.")
+    market_rules: tuple[MarketRule, ...] = Field(default=(), description="Resolved market rules when requested.")
+    source: str = Field(default="ibkr", description="Data source marker.")
 
 
 class CommodityHistoricalTicksRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1, examples=["CL"])
-    exchange: str | None = None
-    currency: str | None = None
-    last_trade_date_or_contract_month: str | None = Field(default=None, examples=["202606"])
-    local_symbol: str | None = None
-    con_id: int | None = Field(default=None, gt=0)
-    start_date: datetime
-    end_date: datetime
-    what_to_show: str = Field(default="TRADES", min_length=1)
-    use_rth: bool = False
-    max_ticks: int = Field(default=10_000, ge=1, le=100_000)
+    symbol: str = Field(
+        min_length=1,
+        examples=["CL"],
+        description="Commodity futures root, e.g. CL, GC, NG, LE.",
+    )
+    exchange: str | None = Field(default=None, description="Override the auto-resolved commodity exchange.")
+    currency: str | None = Field(default=None, description="Override the auto-resolved commodity currency.")
+    last_trade_date_or_contract_month: str | None = Field(
+        default=None,
+        examples=["202606"],
+        description="IBKR futures contract month or last trade date (YYYYMM or YYYYMMDD). Required unless local_symbol or con_id is given.",
+    )
+    local_symbol: str | None = Field(
+        default=None,
+        description="Optional IBKR local symbol; can replace the contract month.",
+    )
+    con_id: int | None = Field(default=None, gt=0, description="Optional IBKR contract id; can replace the contract month.")
+    start_date: datetime = Field(description="Start of the tick window (inclusive, UTC).")
+    end_date: datetime = Field(description="End of the tick window (exclusive, UTC).")
+    what_to_show: str = Field(
+        default="TRADES",
+        min_length=1,
+        description="IBKR tick data type: TRADES, BID_ASK, or MIDPOINT.",
+    )
+    use_rth: bool = Field(default=False, description="Restrict ticks to regular trading hours.")
+    max_ticks: int = Field(default=10_000, ge=1, le=100_000, description="Maximum ticks to return per request.")
 
     @model_validator(mode="after")
     def validate_future_identifier(self) -> "CommodityHistoricalTicksRequest":
@@ -369,11 +421,17 @@ class CommodityHistoricalTicksRequest(BaseModel):
 
 
 class CommodityNewsRequest(CommodityMetadataRequest):
-    provider_codes: tuple[str, ...] | None = None
-    start_datetime: datetime | None = None
-    end_datetime: datetime | None = None
-    max_results: int = Field(default=50, ge=1, le=300)
-    include_articles: bool = False
+    provider_codes: tuple[str, ...] | None = Field(
+        default=None,
+        description="News provider codes to query, e.g. ('BRF',). Defaults to every provider the account is entitled to.",
+    )
+    start_datetime: datetime | None = Field(default=None, description="Start of the news window (UTC). Defaults to IBKR's span.")
+    end_datetime: datetime | None = Field(default=None, description="End of the news window (UTC). Defaults to now.")
+    max_results: int = Field(default=50, ge=1, le=300, description="Maximum headlines to return.")
+    include_articles: bool = Field(
+        default=False,
+        description="Also fetch full article bodies (one IBKR request per headline).",
+    )
 
 
 class CommodityNewsHeadline(BaseModel):
@@ -658,6 +716,14 @@ async def load_futures_ohlcv(
     payload: Annotated[FutureOHLCVLoadRequest, Body(openapi_examples=FUTURES_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> FutureOHLCVResponseEnvelope:
+    """Load futures OHLCV bars with the asset class preset to future.
+
+    Dated futures require one identifier: contract month, local_symbol, or
+    con_id; continuous=true builds an IBKR CONTFUT series for latest-bars
+    requests only (bounded start/end windows are rejected with 422).
+    Returns the futures OHLCV envelope; oversized ranges auto-chunk up to
+    the configured cap.
+    """
     req = payload.to_request()
     request_meta = OHLCVRequestMeta(
         symbol=req.symbol,
@@ -708,6 +774,13 @@ async def load_commodity_ohlcv(
     payload: Annotated[CommodityOHLCVLoadRequest, Body(openapi_examples=COMMODITY_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> FutureOHLCVResponseEnvelope:
+    """Load commodity futures OHLCV bars with commodity venue presets.
+
+    Resolves common CME Group roots (CL, GC, NG, LE, ...) to NYMEX,
+    COMEX, CBOT, or CME automatically. Dated contracts need a contract
+    month, local_symbol, or con_id; continuous=true serves latest CONTFUT
+    bars only. Returns the futures OHLCV envelope.
+    """
     req = payload.to_request()
     request_meta = OHLCVRequestMeta(
         symbol=req.symbol,
@@ -758,6 +831,12 @@ async def load_commodity_option_ohlcv(
     payload: Annotated[CommodityOptionOHLCVLoadRequest, Body(openapi_examples=COMMODITY_OPTION_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> OptionOHLCVResponseEnvelope:
+    """Load commodity futures option (FOP) OHLCV bars.
+
+    Builds an IBKR secType=FOP contract from the underlying root, expiry,
+    strike, and right; trading_class, local_symbol, or con_id can pin an
+    ambiguous contract. Returns the option OHLCV envelope.
+    """
     req = payload.to_request()
     request_meta = OHLCVRequestMeta(
         symbol=req.symbol,
@@ -803,6 +882,12 @@ async def load_commodity_option_analytics(
     payload: Annotated[CommodityOptionAnalyticsLoadRequest, Body(openapi_examples=COMMODITY_OPTION_ANALYTICS_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> OptionAnalyticsSnapshot:
+    """Load price, model volatility, Greeks, volume, and OI for one futures option.
+
+    Uses a short-lived IBKR market-data subscription because generic ticks
+    are requested; unavailable fields stay null. Identical requests are
+    served from a TTL cache when enabled.
+    """
     request = payload.to_request()
 
     async def load() -> OptionAnalyticsSnapshot:
@@ -823,6 +908,14 @@ async def load_commodity_metadata(
     payload: Annotated[CommodityMetadataRequest, Body(openapi_examples=COMMODITY_METADATA_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> CommodityMetadataResponse:
+    """Qualify a commodity future and return its IBKR-native contract metadata.
+
+    Returns con_id, local symbol, trading class, min tick, and optionally
+    the market rules (price increments), the head timestamp, and trading
+    schedule sessions. Sections are opt-in via the include_* flags, and
+    the whole response is cached per TTL settings. Requires a contract
+    month, local_symbol, or con_id.
+    """
     async def load() -> CommodityMetadataResponse:
         request = payload.to_ohlcv_request()
         contract = await state.feed.qualify_contract(ContractSpec.from_ohlcv_request(request))
@@ -883,6 +976,13 @@ async def load_commodity_historical_ticks(
     payload: Annotated[CommodityHistoricalTicksRequest, Body(openapi_examples=COMMODITY_HISTORICAL_TICKS_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> HistoricalTickResponse:
+    """Load historical trade, bid/ask, or midpoint ticks for one commodity future.
+
+    Pulls reqHistoricalTicks for the contract and UTC window with no local
+    buffering; the response reports total_count and a truncated flag when
+    max_ticks caps the result. Requires a contract month, local_symbol,
+    or con_id.
+    """
     return await state.feed.load_historical_ticks(payload.to_request())
 
 
@@ -895,6 +995,13 @@ async def load_commodity_news(
     payload: Annotated[CommodityNewsRequest, Body(openapi_examples=COMMODITY_NEWS_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> CommodityNewsResponse:
+    """Load IBKR historical news headlines for one commodity future.
+
+    Qualifies the contract, validates provider codes against the
+    account's entitlements (422 when a code is not entitled), and returns
+    headlines plus optional article bodies. Unqualified contracts return
+    404 and missing provider availability returns 503.
+    """
     if payload.use_ttl_cache:
         key = stable_cache_key("commodity_news", payload)
         return await state.market_data_cache.get_or_set(key, lambda: _load_commodity_news(payload, state), ttl_seconds=payload.cache_ttl_seconds)

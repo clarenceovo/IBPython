@@ -74,12 +74,12 @@ class ReferenceRecord(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-    kind: Literal["universe", "corporate_action", "futures_roll", "trading_session"]
-    entity: str = Field(min_length=1)
-    key: str = Field(min_length=1)
-    effective_at: datetime
-    source: str = Field(min_length=1)
-    values: dict[str, Any]
+    kind: Literal["universe", "corporate_action", "futures_roll", "trading_session"] = Field(description="Record kind: 'universe', 'corporate_action', 'futures_roll', or 'trading_session'.")
+    entity: str = Field(min_length=1, description="Entity the record belongs to, for example a symbol or dataset key.")
+    key: str = Field(min_length=1, description="Record key within the entity.")
+    effective_at: datetime = Field(description="UTC time the record is effective at.")
+    source: str = Field(min_length=1, description="Provenance source label.")
+    values: dict[str, Any] = Field(description="Record payload. Keys depend on kind.")
 
     _utc = field_validator("effective_at")(aware_utc)
 

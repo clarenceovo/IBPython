@@ -97,9 +97,9 @@ class EventContractCategoryNode(BaseModel):
 class EventContractSearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1, examples=["FF", "NQ"])
+    symbol: str = Field(min_length=1, examples=["FF", "NQ"], description="Instrument symbol, for example 'AAPL', 'ES', 'EUR.USD'.")
     sec_type: EventContractSecType | None = Field(default=None, description="Use IND for CME underliers; omit for ForecastEx search.")
-    exchange: str | None = Field(default=None, min_length=1)
+    exchange: str | None = Field(default=None, min_length=1, description="Exchange or routing destination, for example 'SMART', 'NASDAQ', 'CME', 'IDEALPRO'.")
 
     @field_validator("symbol", "exchange", mode="before")
     @classmethod
@@ -141,9 +141,9 @@ class EventContractSearchResult(BaseModel):
 class EventContractStrikesRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    underlying_con_id: int = Field(gt=0)
-    exchange: str = Field(default=EventContractExchange.FORECASTX.value, min_length=1)
-    sec_type: EventContractSecType = EventContractSecType.OPTION
+    underlying_con_id: int = Field(gt=0, description="Contract ID of the underlying.")
+    exchange: str = Field(default=EventContractExchange.FORECASTX.value, min_length=1, description="Exchange or routing destination, for example 'SMART', 'NASDAQ', 'CME', 'IDEALPRO'.")
+    sec_type: EventContractSecType = Field(default=EventContractSecType.OPTION, description="IBKR security type: 'STK', 'FUT', 'OPT', 'CASH', 'IND', 'BOND'.")
     month: str = Field(min_length=1, description="IBKR Web API option month such as SEP24.")
 
     @field_validator("exchange", "month", mode="before")
@@ -168,8 +168,8 @@ class EventContractStrikesResponse(BaseModel):
 
 
 class EventContractInfoRequest(EventContractStrikesRequest):
-    strike: float | None = Field(default=None, gt=0)
-    right: Literal["C", "P"] | None = None
+    strike: float | None = Field(default=None, gt=0, description="Option strike price.")
+    right: Literal["C", "P"] | None = Field(default=None, description="Option right: 'C'/'CALL' or 'P'/'PUT' (case-insensitive).")
     trading_class_prefix: str | None = Field(
         default=None,
         description="Optional filter, useful for CME Event Contracts whose trading classes often start with EC.",
@@ -228,8 +228,8 @@ class EventContractInstrument(BaseModel):
 class EventContractSnapshotRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    con_ids: tuple[int, ...] = Field(min_length=1, max_length=100)
-    fields: tuple[str, ...] = Field(default=DEFAULT_EVENT_CONTRACT_FIELDS, min_length=1, max_length=50)
+    con_ids: tuple[int, ...] = Field(min_length=1, max_length=100, description="IBKR contract IDs to fetch.")
+    fields: tuple[str, ...] = Field(default=DEFAULT_EVENT_CONTRACT_FIELDS, min_length=1, max_length=50, description="Field names to return.")
 
     @field_validator("con_ids", mode="before")
     @classmethod
@@ -282,11 +282,11 @@ class EventContractMarketData(BaseModel):
 class EventContractHistoryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    con_id: int = Field(gt=0)
-    period: str = Field(default="2d", min_length=1)
-    bar: str = Field(default="1h", min_length=1)
-    start_time: datetime | str | None = None
-    outside_rth: bool | None = None
+    con_id: int = Field(gt=0, description="IBKR contract ID. Takes precedence over symbol when set.")
+    period: str = Field(default="2d", min_length=1, description="Lookback period, for example '1 D'.")
+    bar: str = Field(default="1h", min_length=1, description="Bar size for the history request.")
+    start_time: datetime | str | None = Field(default=None, description="UTC ISO-8601 window start.")
+    outside_rth: bool | None = Field(default=None, description="True: allow execution outside regular trading hours. Must be false for ERL/EPD.")
 
     @field_validator("period", "bar", mode="before")
     @classmethod
@@ -351,8 +351,8 @@ class EventContractHistoryResponse(BaseModel):
 class EventContractStreamingMessageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    con_id: int = Field(gt=0)
-    fields: tuple[str, ...] = Field(default=DEFAULT_EVENT_CONTRACT_FIELDS, min_length=1, max_length=50)
+    con_id: int = Field(gt=0, description="IBKR contract ID. Takes precedence over symbol when set.")
+    fields: tuple[str, ...] = Field(default=DEFAULT_EVENT_CONTRACT_FIELDS, min_length=1, max_length=50, description="Field names to return.")
 
     @field_validator("fields", mode="before")
     @classmethod
@@ -391,15 +391,15 @@ class EventContractOrderTicket(BaseModel):
 class EventContractOrderRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    account_id: str = Field(min_length=1)
-    con_id: int = Field(gt=0)
-    side: EventContractSide = EventContractSide.BUY
-    order_type: EventContractOrderType = EventContractOrderType.LIMIT
-    quantity: float = Field(gt=0)
-    price: float | None = Field(default=None, gt=0)
-    tif: EventContractTIF = EventContractTIF.DAY
-    exchange: str = Field(default=EventContractExchange.FORECASTX.value, min_length=1)
-    confirm_live_order: bool = False
+    account_id: str = Field(min_length=1, description="IBKR account ID, for example 'DU1234567'.")
+    con_id: int = Field(gt=0, description="IBKR contract ID. Takes precedence over symbol when set.")
+    side: EventContractSide = Field(default=EventContractSide.BUY, description="Order direction: 'BUY' or 'SELL'.")
+    order_type: EventContractOrderType = Field(default=EventContractOrderType.LIMIT, description="IBKR order type: 'MKT', 'LMT', 'STP', 'STP LMT', 'TRAIL', 'TRAIL LIMIT', 'MIDPRICE', 'LOC', 'MOC'.")
+    quantity: float = Field(gt=0, description="Order quantity in shares, contracts, or lots.")
+    price: float | None = Field(default=None, gt=0, description="Limit price. Required for limit order types.")
+    tif: EventContractTIF = Field(default=EventContractTIF.DAY, description="Time in force: 'DAY', 'GTC', 'OPG', 'IOC', 'FOK', 'DTC', 'GTD', or 'ERL'/'EPD' (EARLY session, live 2026-12-06).")
+    exchange: str = Field(default=EventContractExchange.FORECASTX.value, min_length=1, description="Exchange or routing destination, for example 'SMART', 'NASDAQ', 'CME', 'IDEALPRO'.")
+    confirm_live_order: bool = Field(default=False, description="Must be true to send a live order. Second gate next to the server flag.")
 
     @field_validator("account_id", "exchange", mode="before")
     @classmethod

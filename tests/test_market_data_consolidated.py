@@ -16,8 +16,10 @@ from urllib.parse import quote
 from fastapi.testclient import TestClient
 
 from src.config.settings import Settings
+from src.webapp.cache import AsyncTTLCache
 from src.feeds.contracts import ContractSpec
 from src.feeds.models import AssetClass, OHLCVBar, OHLCVRequest
+from src.feeds.ohlcv_loader import OHLCVLoader
 from src.feeds.snapshotter import EquitySnapshot
 from src.feeds.tick_data import MarketDepthLevel, MarketDepthSnapshot, TickByTickData, TickType
 
@@ -137,9 +139,11 @@ class FakeState:
     def __init__(self) -> None:
         self.settings = Settings()
         self.feed = FakeFeed()
-        self.loader = None
+        # Production wiring: the universal endpoint routes OHLCV through the
+        # loader + TTL cache (load_ohlcv_with_controls).
+        self.loader = OHLCVLoader(feed=self.feed)
         self.redis = FakeRedis()
-        self.market_data_cache = None
+        self.market_data_cache = AsyncTTLCache(ttl_seconds=60, max_size=16)
         self.fixed_income_reference_provider = None
         self.event_contracts = None
 
@@ -227,6 +231,7 @@ def _universal_state() -> tuple[FakeState, UniversalFakeFeed]:
     state = FakeState()
     feed = UniversalFakeFeed()
     state.feed = feed
+    state.loader = OHLCVLoader(feed=feed)
     return state, feed
 
 

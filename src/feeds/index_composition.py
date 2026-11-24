@@ -27,28 +27,28 @@ _INDEX_SCANNER_PRESETS: dict[str, dict[str, str]] = {
 class IndexConstituent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str = Field(min_length=1)
-    name: str = Field(default="")
-    weight: float | None = None
-    sector: str | None = None
-    exchange: str | None = None
-    currency: str | None = None
-    con_id: int | None = Field(default=None, gt=0)
-    rank: int | None = Field(default=None, ge=0)
-    sec_type: str | None = None
-    local_symbol: str | None = None
-    primary_exchange: str | None = None
+    symbol: str = Field(min_length=1, description="Constituent symbol, e.g. 0700 for Tencent on HSI.")
+    name: str = Field(default="", description="Display name of the constituent; empty when the provider reports none.")
+    weight: float | None = Field(default=None, description="Index weight in percent; null when the provider reports none.")
+    sector: str | None = Field(default=None, description="Sector classification; null when unknown.")
+    exchange: str | None = Field(default=None, description="Primary listing exchange of the constituent.")
+    currency: str | None = Field(default=None, description="ISO 4217 trading currency of the constituent.")
+    con_id: int | None = Field(default=None, gt=0, description="IBKR contract id when resolved; null otherwise.")
+    rank: int | None = Field(default=None, ge=0, description="Zero-based rank in the composition; null when unranked.")
+    sec_type: str | None = Field(default=None, description="IBKR security type, e.g. STK.")
+    local_symbol: str | None = Field(default=None, description="IBKR local symbol when resolved.")
+    primary_exchange: str | None = Field(default=None, description="Primary listing exchange used for IBKR qualification.")
 
 
 class IndexCompositionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    index_symbol: str = Field(min_length=1)
-    as_of: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    provider: str
-    is_official_composition: bool = True
-    constituents: list[IndexConstituent]
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    index_symbol: str = Field(min_length=1, description="Index symbol the composition describes, e.g. HSI.")
+    as_of: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="UTC time the composition was assembled.")
+    provider: str = Field(description="Composition source identifier, e.g. scanner_approximation.")
+    is_official_composition: bool = Field(default=True, description="False when the composition is a scanner approximation, not official index data.")
+    constituents: list[IndexConstituent] = Field(description="Index members with optional weights and ranks.")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Provider passthrough metadata (source preset, scanner row counts).")
 
 
 class IndexCompositionScannerRequest(BaseModel):
@@ -56,12 +56,12 @@ class IndexCompositionScannerRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    index_symbol: str = Field(min_length=1, examples=["HSI"])
-    max_results: int = Field(default=50, ge=1, le=50)
-    instrument: str | None = Field(default=None, min_length=1)
-    location_code: str | None = Field(default=None, min_length=1)
-    scan_code: str | None = Field(default=None, min_length=1)
-    filters: list[MarketScannerFilter] = Field(default_factory=list)
+    index_symbol: str = Field(min_length=1, examples=["HSI"], description="Index symbol; selects a scanner preset (e.g. HSI, SPX) or the default preset.")
+    max_results: int = Field(default=50, ge=1, le=50, description="Maximum number of scanner rows to include; IBKR caps scans at 50.")
+    instrument: str | None = Field(default=None, min_length=1, description="Override for the IBKR scanner instrument, e.g. STK.")
+    location_code: str | None = Field(default=None, min_length=1, description="Override for the IBKR scanner locationCode, e.g. STK.HK.")
+    scan_code: str | None = Field(default=None, min_length=1, description="Override for the IBKR scanner scanCode, e.g. TOP_MKT_CAP.")
+    filters: list[MarketScannerFilter] = Field(default_factory=list, description="Extra IBKR scanner filter tag/value pairs.")
 
 
 def resolve_index_composition_scanner_request(request: IndexCompositionScannerRequest) -> MarketScannerRequest:

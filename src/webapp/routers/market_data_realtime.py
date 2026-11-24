@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -24,32 +24,32 @@ _active_realtime_subscriptions: dict[str, dict[str, Any]] = {}
 
 
 class RealtimeSubscriptionInfo(BaseModel):
-    subscription_id: str
-    symbol: str
-    asset_class: str
-    exchange: str
-    currency: str
-    what_to_show: str
-    use_rth: bool
-    started_at: str
+    subscription_id: str = Field(description="Id of the subscription, also returned by /start.")
+    symbol: str = Field(description="Subscribed symbol.")
+    asset_class: str = Field(description="Asset class the bars are requested for.")
+    exchange: str = Field(description="IBKR exchange routing.")
+    currency: str = Field(description="Contract currency.")
+    what_to_show: str = Field(description="IBKR data type used for the bars, e.g. TRADES.")
+    use_rth: bool = Field(description="Whether bars are restricted to regular trading hours.")
+    started_at: str = Field(description="UTC ISO timestamp when the subscription started.")
 
 
 class RealtimeStartResponse(BaseModel):
-    status: str
-    subscription_id: str
-    symbol: str
-    message: str
+    status: str = Field(description="'started' or 'already_active'.")
+    subscription_id: str = Field(description="Id of the active subscription.")
+    symbol: str = Field(description="Subscribed symbol.")
+    message: str = Field(description="Human-readable status detail.")
 
 
 class RealtimeStatusResponse(BaseModel):
-    active_count: int
-    subscriptions: list[RealtimeSubscriptionInfo]
+    active_count: int = Field(description="Number of active real-time bar subscriptions.")
+    subscriptions: list[RealtimeSubscriptionInfo] = Field(description="Active subscription descriptors.")
 
 
 class RealtimeStopResponse(BaseModel):
-    status: str
-    subscription_id: str
-    symbol: str
+    status: str = Field(description="Always 'stopped'.")
+    subscription_id: str = Field(description="Id of the stopped subscription.")
+    symbol: str = Field(description="Symbol of the stopped subscription.")
 
 
 class RealtimeBarsStartRequest(BaseModel):
@@ -57,12 +57,23 @@ class RealtimeBarsStartRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str = Field(min_length=1)
-    asset_class: str = Field(default="EQUITY", min_length=1)
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
-    what_to_show: str = Field(default="TRADES", min_length=1)
-    use_rth: bool = True
+    symbol: str = Field(
+        min_length=1,
+        description="Ticker in IBKR notation, e.g. AAPL, ES, or EURUSD.",
+    )
+    asset_class: str = Field(
+        default="EQUITY",
+        min_length=1,
+        description="Asset class: equity, fx, future, bond, index, crypto, or option.",
+    )
+    exchange: str = Field(default="SMART", min_length=1, description="IBKR exchange or SMART for smart routing.")
+    currency: str = Field(default="USD", min_length=1, description="IBKR currency of the contract.")
+    what_to_show: str = Field(
+        default="TRADES",
+        min_length=1,
+        description="IBKR data type for the bars, e.g. TRADES, MIDPOINT, BID_ASK.",
+    )
+    use_rth: bool = Field(default=True, description="Restrict bars to regular trading hours.")
 
 
 @router.post("/start", summary="Start real-time 5-second bar subscription", response_model=RealtimeStartResponse)
@@ -70,7 +81,14 @@ async def start_realtime_bars(
     payload: RealtimeBarsStartRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> RealtimeStartResponse:
-    """Start a real-time 5-second bar subscription. Data is streamed via SSE."""
+    """Start a real-time 5-second bar subscription. Data is streamed via SSE.
+
+    Registers the contract for IBKR's realtime-bars feed and returns the
+    subscription id. Starting an already-active symbol returns
+    'already_active' with the existing id. Consume the bars with GET
+    /realtime-bars/stream/{symbol}; the registration itself does not open
+    the SSE stream.
+    """
     subscription_id = str(uuid.uuid4())[:8]
     key = payload.symbol.upper()
 
@@ -105,7 +123,11 @@ async def start_realtime_bars(
 async def realtime_bars_status(
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> RealtimeStatusResponse:
-    """Return the list of active real-time bar subscriptions."""
+    """Return the list of active real-time bar subscriptions.
+
+    Reads the in-memory registry; each entry echoes the request parameters
+    and the UTC start time. Registrations are single-process.
+    """
     subs = [
         RealtimeSubscriptionInfo(**v) for v in _active_realtime_subscriptions.values()
     ]
@@ -120,10 +142,14 @@ async def realtime_bars_status(
 # benefits from seeing the removed resource representation.
 @router.delete("/stop/{symbol}", summary="Stop real-time bar subscription", response_model=RealtimeStopResponse)
 async def stop_realtime_bars(
-    symbol: str,
+    symbol: str = Path(description="Symbol of the subscription to stop, matched case-insensitively."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> RealtimeStopResponse:
-    """Stop a real-time bar subscription by symbol."""
+    """Stop a real-time bar subscription by symbol.
+
+    Removes the registration; any open SSE stream for the symbol sees its
+    upstream end on the next event. Unknown symbols return 404.
+    """
     key = symbol.upper()
     sub = _active_realtime_subscriptions.pop(key, None)
     if sub is None:
@@ -137,11 +163,16 @@ async def stop_realtime_bars(
 
 @router.get("/stream/{symbol}", summary="SSE stream for real-time 5-second bars")
 async def stream_realtime_bars(
-    symbol: str,
+    symbol: str = Path(description="Symbol registered with POST /realtime-bars/start, e.g. AAPL."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> StreamingResponse:
-    """Stream real-time 5-second bars for a symbol via Server-Sent Events."""
+    """Stream real-time 5-second bars for a symbol via Server-Sent Events.
 
+    Requires a prior POST /realtime-bars/start for the symbol (404
+    otherwise). Each `data:` event is one bar JSON (OHLCV, wap renamed to
+    vwap, count renamed to trade_count). Errors surface as a data event
+    with an error field, and the stream ends with a stream_end event.
+    """
     key = symbol.upper()
     sub = _active_realtime_subscriptions.get(key)
     if sub is None:

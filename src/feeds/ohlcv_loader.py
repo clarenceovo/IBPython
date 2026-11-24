@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import Protocol
 
 from src.feeds.data_quality import DataQualityReport, validate_ohlcv_bars
@@ -11,6 +12,11 @@ from src.feeds.research import OHLCVLoadResult, TradingSession, utc_now
 from src.transport.analytics_store import AnalyticsStore
 
 logger = logging.getLogger(__name__)
+
+
+def _bar_sort_key(bar: OHLCVBar) -> datetime:
+    timestamp = bar.timestamp
+    return timestamp.replace(tzinfo=timezone.utc) if timestamp.tzinfo is None else timestamp
 
 
 class HistoricalOHLCVFeed(Protocol):
@@ -65,7 +71,9 @@ class OHLCVLoader:
         enqueue_repair: bool = True,
     ) -> OHLCVLoadResult:
         # Copy the list so validation and provenance do not mutate a feed's cache.
-        bars = sorted(bars, key=lambda b: b.timestamp.replace(tzinfo=timezone.utc) if b.timestamp.tzinfo is None else b.timestamp)
+        # Sort, validation, and the provenance copy are pure CPU over bar lists;
+        # they run in a worker thread so large payloads never block the loop.
+        bars = await asyncio.to_thread(lambda: sorted(bars, key=_bar_sort_key))
         if sessions is None and "trading_sessions" in request.metadata:
             sessions = [TradingSession.model_validate(s) for s in request.metadata["trading_sessions"]]
         if sessions is not None:
@@ -74,7 +82,9 @@ class OHLCVLoader:
         if stale_after_seconds is None:
             stale_after_seconds = request.metadata.get("stale_after_seconds")
         intervals = [(s.start, s.end) for s in sessions] if sessions is not None else None
-        quality = validate_ohlcv_bars(bars, request=request, sessions=intervals, stale_after_seconds=stale_after_seconds)
+        quality = await asyncio.to_thread(
+            validate_ohlcv_bars, bars, request=request, sessions=intervals, stale_after_seconds=stale_after_seconds
+        )
         self.last_quality_report = quality  # Legacy scheduler compatibility; detailed results are per-call.
         if quality.issues:
             logger.warning("OHLCV data quality report: %s", quality.summary())
@@ -99,11 +109,14 @@ class OHLCVLoader:
 
         if manifest is not None:
             # Provenance travels with cached bars; never infer it from last_quality_report.
-            bars = [b.model_copy(update={"metadata": {**b.metadata, "research_capture": {
+            provenance = {
                 "dataset_id": manifest.dataset_id, "captured_at": manifest.captured_at.isoformat(),
                 "series_key": manifest.series_key, "primary_persistence": status,
                 "archive_persistence": "stored", "quality": quality.summary(),
-            }}}) for b in bars]
+            }
+            bars = await asyncio.to_thread(
+                lambda: [b.model_copy(update={"metadata": {**b.metadata, "research_capture": provenance}}) for b in bars]
+            )
 
         if status != "failed" and cache_latest and bars and self.redis is not None:
             await self.cache_latest_bar(bars[-1])

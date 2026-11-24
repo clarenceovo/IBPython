@@ -47,7 +47,8 @@ async def consolidated_overview(
             "positions": state.feed.load_live_positions,
             "portfolio": lambda: state.feed.load_portfolio_items(account),
             "open_orders": state.feed.load_open_orders,
-        }
+        },
+        section_timeout_seconds=state.settings.ibkr_rest_consolidated_section_timeout_seconds,
     )
     return ConsolidatedOverviewResponse(
         requested_at=utc_now(),

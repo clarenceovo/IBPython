@@ -27,9 +27,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Awaitable
+from typing import Annotated, Any, Callable, Awaitable
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from src.config import config_constant as constants
 from src.config.settings import Settings, load_settings
@@ -246,6 +248,88 @@ MCP_ORDERS_DISABLED_ERROR = (
 )
 
 
+_READ_TOOL = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+_WRITE_TOOL = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+_ORDER_TOOL = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
+_DESTRUCTIVE_TOOL = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False)
+
+_AssetClassParam = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Asset class filter: crypto, equity, fx, future, index, bond, option. "
+            "Case-insensitive; aliases futures/stocks/equities/forex accepted."
+        )
+    ),
+]
+_BarSizeParam = Annotated[
+    str | None,
+    Field(description="IBKR bar size spelled exactly: '5 secs', '1 min', '5 mins', '15 mins', '30 mins', '1 hour', '4 hours', '1 day', '1 week', '1 month'."),
+]
+_WhatToShowParam = Annotated[
+    str,
+    Field(description="IBKR whatToShow value, e.g. TRADES, MIDPOINT, BID, ASK, BID_ASK, HISTORICAL_VOLATILITY, OPTION_IMPLIED_VOLATILITY, YIELD_BID, YIELD_ASK."),
+]
+_RightParam = Annotated[str, Field(description="Option right: 'C' or 'CALL', 'P' or 'PUT' (case-insensitive).")]
+_MarketDataTypeParam = Annotated[
+    int,
+    Field(description="IBKR market data type: 1=live, 2=frozen, 3=delayed, 4=delayed frozen."),
+]
+_ExerciseActionParam = Annotated[int, Field(description="Exercise action: 1=exercise, 2=lapse.")]
+_OcaTypeParam = Annotated[int, Field(description="OCA group type: 1=CancelAll, 2=ReduceRemaining, 3=ReducePosition (default 1).")]
+_MarketDataTypeOptParam = Annotated[int | None, Field(description="IBKR market data type: 1=live, 2=frozen, 3=delayed, 4=delayed frozen.")]
+_TifParam = Annotated[str, Field(description="Time in force: DAY, GTC, IOC, GTD, OPG, DTC, or ERL/EPD (EARLY session, live 2026-12-06; outside_rth must be false).")]
+_TifOptParam = Annotated[str | None, Field(description="Time in force: DAY, GTC, IOC, GTD, OPG, DTC, or ERL/EPD (EARLY session, live 2026-12-06; outside_rth must be false).")]
+_OrderTypeParam = Annotated[str, Field(description="Order type: LMT, MKT, STP, STP_LIMIT, TRAIL, TRAIL_LIMIT, MIDPRICE, BOX, ...")]
+_RightOptParam = Annotated[str | None, Field(description="Option right: 'C' or 'CALL', 'P' or 'PUT' (case-insensitive).")]
+
+
+def _error(message: str, *, code: str, retryable: bool = False) -> dict[str, Any]:
+    """Build the shared MCP error payload: message, stable code, retry flag."""
+    return {"error": message, "code": code, "retryable": retryable}
+
+
+def _tool_error(exc: BaseException) -> dict[str, Any]:
+    """Classify an exception into the shared MCP error payload."""
+    from src.feeds.exceptions import (
+        IBKRCircuitOpenError,
+        IBKRConnectionDisabledError,
+        IBKRConnectionError,
+        IBKRContractResolutionError,
+        IBKRMarketDataUnavailableError,
+        IBKROrderError,
+        IBKROrdersDisabledError,
+        IBKRPacingError,
+        IBKRUnsupportedFeatureError,
+        QuestDBConnectionError,
+    )
+
+    if isinstance(exc, IBKROrdersDisabledError):
+        return _error(MCP_ORDERS_DISABLED_ERROR, code="ORDERS_DISABLED")
+    if isinstance(exc, IBKRConnectionDisabledError):
+        return _error(str(exc), code="IBKR_DISABLED")
+    if isinstance(exc, IBKRCircuitOpenError):
+        return _error(str(exc), code="IBKR_CIRCUIT_OPEN", retryable=True)
+    if isinstance(exc, IBKRPacingError):
+        return _error(str(exc), code="IBKR_PACING", retryable=True)
+    if isinstance(exc, (IBKRConnectionError, ConnectionError, TimeoutError)):
+        return _error(str(exc), code="IBKR_UNAVAILABLE", retryable=True)
+    if isinstance(exc, IBKRContractResolutionError):
+        return _error(str(exc), code="CONTRACT_RESOLUTION_FAILED")
+    if isinstance(exc, IBKRMarketDataUnavailableError):
+        return _error(str(exc), code="MARKET_DATA_UNAVAILABLE", retryable=True)
+    if isinstance(exc, IBKROrderError):
+        return _error(str(exc), code="ORDER_REJECTED")
+    if isinstance(exc, IBKRUnsupportedFeatureError):
+        return _error(str(exc), code="FEATURE_REMOVED")
+    if isinstance(exc, QuestDBConnectionError):
+        return _error(str(exc), code="QUESTDB_UNAVAILABLE", retryable=True)
+    if isinstance(exc, ValueError):
+        return _error(str(exc), code="BAD_REQUEST")
+    return _error(str(exc), code="TOOL_ERROR")
+
+
+
 def _parse_asset_class(asset_class: str) -> Any:
     """Parse MCP asset_class text using AssetClass values, names, and documented aliases."""
     from src.feeds.models import AssetClass
@@ -272,14 +356,14 @@ def _parse_asset_class(asset_class: str) -> Any:
 def _require_questdb(ctx: Context) -> dict[str, Any] | None:
     """Return an error dict if QuestDB is not connected, else None."""
     if not ctx.request_context.lifespan_context.get("questdb_connected"):
-        return {"error": "QuestDB is not available"}
+        return _error("QuestDB is not available", code="QUESTDB_UNAVAILABLE", retryable=True)
     return None
 
 
 def _require_redis(ctx: Context) -> dict[str, Any] | None:
     """Return an error dict if Redis is not connected, else None."""
     if not ctx.request_context.lifespan_context.get("redis_connected"):
-        return {"error": "Redis is not available"}
+        return _error("Redis is not available", code="REDIS_UNAVAILABLE", retryable=True)
     return None
 
 
@@ -289,11 +373,13 @@ def _require_ibkr(ctx: Context) -> dict[str, Any] | None:
     connection = getattr(feed, "_connection", None)
     if connection is not None:
         if not connection.connection_enabled:
-            return {"error": "IBKR connection disabled by Redis control switch"}
+            return _error("IBKR connection disabled by Redis control switch", code="IBKR_DISABLED")
         # The Redis watcher can restore a connection after this context was created.
-        return None if connection.is_connected else {"error": "IBKR feed is not available"}
+        return None if connection.is_connected else _error(
+            "IBKR feed is not available", code="IBKR_UNAVAILABLE", retryable=True
+        )
     if not ctx.request_context.lifespan_context.get("ibkr_connected"):
-        return {"error": "IBKR feed is not available"}
+        return _error("IBKR feed is not available", code="IBKR_UNAVAILABLE", retryable=True)
     return None
 
 
@@ -301,12 +387,12 @@ def _require_ibkr(ctx: Context) -> dict[str, Any] | None:
 # QUESTDB — Historical Data Tools
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def query_historical_ohlcv(
     ctx: Context,
     symbol: str,
-    asset_class: str | None = None,
-    bar_size: str | None = None,
+    asset_class: _AssetClassParam = None,
+    bar_size: _BarSizeParam = None,
     contract_key: str | None = None,
     start: str | None = None,
     end: str | None = None,
@@ -366,11 +452,11 @@ async def query_historical_ohlcv(
     return envelope.model_dump(mode="json")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def query_latest_bars(
     ctx: Context,
-    asset_class: str | None = None,
-    bar_size: str | None = None,
+    asset_class: _AssetClassParam = None,
+    bar_size: _BarSizeParam = None,
     contract_key: str | None = None,
     limit: int = 100,
 ) -> dict[str, Any]:
@@ -385,6 +471,8 @@ async def query_latest_bars(
         limit: Max rows (default 100)
     """
     state = _state(ctx)
+    if err := _require_questdb(ctx):
+        return err
     from src.feeds.models import (
         OHLCVBar, OHLCVResponseEnvelope, OHLCVRequestMeta,
         compute_ohlcv_quality,
@@ -418,13 +506,14 @@ async def query_latest_bars(
         )
         return envelope.model_dump(mode="json")
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def query_raw_sql(
     ctx: Context,
     sql: str,
+    max_rows: int = 1000,
 ) -> dict[str, Any] | list[dict[str, Any]]:
     """Execute a raw SQL query against QuestDB.
 
@@ -433,8 +522,11 @@ async def query_raw_sql(
 
     Args:
         sql: QuestDB SQL query (SELECT only)
+        max_rows: Max rows returned (default 1000, max 5000; add your own LIMIT for less)
     """
     state = _state(ctx)
+    if err := _require_questdb(ctx):
+        return err
 
     # Strip block comments (/* ... */) and inline comments (--)
     stripped = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL).strip()
@@ -444,16 +536,16 @@ async def query_raw_sql(
 
     # Block remaining comment markers (unmatched delimiters)
     if "/*" in normalized or "*/" in normalized:
-        return {"error": "Malformed SQL block comments are not permitted"}
+        return _error("Malformed SQL block comments are not permitted", code="QUERY_REJECTED")
 
     # Block multi-statement injection: semicolons followed by non-whitespace
     if re.search(r";\s*\S", normalized):
-        return {"error": "Multi-statement queries are not permitted"}
+        return _error("Multi-statement queries are not permitted", code="QUERY_REJECTED")
 
     # Must start with an allowed keyword (SELECT or WITH for CTEs)
     first_keyword = normalized.split()[0].upper() if normalized else ""
     if first_keyword not in ("SELECT", "WITH"):
-        return {"error": "Only SELECT and WITH (CTE) queries are permitted"}
+        return _error("Only SELECT and WITH (CTE) queries are permitted", code="QUERY_REJECTED")
 
     # Block dangerous keywords anywhere in the query.
     # NOTE: This scans raw text including string literals, so queries like
@@ -465,23 +557,27 @@ async def query_raw_sql(
     )
     match = dangerous_keywords.search(normalized)
     if match:
-        return {"error": f"Keyword '{match.group(1).upper()}' is not permitted in queries"}
+        return _error(f"Keyword '{match.group(1).upper()}' is not permitted in queries", code="QUERY_REJECTED")
 
     try:
-        return await state.loader.questdb.fetch_dicts(stripped)
+        rows = await state.loader.questdb.fetch_dicts(stripped)
+        if isinstance(rows, list):
+            max_rows = min(max(max_rows, 1), 5000)
+            return rows[:max_rows]
+        return rows
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # REDIS CACHE — Latest Bars & Scheduler Status
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_latest_bar_from_cache(
     ctx: Context,
-    asset_class: str,
-    bar_size: str,
+    asset_class: _AssetClassParam,
+    bar_size: _BarSizeParam,
     symbol: str | None = None,
 ) -> dict[str, Any]:
     """Get the latest bar from Redis cache for a symbol or entire asset class.
@@ -492,6 +588,8 @@ async def get_latest_bar_from_cache(
         symbol: Optional specific symbol. If omitted, returns all cached bars for the class+bar_size.
     """
     state = _state(ctx)
+    if err := _require_redis(ctx):
+        return err
     bar = await state.redis.get_latest_bar(
         asset_class=_parse_asset_class(asset_class),
         bar_size=bar_size,
@@ -515,7 +613,7 @@ async def get_latest_bar_from_cache(
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def list_scheduler_jobs(
     ctx: Context,
 ) -> dict[str, Any]:
@@ -524,6 +622,8 @@ async def list_scheduler_jobs(
     Returns job names that can be used with other scheduler tools.
     """
     state = _state(ctx)
+    if err := _require_redis(ctx):
+        return err
     keys = await state.redis.scan_scheduler_jobs()
     return {"jobs": keys, "count": len(keys)}
 
@@ -534,43 +634,48 @@ _SENSITIVE_KEY_PATTERNS = re.compile(
 )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_redis_key(
     ctx: Context,
     key: str,
 ) -> dict[str, Any]:
     """Read a raw Redis key. For debugging and inspection.
 
+    Values longer than 20,000 characters are truncated; 'truncated' is true then.
+
     Args:
         key: Full Redis key to read
     """
     if _SENSITIVE_KEY_PATTERNS.search(key):
-        return {"error": "Access to this key is restricted"}
+        return _error("Access to this key is restricted", code="FORBIDDEN")
 
     state = _state(ctx)
+    if err := _require_redis(ctx):
+        return err
     raw = await state.redis.get_raw(key)
     if raw is None:
-        return {"message": f"Key '{key}' not found"}
+        return {"message": f"Key '{key}' not found", "code": "NOT_FOUND"}
     if isinstance(raw, bytes):
         try:
             raw = raw.decode("utf-8")
         except UnicodeDecodeError:
             raw = raw.hex()
-    return {"key": key, "value": raw}
+    truncated = len(raw) > 20_000
+    return {"key": key, "value": raw[:20_000], "truncated": truncated}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # IBKR LIVE FEED — Market Data & Account
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_option_chains(
     ctx: Context,
     symbol: str,
-    asset_class: str = "EQUITY",
+    asset_class: _AssetClassParam = "EQUITY",
     exchange: str = "SMART",
     currency: str = "USD",
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | dict[str, Any]:
     """Load option chain for a symbol from IBKR.
 
     Returns all available expirations and strikes for the given underlying.
@@ -604,10 +709,10 @@ async def load_option_chains(
             })
         return result
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_account_summary(
     ctx: Context,
     account: str = "",
@@ -622,13 +727,13 @@ async def load_account_summary(
         rows = await state.feed.load_account_summary(account=account)
         return {row.tag: {"value": row.value, "currency": row.currency} for row in rows}
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_live_positions(
     ctx: Context,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | dict[str, Any]:
     """Load all live positions from IBKR."""
     state = _state(ctx)
     try:
@@ -647,19 +752,19 @@ async def load_live_positions(
             for p in positions
         ]
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_historical_ohlcv_live(
     ctx: Context,
     symbol: str,
-    asset_class: str = "EQUITY",
+    asset_class: _AssetClassParam = "EQUITY",
     exchange: str = "SMART",
     currency: str = "USD",
-    bar_size: str = "1 day",
+    bar_size: _BarSizeParam = "1 day",
     duration: str = "1 M",
-    what_to_show: str = "TRADES",
+    what_to_show: _WhatToShowParam = "TRADES",
     use_rth: bool = True,
 ) -> dict[str, Any]:
     """Load historical OHLCV bars directly from IBKR (not QuestDB).
@@ -742,7 +847,7 @@ async def load_historical_ohlcv_live(
     return envelope.model_dump(mode="json")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def search_contracts(
     ctx: Context,
     pattern: str,
@@ -759,14 +864,14 @@ async def search_contracts(
             return {"message": "No matching contracts found"}
         return results
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # REFERENCE DATA
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_fundamentals(
     ctx: Context,
     symbol: str,
@@ -775,32 +880,23 @@ async def load_fundamentals(
 ) -> dict[str, Any]:
     """Unsupported legacy tool: IBKR removed fundamental reports in API 10.47.
 
-    Retained to return an explicit error to existing callers. Does not connect to IBKR.
+    Always returns an explicit FEATURE_REMOVED error. Does not connect to IBKR.
+    Use load_wsh_event_data for event calendars instead.
     """
-    state = _state(ctx)
-    from src.feeds.fundamental_data import FundamentalDataRequest
-
-    request = FundamentalDataRequest(
-        symbol=symbol,
-        exchange=exchange,
-        report_type=report_type,
+    return _error(
+        "fundamental reports were removed in TWS API 10.47; "
+        "use load_wsh_event_data (WSH events) or scan_market instead",
+        code="FEATURE_REMOVED",
     )
-    report = await state.feed.load_fundamental_data(request)
-    return {
-        "symbol": report.symbol,
-        "report_type": str(report.report_type),
-        "received_at": report.received_at.isoformat(),
-        "raw_xml": report.raw_xml[:5000],  # Truncate for MCP context limits
-    }
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_news(
     ctx: Context,
     symbol: str,
     provider_codes: list[str] | None = None,
     limit: int = 20,
-    asset_class: str = "EQUITY",
+    asset_class: _AssetClassParam = "EQUITY",
     exchange: str = "SMART",
     currency: str = "USD",
 ) -> dict[str, Any] | list[dict[str, Any]]:
@@ -824,7 +920,7 @@ async def load_news(
         contract = await state.feed.qualify_contract(spec)
         con_id = contract.conId
     except Exception:
-        return {"error": f"Could not resolve contract for {symbol}"}
+        return _error(f"Could not resolve contract for {symbol}", code="CONTRACT_RESOLUTION_FAILED")
 
     providers = tuple(provider_codes or ["BRFG", "BRFUPDN"])
     request = HistoricalNewsRequest(
@@ -840,7 +936,7 @@ async def load_news(
 # SNAPSHOTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def query_equity_snapshots(
     ctx: Context,
     symbol: str | None = None,
@@ -862,13 +958,13 @@ async def query_equity_snapshots(
     return await state.loader.questdb.query_snapshots(symbol=symbol, start=start_dt, end=end_dt, limit=limit)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def query_fx_option_snapshots(
     ctx: Context,
     symbol: str | None = None,
     expiry: str | None = None,
     strike: float | None = None,
-    right: str | None = None,
+    right: _RightOptParam = None,
     start: str | None = None,
     end: str | None = None,
     limit: int = 100,
@@ -885,6 +981,8 @@ async def query_fx_option_snapshots(
         limit: Max snapshots to return (default 100)
     """
     state = _state(ctx)
+    if err := _require_questdb(ctx):
+        return err
     start_dt = datetime.fromisoformat(start) if start else None
     end_dt = datetime.fromisoformat(end) if end else None
     return await state.loader.questdb.query_fx_option_snapshots(
@@ -897,7 +995,7 @@ async def query_fx_option_snapshots(
 # ACCOUNT — Portfolio & PnL
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_portfolio_items(
     ctx: Context,
     account: str = "",
@@ -915,10 +1013,10 @@ async def load_portfolio_items(
         items = await state.feed.load_portfolio_items(account=account)
         return [item.model_dump() for item in items]
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_account_pnl(
     ctx: Context,
     account: str = "",
@@ -942,10 +1040,10 @@ async def load_account_pnl(
         )
         return pnl.model_dump()
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_position_pnl(
     ctx: Context,
     account: str = "",
@@ -969,14 +1067,14 @@ async def load_position_pnl(
         )
         return pnl.model_dump()
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # NEWS — Providers & Articles
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_news_providers(
     ctx: Context,
 ) -> dict[str, Any] | list[dict[str, Any]]:
@@ -993,10 +1091,10 @@ async def load_news_providers(
             for p in providers
         ]
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_news_article(
     ctx: Context,
     provider_code: str,
@@ -1005,7 +1103,8 @@ async def load_news_article(
     """Load the full text of a news article from IBKR.
 
     Use load_news first to get headlines and article IDs, then call this
-    tool to retrieve the full article body.
+    tool to retrieve the full article body. Bodies longer than 20,000
+    characters are truncated; 'truncated' is true then.
 
     Args:
         provider_code: News provider code (e.g. 'BRFG', 'BRFUPDN')
@@ -1017,22 +1116,24 @@ async def load_news_article(
     try:
         request = NewsArticleRequest(provider_code=provider_code, article_id=article_id)
         article = await state.feed.load_news_article(request)
+        text = article.article_text
         return {
             "provider_code": article.provider_code,
             "article_id": article.article_id,
             "article_type": article.article_type,
-            "article_text": article.article_text,
+            "article_text": text[:20_000],
+            "truncated": len(text) > 20_000,
             "received_at": article.received_at.isoformat(),
         }
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # WSH — Wall Street Horizon
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_wsh_metadata(
     ctx: Context,
 ) -> dict[str, Any]:
@@ -1051,10 +1152,10 @@ async def load_wsh_metadata(
             "metadata": report.metadata,
         }
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_wsh_event_data(
     ctx: Context,
     con_id: int | None = None,
@@ -1094,10 +1195,10 @@ async def load_wsh_event_data(
             "metadata": report.metadata,
         }
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_economic_calendar(
     ctx: Context,
     country: str = "US",
@@ -1140,14 +1241,14 @@ async def load_economic_calendar(
             "metadata": report.metadata,
         }
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RESOURCES — Static reference data
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_latest_equity_snapshots(
     ctx: Context,
     symbols: str,
@@ -1165,23 +1266,23 @@ async def get_latest_equity_snapshots(
     try:
         symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
         if not symbol_list:
-            return {"error": "No valid symbols provided"}
+            return _error("No valid symbols provided", code="BAD_REQUEST")
         cached = await state.redis.get_latest_equity_snapshots(symbol_list)
         result = {}
         for sym, snapshot in cached.items():
             result[sym] = snapshot.model_dump(mode="json")
         return result
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_latest_fx_option_snapshot(
     ctx: Context,
     symbol: str,
     expiry: str,
     strike: float,
-    right: str,
+    right: _RightParam,
     exchange: str = "SMART",
     local_symbol: str | None = None,
     con_id: int | None = None,
@@ -1216,10 +1317,10 @@ async def get_latest_fx_option_snapshot(
             return {"message": "No cached FX option snapshot found for the given parameters"}
         return snapshot.model_dump(mode="json")
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_all_latest_equity_snapshots(
     ctx: Context,
     limit: int = 100,
@@ -1239,10 +1340,10 @@ async def get_all_latest_equity_snapshots(
         limit = max(1, min(limit, 1000))
         return await state.loader.questdb.query_latest_snapshots(limit=limit)
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def list_snapshot_watchlists(
     ctx: Context,
 ) -> dict[str, Any]:
@@ -1253,14 +1354,16 @@ async def list_snapshot_watchlists(
     if err := _require_redis(ctx):
         return err
     state = _state(ctx)
+    if err := _require_questdb(ctx):
+        return err
     try:
         keys = await state.redis.scan_snapshot_watchlists()
         return {"watchlists": keys, "count": len(keys)}
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_snapshot_watchlist(
     ctx: Context,
     name: str,
@@ -1285,7 +1388,7 @@ async def get_snapshot_watchlist(
         watchlist = SnapshotWatchlist.model_validate_json(payload)
         return watchlist.model_dump(mode="json")
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1293,14 +1396,14 @@ async def get_snapshot_watchlist(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_option_analytics(
     ctx: Context,
     symbol: str,
     expiry: str,
     strike: float,
-    right: str = "C",
-    asset_class: str = "EQUITY",
+    right: _RightParam = "C",
+    asset_class: _AssetClassParam = "EQUITY",
     exchange: str = "SMART",
     currency: str = "USD",
     multiplier: str = "100",
@@ -1336,14 +1439,14 @@ async def load_option_analytics(
         snapshot = await state.feed.load_option_analytics(request)
         return snapshot.model_dump(mode="json")
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_option_skew_surface(
     ctx: Context,
     symbol: str,
-    asset_class: str = "EQUITY",
+    asset_class: _AssetClassParam = "EQUITY",
     exchange: str = "SMART",
     currency: str = "USD",
     max_expirations: int = 6,
@@ -1380,10 +1483,10 @@ async def load_option_skew_surface(
         response = await state.feed.load_option_skew_surface(request)
         return response.model_dump(mode="json")
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_latest_ticks(
     ctx: Context,
     symbol: str,
@@ -1406,10 +1509,10 @@ async def get_latest_ticks(
         ticks = state.feed.get_latest_ticks(symbol, sec_type, exchange, n)
         return [t.model_dump(mode="json") for t in ticks]
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_historical_ticks(
     ctx: Context,
     symbol: str,
@@ -1418,7 +1521,7 @@ async def load_historical_ticks(
     sec_type: str = "STK",
     exchange: str = "SMART",
     currency: str = "USD",
-    what_to_show: str = "TRADES",
+    what_to_show: _WhatToShowParam = "TRADES",
     use_rth: bool = True,
     max_ticks: int = 10000,
 ) -> dict[str, Any]:
@@ -1455,10 +1558,10 @@ async def load_historical_ticks(
         response = await state.feed.load_historical_ticks(request)
         return response.model_dump(mode="json")
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def calculate_iv(
     ctx: Context,
     symbol: str,
@@ -1466,7 +1569,7 @@ async def calculate_iv(
     expiry: str,
     option_price: float,
     under_price: float,
-    right: str = "C",
+    right: _RightParam = "C",
     exchange: str = "SMART",
     currency: str = "USD",
     multiplier: str = "100",
@@ -1514,10 +1617,10 @@ async def calculate_iv(
             "implied_volatility": iv,
         }
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def calculate_option_price(
     ctx: Context,
     symbol: str,
@@ -1525,7 +1628,7 @@ async def calculate_option_price(
     expiry: str,
     implied_vol: float,
     under_price: float,
-    right: str = "C",
+    right: _RightParam = "C",
     exchange: str = "SMART",
     currency: str = "USD",
     multiplier: str = "100",
@@ -1573,17 +1676,17 @@ async def calculate_option_price(
             "option_price": price,
         }
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_head_timestamp(
     ctx: Context,
     symbol: str,
     sec_type: str = "STK",
     exchange: str = "SMART",
     currency: str = "USD",
-    what_to_show: str = "TRADES",
+    what_to_show: _WhatToShowParam = "TRADES",
     use_rth: bool = True,
 ) -> dict[str, Any]:
     """Get earliest available data date for a symbol from IBKR.
@@ -1615,10 +1718,10 @@ async def get_head_timestamp(
             "head_timestamp": ts.isoformat() if ts else None,
         }
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def scan_contracts(
     ctx: Context,
     symbol: str,
@@ -1652,10 +1755,10 @@ async def scan_contracts(
             return {"message": "No matching contracts found"}
         return [r.model_dump(mode="json") for r in results]
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_index_composition(
     ctx: Context,
     index_symbol: str,
@@ -1714,17 +1817,17 @@ async def get_index_composition(
             payload = await load()
         return payload.model_dump(mode="json")
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_bond_yield_history(
     ctx: Context,
     symbol: str,
     exchange: str = "SMART",
     currency: str = "USD",
     duration: str = "1 D",
-    bar_size: str = "1 day",
+    bar_size: _BarSizeParam = "1 day",
     use_rth: bool = True,
 ) -> dict[str, Any] | list[dict[str, Any]]:
     """Load historical bond yields from IBKR.
@@ -1751,21 +1854,21 @@ async def load_bond_yield_history(
         bars = await state.feed.load_bond_yield_history(request)
         return [b.model_dump(mode="json") for b in bars]
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_market_depth(
     ctx: Context,
     symbol: str,
-    asset_class: str = "EQUITY",
+    asset_class: _AssetClassParam = "EQUITY",
     exchange: str = "SMART",
     currency: str = "USD",
     num_rows: int = 5,
     sec_type: str = "STK",
     contract_month: str | None = None,
     strike: float | None = None,
-    right: str | None = None,
+    right: _RightOptParam = None,
 ) -> dict[str, Any]:
     """Load order book depth (Level 2 DOM snapshot) from IBKR.
 
@@ -1799,10 +1902,10 @@ async def get_market_depth(
         )
         return snapshot.model_dump(mode="json")
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_ibkr_rate_limits(
     ctx: Context,
 ) -> dict[str, Any]:
@@ -1816,10 +1919,10 @@ async def get_ibkr_rate_limits(
             return await snapshot_fn()  # type: ignore[misc]
         return {"enabled": False, "reason": "not_configured"}
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_scheduler_health(
     ctx: Context,
 ) -> dict[str, Any]:
@@ -1832,10 +1935,10 @@ async def get_scheduler_health(
         report = scheduler._health_monitor.get_health_status()
         return report.model_dump(mode="json")
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_cache_stats(
     ctx: Context,
 ) -> dict[str, Any]:
@@ -1845,18 +1948,18 @@ async def get_cache_stats(
         stats = await state.market_data_cache.stats()
         return {"size": stats.size, "max_size": stats.max_size, "default_ttl_seconds": stats.default_ttl_seconds}
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HISTOGRAM, REALTIME BARS & MARKET DATA TYPE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def request_histogram(
     ctx: Context,
     symbol: str,
-    asset_class: str = "EQUITY",
+    asset_class: _AssetClassParam = "EQUITY",
     exchange: str = "SMART",
     currency: str = "USD",
     use_rth: bool = True,
@@ -1899,20 +2002,20 @@ async def request_histogram(
             "total_count": len(buckets),
         }
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE_TOOL)
 async def subscribe_realtime_bars(
     ctx: Context,
     symbol: str,
-    asset_class: str = "EQUITY",
+    asset_class: _AssetClassParam = "EQUITY",
     exchange: str = "SMART",
     currency: str = "USD",
-    what_to_show: str = "TRADES",
+    what_to_show: _WhatToShowParam = "TRADES",
     use_rth: bool = True,
     duration_seconds: float = 60.0,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | dict[str, Any]:
     """Subscribe to 5-second real-time bars from IBKR.
 
     Returns collected 5-second bars over the specified duration.
@@ -1925,9 +2028,10 @@ async def subscribe_realtime_bars(
         currency: Currency (default 'USD')
         what_to_show: TRADES, MIDPOINT, BID, ASK, BID_ASK (default 'TRADES')
         use_rth: Regular trading hours only (default True)
-        duration_seconds: How long to collect bars in seconds (default 60)
+        duration_seconds: How long to collect bars in seconds (default 60, max 300)
     """
     state = _state(ctx)
+    duration_seconds = min(max(duration_seconds, 1.0), 300.0)
     bars: list[dict[str, Any]] = []
     try:
         bar_stream = await state.feed.subscribe_realtime_bars(
@@ -1956,23 +2060,23 @@ async def subscribe_realtime_bars(
     except TimeoutError:
         return bars if bars else [{"message": f"collected {len(bars)} bars in {duration_seconds}s"}]
     except Exception as e:
-        return [{"error": str(e)}]
+        return _tool_error(e)
 
 
-@mcp.tool()
-async def get_depth_exchanges(ctx: Context) -> list[dict[str, Any]]:
+@mcp.tool(annotations=_READ_TOOL)
+async def get_depth_exchanges(ctx: Context) -> list[dict[str, Any]] | dict[str, Any]:
     """Get available Level 2 market depth exchanges from IBKR."""
     state = _state(ctx)
     try:
         return await state.feed.get_depth_exchanges()
     except Exception as e:
-        return [{"error": str(e)}]
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE_TOOL)
 async def set_market_data_type(
     ctx: Context,
-    market_data_type: int = 1,
+    market_data_type: _MarketDataTypeOptParam = 1,
 ) -> dict[str, Any]:
     """Switch IBKR market data type.
 
@@ -1986,20 +2090,20 @@ async def set_market_data_type(
     try:
         return await state.feed.set_market_data_type(market_data_type)
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SERVER TIME, ORDER MANAGEMENT & OPTION EXERCISE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_gateway_capabilities(ctx: Context) -> dict[str, Any]:
     """Report implementation and client capabilities without connecting to IBKR."""
     return _state(ctx).feed.get_capabilities().model_dump(mode="json")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_equity_shortability(
     ctx: Context, symbol: str, exchange: str | None = None, currency: str | None = None,
     primary_exchange: str | None = None, con_id: int | None = None, timeout_seconds: float = 10,
@@ -2013,7 +2117,7 @@ async def load_equity_shortability(
     return (await _state(ctx).feed.load_equity_shortability(request)).model_dump(mode="json")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def load_equity_dividends(
     ctx: Context, symbol: str, exchange: str | None = None, currency: str | None = None,
     primary_exchange: str | None = None, con_id: int | None = None, timeout_seconds: float = 10,
@@ -2027,51 +2131,68 @@ async def load_equity_dividends(
     return (await _state(ctx).feed.load_equity_dividends(request)).model_dump(mode="json")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_server_time(ctx: Context) -> dict[str, Any]:
     """Get IBKR server time. Useful for latency measurement and clock sync."""
     state = _state(ctx)
     try:
         return await state.feed.get_server_time()
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
-async def cancel_all_orders(ctx: Context) -> dict[str, Any]:
-    """Cancel ALL open orders across all accounts. Use with extreme caution."""
+@mcp.tool(annotations=_DESTRUCTIVE_TOOL)
+async def cancel_all_orders(ctx: Context, confirm: bool = False) -> dict[str, Any]:
+    """Cancel ALL open orders across all accounts. Use with extreme caution.
+
+    Destructive and idempotent. Requires an explicit opt-in: pass
+    confirm=true, otherwise the tool returns CONFIRMATION_REQUIRED and
+    cancels nothing.
+    """
     state = _state(ctx)
     if not state.settings.ibkr_orders_enabled:
-        return {"error": MCP_ORDERS_DISABLED_ERROR}
+        return _error(MCP_ORDERS_DISABLED_ERROR, code="ORDERS_DISABLED")
+    if not confirm:
+        return _error(
+            "pass confirm=true to cancel all open orders",
+            code="CONFIRMATION_REQUIRED",
+        )
     try:
         return await state.feed.cancel_all_orders()
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
-async def get_all_open_orders(ctx: Context) -> list[dict[str, Any]]:
+@mcp.tool(annotations=_READ_TOOL)
+async def get_all_open_orders(
+    ctx: Context,
+    limit: int = 100,
+) -> list[dict[str, Any]] | dict[str, Any]:
     """Get all open orders across ALL API clients and TWS (not just current session).
 
     Unlike load_open_orders which returns only current client's orders,
     this returns orders from all API sessions and manually-placed TWS orders.
+
+    Args:
+        limit: Max orders to return (default 100, max 1000)
     """
     state = _state(ctx)
     try:
         orders = await state.feed.get_all_open_orders()
-        return [o.model_dump(mode="json") if hasattr(o, "model_dump") else o for o in orders]
+        limit = min(max(limit, 1), 1000)
+        return [o.model_dump(mode="json") if hasattr(o, "model_dump") else o for o in orders[:limit]]
     except Exception as e:
-        return [{"error": str(e)}]
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ORDER_TOOL)
 async def exercise_option(
     ctx: Context,
     symbol: str,
-    right: str,
+    right: _RightParam,
     strike: float,
     expiry: str,
-    exercise_action: int,
+    exercise_action: _ExerciseActionParam,
     quantity: int,
     account: str,
     exchange: str = "SMART",
@@ -2094,7 +2215,7 @@ async def exercise_option(
     """
     state = _state(ctx)
     if not state.settings.ibkr_orders_enabled:
-        return {"error": MCP_ORDERS_DISABLED_ERROR}
+        return _error(MCP_ORDERS_DISABLED_ERROR, code="ORDERS_DISABLED")
     try:
         return await state.feed.exercise_option(
             symbol=symbol,
@@ -2109,17 +2230,17 @@ async def exercise_option(
             override=override,
         )
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ORDER_TOOL)
 async def modify_order(
     ctx: Context,
     order_id: int,
     account: str,
     price: float | None = None,
     quantity: float | None = None,
-    tif: str | None = None,
+    tif: _TifOptParam = None,
 ) -> dict[str, Any]:
     """Modify an existing live order. Only pass fields you want to change.
 
@@ -2134,7 +2255,7 @@ async def modify_order(
 
     state = _state(ctx)
     if not state.settings.ibkr_orders_enabled:
-        return {"error": MCP_ORDERS_DISABLED_ERROR}
+        return _error(MCP_ORDERS_DISABLED_ERROR, code="ORDERS_DISABLED")
     try:
         tif_enum = TIFEnum(tif) if tif is not None else None
         modifications = ModifyOrderRequest(price=price, quantity=quantity, tif=tif_enum)
@@ -2145,19 +2266,19 @@ async def modify_order(
         )
         return result.model_dump(mode="json") if hasattr(result, "model_dump") else result
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def preview_order(
     ctx: Context,
     symbol: str,
     action: str = "BUY",
-    order_type: str = "LMT",
+    order_type: _OrderTypeParam = "LMT",
     quantity: float = 1.0,
     price: float | None = None,
     aux_price: float | None = None,
-    tif: str = "DAY",
+    tif: _TifParam = "DAY",
     account: str | None = None,
     sec_type: str = "STK",
     exchange: str = "SMART",
@@ -2184,7 +2305,7 @@ async def preview_order(
 
     state = _state(ctx)
     if not state.settings.ibkr_orders_enabled:
-        return {"error": MCP_ORDERS_DISABLED_ERROR}
+        return _error(MCP_ORDERS_DISABLED_ERROR, code="ORDERS_DISABLED")
     try:
         request = PlaceOrderRequest(
             symbol=symbol,
@@ -2203,24 +2324,24 @@ async def preview_order(
         result = await state.feed.preview_order(request)
         return result.model_dump(mode="json") if hasattr(result, "model_dump") else result
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # VOLATILITY, YIELD & TRADING SCHEDULE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_historical_volatility(
     ctx: Context,
     symbol: str,
-    asset_class: str = "EQUITY",
+    asset_class: _AssetClassParam = "EQUITY",
     exchange: str = "SMART",
     currency: str = "USD",
-    bar_size: str = "1 day",
+    bar_size: _BarSizeParam = "1 day",
     duration: str = "1 Y",
     use_rth: bool = True,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | dict[str, Any]:
     """Get historical volatility time series from IBKR.
 
     Uses IBKR's built-in HISTORICAL_VOLATILITY whatToShow — no manual computation needed.
@@ -2274,20 +2395,20 @@ async def get_historical_volatility(
             for bar in bars
         ]
     except Exception as e:
-        return [{"error": str(e)}]
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_option_implied_volatility_series(
     ctx: Context,
     symbol: str,
-    asset_class: str = "EQUITY",
+    asset_class: _AssetClassParam = "EQUITY",
     exchange: str = "SMART",
     currency: str = "USD",
-    bar_size: str = "1 day",
+    bar_size: _BarSizeParam = "1 day",
     duration: str = "6 M",
     use_rth: bool = True,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | dict[str, Any]:
     """Get option implied volatility time series from IBKR.
 
     Uses IBKR's built-in OPTION_IMPLIED_VOLATILITY whatToShow for the underlying.
@@ -2341,20 +2462,20 @@ async def get_option_implied_volatility_series(
             for bar in bars
         ]
     except Exception as e:
-        return [{"error": str(e)}]
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_yield_data(
     ctx: Context,
     symbol: str,
-    what_to_show: str = "YIELD_LAST",
-    bar_size: str = "1 day",
+    what_to_show: _WhatToShowParam = "YIELD_LAST",
+    bar_size: _BarSizeParam = "1 day",
     duration: str = "1 Y",
     exchange: str = "SMART",
     currency: str = "USD",
     use_rth: bool = True,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | dict[str, Any]:
     """Get bond yield time series from IBKR.
 
     Uses IBKR yield-specific whatToShow values.
@@ -2408,19 +2529,19 @@ async def get_yield_data(
             for bar in bars
         ]
     except Exception as e:
-        return [{"error": str(e)}]
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_trading_schedule(
     ctx: Context,
     symbol: str,
-    asset_class: str = "EQUITY",
+    asset_class: _AssetClassParam = "EQUITY",
     exchange: str = "SMART",
     currency: str = "USD",
     end_date: str = "",
     num_days: int = 7,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | dict[str, Any]:
     """Get trading schedule for any instrument from IBKR.
 
     Returns session open/close times, overnight flags, and trading status.
@@ -2460,14 +2581,14 @@ async def get_trading_schedule(
             ]
         return [schedule.model_dump(mode="json")] if hasattr(schedule, "model_dump") else [schedule]
     except Exception as e:
-        return [{"error": str(e)}]
+        return _tool_error(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # BRACKET ORDERS, OCA GROUPS & MARKET SCANNER
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp.tool()
+@mcp.tool(annotations=_ORDER_TOOL)
 async def place_bracket_order(
     ctx: Context,
     symbol: str,
@@ -2476,9 +2597,9 @@ async def place_bracket_order(
     limit_price: float | None = None,
     take_profit_price: float | None = None,
     stop_loss_price: float | None = None,
-    order_type: str = "LMT",
-    tif: str = "GTC",
-    asset_class: str = "EQUITY",
+    order_type: _OrderTypeParam = "LMT",
+    tif: _TifParam = "GTC",
+    asset_class: _AssetClassParam = "EQUITY",
     exchange: str = "SMART",
     currency: str = "USD",
     account: str = "",
@@ -2493,152 +2614,88 @@ async def place_bracket_order(
         action: BUY or SELL (default 'BUY')
         quantity: Order quantity (default 1.0)
         limit_price: Limit price for entry order (required for LMT orders)
-        take_profit_price: Take-profit limit price
-        stop_loss_price: Stop-loss trigger price
+        take_profit_price: Take-profit limit price (required)
+        stop_loss_price: Stop-loss trigger price (required)
         order_type: MKT or LMT (default 'LMT')
         tif: Time in force: DAY, GTC, IOC, GTD (default 'GTC')
         asset_class: EQUITY, FUTURE, OPTION (default 'EQUITY')
         exchange: Exchange (default 'SMART')
         currency: Currency (default 'USD')
         account: IBKR account ID
+
+    Validation and placement go through the same guarded order client as
+    POST /api/v1/orders/bracket (master switch, risk config, typed responses).
     """
     state = _state(ctx)
     if not state.settings.ibkr_orders_enabled:
-        return {"error": MCP_ORDERS_DISABLED_ERROR}
+        return _error(MCP_ORDERS_DISABLED_ERROR, code="ORDERS_DISABLED")
     try:
-        ib = state.feed._connection.ib
-        if ib is None:
-            return {"error": "IBKR connection not available"}
+        from src.feeds.orders import BracketOrderRequest
 
-        # Build the contract
-        ac = _parse_asset_class(asset_class)
-        sec_type_map = {"EQUITY": "STK", "FUTURE": "FUT", "OPTION": "OPT", "FX": "CASH", "INDEX": "IND", "BOND": "BOND"}
-        sec_type = sec_type_map.get(ac.value if hasattr(ac, "value") else str(ac), "STK")
-
-        from ib_async import Contract
-        contract = Contract(symbol=symbol, secType=sec_type, exchange=exchange, currency=currency)
-        qualified = await ib.qualifyContractsAsync(contract)
-        if not qualified:
-            return {"error": f"Could not qualify contract for {symbol}"}
-        contract = qualified[0]
-
-        # Build bracket order
-        bracket = ib.bracketOrder(
-            action=action.upper(),
-            quantity=quantity,
-            limitPrice=limit_price or 0.0,
-            takeProfitPrice=take_profit_price or 0.0,
-            stopLossPrice=stop_loss_price or 0.0,
+        request = BracketOrderRequest.model_validate(
+            {
+                "symbol": symbol,
+                "action": action,
+                "quantity": quantity,
+                "limit_price": limit_price,
+                "take_profit_price": take_profit_price,
+                "stop_loss_price": stop_loss_price,
+                "order_type": order_type,
+                "tif": tif,
+                "asset_class": asset_class or "EQUITY",
+                "exchange": exchange,
+                "currency": currency,
+                "account": account,
+            }
         )
-
-        # Override order type and TIF on parent
-        bracket.orders[0].orderType = order_type.upper()
-        bracket.orders[0].tif = tif
-
-        # Set account on all orders
-        if account:
-            for o in bracket.orders:
-                o.account = account
-
-        # Place all orders
-        trades = []
-        for o in bracket.orders:
-            trade = ib.placeOrder(contract, o)
-            trades.append(trade)
-
-        return {
-            "symbol": symbol,
-            "action": action,
-            "quantity": quantity,
-            "orders_placed": len(trades),
-            "parent_order_id": bracket.orders[0].orderId if bracket.orders else None,
-            "take_profit_order_id": bracket.orders[1].orderId if len(bracket.orders) > 1 else None,
-            "stop_loss_order_id": bracket.orders[2].orderId if len(bracket.orders) > 2 else None,
-        }
+        response = await state.feed.place_bracket_order(request)
+        return response.model_dump(mode="json")
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ORDER_TOOL)
 async def place_oca_group(
     ctx: Context,
     orders: list[dict[str, Any]],
     oca_group: str = "",
-    oca_type: int = 1,
+    oca_type: _OcaTypeParam = 1,
     account: str = "",
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | dict[str, Any]:
     """Place a One-Cancels-All group of orders.
 
     When any order in the group fills, all others are automatically cancelled.
 
     Args:
-        orders: List of order dicts, each with: symbol, action, quantity, order_type, price?, asset_class?, exchange?, currency?
+        orders: List of 2+ order dicts, each with: symbol, action, quantity, order_type, price (required for LMT), tif?, asset_class?, exchange?, currency?
         oca_group: OCA group name (auto-generated if empty)
         oca_type: 1=CancelAll, 2=ReduceRemaining, 3=ReducePosition (default 1)
         account: IBKR account ID
+
+    Validation and placement go through the same guarded order client as
+    POST /api/v1/orders/oca (master switch, risk config, typed responses).
     """
     state = _state(ctx)
     if not state.settings.ibkr_orders_enabled:
-        return [{"error": MCP_ORDERS_DISABLED_ERROR}]
+        return _error(MCP_ORDERS_DISABLED_ERROR, code="ORDERS_DISABLED")
     try:
-        import uuid
-        from ib_async import Contract, Order
+        from src.feeds.orders import OcaGroupRequest
 
-        ib = state.feed._connection.ib
-        if ib is None:
-            return [{"error": "IBKR connection not available"}]
-
-        group_name = oca_group or f"oca_{uuid.uuid4().hex[:8]}"
-        sec_type_map = {"EQUITY": "STK", "FUTURE": "FUT", "OPTION": "OPT", "FX": "CASH", "INDEX": "IND", "BOND": "BOND"}
-        results = []
-
-        for i, od in enumerate(orders):
-            sym = od.get("symbol", "")
-            act = od.get("action", "BUY").upper()
-            qty = od.get("quantity", 1)
-            ot = od.get("order_type", "LMT").upper()
-            price = od.get("price")
-            ac_str = od.get("asset_class", "EQUITY")
-            exch = od.get("exchange", "SMART")
-            curr = od.get("currency", "USD")
-
-            ac = _parse_asset_class(ac_str)
-            sec_type = sec_type_map.get(ac.value if hasattr(ac, "value") else str(ac), "STK")
-
-            contract = Contract(symbol=sym, secType=sec_type, exchange=exch, currency=curr)
-            qualified = await ib.qualifyContractsAsync(contract)
-            if not qualified:
-                results.append({"error": f"Could not qualify contract for {sym}", "symbol": sym})
-                continue
-            contract = qualified[0]
-
-            order = Order()
-            order.action = act
-            order.quantity = qty
-            order.orderType = ot
-            order.tif = "GTC"
-            order.ocaGroup = group_name
-            order.ocaType = oca_type
-            if price is not None:
-                order.lmtPrice = price
-            if account:
-                order.account = account
-
-            trade = ib.placeOrder(contract, order)
-            results.append({
-                "symbol": sym,
-                "action": act,
-                "quantity": qty,
-                "order_id": trade.order.orderId,
-                "oca_group": group_name,
-            })
-
-        return results
+        request = OcaGroupRequest.model_validate(
+            {
+                "orders": orders,
+                "oca_group": oca_group,
+                "oca_type": oca_type,
+                "account": account,
+            }
+        )
+        responses = await state.feed.place_oca_group(request)
+        return [r.model_dump(mode="json") for r in responses]
     except Exception as e:
-        return [{"error": str(e)}]
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def scan_market(
     ctx: Context,
     instrument: str = "STK",
@@ -2650,7 +2707,7 @@ async def scan_market(
     market_cap_above: float | None = None,
     market_cap_below: float | None = None,
     max_results: int = 50,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | dict[str, Any]:
     """Run an IBKR market scanner with customizable filters.
 
     Uses IBKR's built-in scanner to find instruments matching criteria.
@@ -2680,10 +2737,10 @@ async def scan_market(
             max_results=max_results,
         )
     except Exception as e:
-        return [{"error": str(e)}]
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_scanner_parameters(ctx: Context) -> dict[str, Any]:
     """Get available IBKR scanner parameters (instruments, filters, locations).
 
@@ -2694,18 +2751,18 @@ async def get_scanner_parameters(ctx: Context) -> dict[str, Any]:
     try:
         return await state.feed.get_scanner_parameters()
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # NEWS BULLETINS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def get_news_bulletins(
     ctx: Context,
     all_messages: bool = True,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | dict[str, Any]:
     """Get IBKR system news bulletins (exchange halts, margin changes, etc).
 
     Args:
@@ -2715,14 +2772,14 @@ async def get_news_bulletins(
     try:
         return await state.feed.get_news_bulletins(all_messages=all_messages)
     except Exception as e:
-        return [{"error": str(e)}]
+        return _tool_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_TOOL)
 async def resolve_symbol(
     ctx: Context,
     symbol: str,
-    asset_class: str | None = None,
+    asset_class: _AssetClassParam = None,
     exchange: str | None = None,
     currency: str | None = None,
 ) -> dict[str, Any]:
@@ -2747,7 +2804,7 @@ async def resolve_symbol(
         resolved = _resolve_symbol(symbol, asset_class=pinned, exchange=exchange, currency=currency)
         return resolved.describe()
     except Exception as e:
-        return {"error": str(e)}
+        return _tool_error(e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

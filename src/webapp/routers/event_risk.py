@@ -29,7 +29,6 @@ import logging
 import re
 from datetime import date, datetime, timezone
 from typing import Annotated, Any
-
 from fastapi import APIRouter, Body, Depends
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -70,8 +69,8 @@ class EventSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    date: date
-    label: str = Field(default="event", min_length=1)
+    date: Annotated[date, Field(description="Event date (ISO 8601).")]
+    label: str = Field(default="event", min_length=1, description="Event description. Symbols are matched on word boundaries, e.g. 'AAPL earnings' matches AAPL but not 'TESLA earnings'.")
 
 
 class UnderlyingEventRiskRequest(BaseModel):
@@ -79,14 +78,14 @@ class UnderlyingEventRiskRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str = Field(min_length=1, examples=["AAPL"])
-    asset_class: str = Field(default="EQUITY", examples=["EQUITY", "INDEX"])
-    exchange: str = Field(default="SMART")
-    currency: str = Field(default="USD")
-    min_days_to_expiry: int = Field(default=7, ge=0, le=365)
-    max_expiries: int = Field(default=4, ge=1, le=12)
-    events: list[EventSpec] = Field(default_factory=list)
-    iv_history_days: int = Field(default=252, ge=30, le=5000)
+    symbol: str = Field(min_length=1, examples=["AAPL"], description="Underlying symbol, e.g. AAPL or SPX.")
+    asset_class: str = Field(default="EQUITY", examples=["EQUITY", "INDEX"], description="Underlying asset class: EQUITY or INDEX (case-insensitive).")
+    exchange: str = Field(default="SMART", description="Option exchange to load the chain from, e.g. SMART or CBOE.")
+    currency: str = Field(default="USD", description="ISO 4217 currency, e.g. USD.")
+    min_days_to_expiry: int = Field(default=7, ge=0, le=365, description="Skip expiries closer than this many calendar days.")
+    max_expiries: int = Field(default=4, ge=1, le=12, description="Number of eligible expiries to include in the IV term structure.")
+    events: list[EventSpec] = Field(default_factory=list, description="User-supplied event dates; IBKR WSH lookups are not attempted. Labels are matched to the symbol on word boundaries.")
+    iv_history_days: int = Field(default=252, ge=30, le=5000, description="Days of OPTION_IMPLIED_VOLATILITY history for the IV rank.")
 
 
 class TermStructurePoint(BaseModel):
@@ -94,9 +93,9 @@ class TermStructurePoint(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    expiry: str
-    days_to_expiry: int
-    atm_iv: float | None = None
+    expiry: str = Field(description="Option expiry (YYYYMMDD).")
+    days_to_expiry: int = Field(description="Calendar days from today to expiry.")
+    atm_iv: float | None = Field(default=None, description="Average of the ATM call and put implied volatilities; null when both legs are missing.")
 
 
 class IVHistoryStats(BaseModel):
@@ -104,12 +103,12 @@ class IVHistoryStats(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    observations: int
-    mean_iv: float | None = None
-    min_iv: float | None = None
-    max_iv: float | None = None
-    current_iv: float | None = None
-    iv_rank_pct: float | None = None
+    observations: int = Field(description="Number of IV history bars used.")
+    mean_iv: float | None = Field(default=None, description="Mean IV over the history window.")
+    min_iv: float | None = Field(default=None, description="Minimum IV in the window.")
+    max_iv: float | None = Field(default=None, description="Maximum IV in the window.")
+    current_iv: float | None = Field(default=None, description="Current ATM IV used as the rank reference.")
+    iv_rank_pct: float | None = Field(default=None, description="IV rank in percent (0-100) against the window; null when the window is flat or empty.")
 
 
 class UnderlyingEventRiskResponse(BaseModel):
@@ -117,21 +116,21 @@ class UnderlyingEventRiskResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    symbol: str
-    selected_expiry: str | None = None
-    days_to_expiry: int | None = None
-    atm_strike: float | None = None
-    underlying_price: float | None = None
-    straddle_price: float | None = None
-    expected_move_abs: float | None = None
-    expected_move_pct: float | None = None
-    expected_move_approx: float | None = None
-    atm_iv: float | None = None
-    term_structure: list[TermStructurePoint] = Field(default_factory=list)
-    iv_history: IVHistoryStats | None = None
-    nearest_event: EventSpec | None = None
-    warnings: list[str] = Field(default_factory=list)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="UTC time the response was assembled.")
+    symbol: str = Field(description="Uppercase underlying symbol.")
+    selected_expiry: str | None = Field(default=None, description="Nearest eligible expiry (YYYYMMDD); null when none qualified.")
+    days_to_expiry: int | None = Field(default=None, description="Calendar days to the selected expiry; null when none qualified.")
+    atm_strike: float | None = Field(default=None, description="Strike closest to the underlying price.")
+    underlying_price: float | None = Field(default=None, description="Reference underlying price; falls back to the chain strike midpoint when unavailable.")
+    straddle_price: float | None = Field(default=None, description="ATM call mid plus ATM put mid, times the multiplier (dollars).")
+    expected_move_abs: float | None = Field(default=None, description="One-standard-deviation move in price units; equals the straddle price.")
+    expected_move_pct: float | None = Field(default=None, description="Straddle price divided by the underlying price (decimal fraction).")
+    expected_move_approx: float | None = Field(default=None, description="Event-window approximation: straddle price times 0.8.")
+    atm_iv: float | None = Field(default=None, description="Average ATM call and put IV at the selected expiry.")
+    term_structure: list[TermStructurePoint] = Field(default_factory=list, description="ATM IV per eligible expiry, up to max_expiries points.")
+    iv_history: IVHistoryStats | None = Field(default=None, description="IV history stats and rank; null when history is unavailable.")
+    nearest_event: EventSpec | None = Field(default=None, description="Nearest future event whose label mentions the symbol on a word boundary; null when none matches.")
+    warnings: list[str] = Field(default_factory=list, description="Degradation notes; a response with only warnings and null metrics means the chain or quotes were unavailable.")
 
 
 class EventExposureRequest(BaseModel):
@@ -139,10 +138,10 @@ class EventExposureRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    account: str = Field(default="ALL", examples=["ALL", "U1234567"])
-    horizon_days: int = Field(default=10, ge=1, le=365)
-    assumed_iv_crush_pts: float = Field(default=8.0, gt=0.0)
-    events: list[EventSpec] = Field(default_factory=list)
+    account: str = Field(default="ALL", examples=["ALL", "U1234567"], description="Account filter for positions; ALL keeps every account.")
+    horizon_days: int = Field(default=10, ge=1, le=365, description="Only events within this many calendar days count as exposed.")
+    assumed_iv_crush_pts: float = Field(default=8.0, gt=0.0, description="Assumed implied-volatility drop in points applied to net vega.")
+    events: list[EventSpec] = Field(default_factory=list, description="User-supplied event dates; underlyings without a matching event are listed in no_event_data_symbols.")
 
 
 class ExposedUnderlying(BaseModel):
@@ -150,12 +149,12 @@ class ExposedUnderlying(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    underlying: str
-    option_position_count: int
-    net_vega_per_pt: float | None = None
-    days_to_event: int
-    event_label: str
-    vega_at_risk: float | None = None
+    underlying: str = Field(description="Uppercase underlying symbol.")
+    option_position_count: int = Field(description="Number of option positions on the underlying.")
+    net_vega_per_pt: float | None = Field(default=None, description="Net vega per volatility point across the underlying's options; null when vega could not be resolved.")
+    days_to_event: int = Field(description="Calendar days until the matched event.")
+    event_label: str = Field(description="Label of the matched event.")
+    vega_at_risk: float | None = Field(default=None, description="Absolute net vega times assumed_iv_crush_pts; null when vega is unknown.")
 
 
 class EventExposureResponse(BaseModel):
@@ -163,14 +162,14 @@ class EventExposureResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    account: str = "ALL"
-    horizon_days: int = 10
-    assumed_iv_crush_pts: float = 8.0
-    exposed: list[ExposedUnderlying] = Field(default_factory=list)
-    total_vega_at_risk: float | None = None
-    no_event_data_symbols: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="UTC time the response was assembled.")
+    account: str = Field(default="ALL", description="Account filter echoed back.")
+    horizon_days: int = Field(default=10, description="Event horizon in days, echoed back.")
+    assumed_iv_crush_pts: float = Field(default=8.0, description="Assumed IV crush in points, echoed back.")
+    exposed: list[ExposedUnderlying] = Field(default_factory=list, description="Underlyings with a matched event inside the horizon, sorted by symbol.")
+    total_vega_at_risk: float | None = Field(default=None, description="Sum of vega_at_risk over underlyings with known vega; null when none is known.")
+    no_event_data_symbols: list[str] = Field(default_factory=list, description="Option underlyings with no matched event; supply events to cover them.")
+    warnings: list[str] = Field(default_factory=list, description="Degradation notes, for example positions unavailable or vega missing.")
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +304,15 @@ async def get_underlying_event_risk(
     payload: Annotated[UnderlyingEventRiskRequest, Body(openapi_examples={"aapl": {"value": {"symbol": "AAPL"}}})],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> UnderlyingEventRiskResponse:
-    """Expected move, ATM IV term structure, and IV history for one symbol."""
+    """Expected move, ATM IV term structure, and IV history for one symbol.
+
+    Loads the option chain, prices the ATM straddle at the nearest eligible
+    expiry, and reports the one-standard-deviation expected move (straddle
+    price) plus the 0.8 event approximation. Also returns ATM IV per expiry
+    (term_structure) and IV rank against iv_history_days of history. Missing
+    data never fails the request: metrics stay null and warnings explains
+    what was skipped.
+    """
     warnings: list[str] = []
     response = UnderlyingEventRiskResponse(symbol=payload.symbol.upper(), warnings=warnings)
     today = datetime.now(tz=timezone.utc).date()
@@ -454,7 +461,16 @@ async def get_event_exposure(
     payload: Annotated[EventExposureRequest, Body(openapi_examples={"default": {"value": {}}})],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> EventExposureResponse:
-    """Option underlyings with events inside the horizon and their vega at risk."""
+    """Option underlyings with events inside the horizon and their vega at risk.
+
+    Reads live option positions, matches each underlying against the
+    user-supplied events (word-boundary label match), resolves net vega per
+    underlying from IBKR model Greeks, and applies the assumed
+    implied-volatility crush to compute vega at risk. Underlyings without a
+    matched event are listed in no_event_data_symbols; a warning is added
+    when no events match or vega is unavailable for every exposed
+    underlying.
+    """
     warnings: list[str] = []
     response = EventExposureResponse(
         account=payload.account,

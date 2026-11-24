@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, Query, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Body, Depends, Path, Query, status
+from pydantic import BaseModel, Field
 
 from src.feeds.contracts import ContractSpec
 from src.feeds.models import AssetClass
@@ -39,43 +39,50 @@ router = APIRouter(prefix="/tick-data", tags=["market-data"])
 class TickSubscribeResponse(BaseModel):
     """Typed response for tick subscription."""
 
-    status: str
-    symbol: str
-    sec_type: str
-    exchange: str
-    tick_type: str
+    status: str = Field(description="Always 'subscribed'.")
+    symbol: str = Field(description="Subscribed symbol.")
+    sec_type: str = Field(description="IBKR security type, e.g. STK, FUT, CASH.")
+    exchange: str = Field(description="IBKR exchange the buffer is keyed on.")
+    tick_type: str = Field(description="Tick stream type, e.g. ALL_LAST, BID_ASK, MIDPOINT.")
+
+
+class TickUnsubscribeResponse(BaseModel):
+    """Typed response for tick unsubscription."""
+
+    status: str = Field(description="Always 'unsubscribed'.")
+    symbol: str = Field(description="Symbol whose buffer subscription was stopped.")
 
 
 class HeadTimestampResponse(BaseModel):
     """Typed response for head timestamp lookup."""
 
-    symbol: str
-    what_to_show: str
-    head_timestamp: str | None
+    symbol: str = Field(description="Requested symbol.")
+    what_to_show: str = Field(description="IBKR data type used for the lookup, e.g. TRADES.")
+    head_timestamp: str | None = Field(description="Earliest available data time as an ISO-8601 UTC string, or null.")
 
 
 class IVCalcResponse(BaseModel):
     """Typed response for implied volatility calculation."""
 
-    symbol: str
-    strike: float
-    right: str
-    expiry: str
-    option_price: float
-    under_price: float
-    implied_volatility: float | None
+    symbol: str = Field(description="Underlying symbol.")
+    strike: float = Field(description="Option strike.")
+    right: str = Field(description="Option right: C or P.")
+    expiry: str = Field(description="Option expiry (YYYYMMDD).")
+    option_price: float = Field(description="Option price used in the calculation.")
+    under_price: float = Field(description="Underlying price used in the calculation.")
+    implied_volatility: float | None = Field(description="Implied volatility from IBKR's engine, or null on failure.")
 
 
 class OptionPriceCalcResponse(BaseModel):
     """Typed response for option price calculation."""
 
-    symbol: str
-    strike: float
-    right: str
-    expiry: str
-    volatility: float
-    under_price: float
-    option_price: float | None
+    symbol: str = Field(description="Underlying symbol.")
+    strike: float = Field(description="Option strike.")
+    right: str = Field(description="Option right: C or P.")
+    expiry: str = Field(description="Option expiry (YYYYMMDD).")
+    volatility: float = Field(description="Volatility used in the calculation.")
+    under_price: float = Field(description="Underlying price used in the calculation.")
+    option_price: float | None = Field(description="Option price from IBKR's engine, or null on failure.")
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +95,13 @@ async def subscribe_ticks(
     payload: TickSubscribeRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> TickSubscribeResponse:
-    """Start a tick-by-tick data subscription for a symbol."""
+    """Start a tick-by-tick data subscription for a symbol.
+
+    Begins buffering live ticks in memory keyed by symbol, sec_type, and
+    exchange. Read the buffer with GET /tick-data/latest/{symbol}; stop it
+    with POST /tick-data/unsubscribe. The subscription consumes an IBKR
+    market-data line until stopped.
+    """
     await state.feed.start_tick_by_tick(
         symbol=payload.symbol,
         sec_type=payload.sec_type,
@@ -106,29 +119,38 @@ async def subscribe_ticks(
     )
 
 
-@router.post("/unsubscribe", summary="Stop tick-by-tick subscription")
+@router.post("/unsubscribe", summary="Stop tick-by-tick subscription", response_model=TickUnsubscribeResponse)
 async def unsubscribe_ticks(
     payload: TickUnsubscribeRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> dict[str, str]:
-    """Stop a tick-by-tick data subscription."""
+) -> TickUnsubscribeResponse:
+    """Stop a tick-by-tick data subscription.
+
+    Releases the IBKR tick stream for the symbol/sec_type/exchange key.
+    The buffered ticks remain readable until the buffer is replaced.
+    """
     await state.feed.stop_tick_by_tick(
         symbol=payload.symbol,
         sec_type=payload.sec_type,
         exchange=payload.exchange,
     )
-    return {"status": "unsubscribed", "symbol": payload.symbol}
+    return TickUnsubscribeResponse(status="unsubscribed", symbol=payload.symbol)
 
 
 @router.get("/latest/{symbol}", summary="Get latest N ticks for symbol")
 async def get_latest_ticks(
-    symbol: str,
-    sec_type: str = Query(default="STK", min_length=1),
-    exchange: str = Query(default="SMART", min_length=1),
-    n: int = Query(default=100, ge=1, le=10_000),
+    symbol: str = Path(description="Subscribed symbol, e.g. AAPL or ES."),
+    sec_type: str = Query(default="STK", min_length=1, description="IBKR security type used at subscribe time (STK, FUT, CASH, ...)."),
+    exchange: str = Query(default="SMART", min_length=1, description="IBKR exchange used at subscribe time."),
+    n: int = Query(default=100, ge=1, le=10_000, description="Number of most recent ticks to return."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[TickByTickData]:
-    """Retrieve the latest N ticks from the in-memory buffer."""
+    """Retrieve the latest N ticks from the in-memory buffer.
+
+    Reads the process-local ring buffer filled by POST /tick-data/subscribe;
+    it does not contact IBKR. Returns up to n ticks, newest last, and an
+    empty list when no subscription matches the key.
+    """
     return state.feed.get_latest_ticks(symbol, sec_type, exchange, n)
 
 
@@ -142,7 +164,12 @@ async def load_historical_ticks(
     payload: HistoricalTickRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> HistoricalTickResponse:
-    """Load historical tick-level data (trades, bid/ask, midpoints)."""
+    """Load historical tick-level data (trades, bid/ask, or midpoints).
+
+    Pulls ticks for the requested contract and window directly from IBKR
+    (reqHistoricalTicks) with no local buffering. The response reports
+    total_count and a truncated flag when IBKR caps the result.
+    """
     return await state.feed.load_historical_ticks(payload)
 
 
@@ -156,7 +183,12 @@ async def load_histogram_data(
     payload: HistogramDataRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> HistogramDataResponse:
-    """Load price histogram data."""
+    """Load price histogram data.
+
+    Runs IBKR's reqHistogramData for the contract and time period and
+    returns buckets of price, count, and size. Use it for volume-at-price
+    profiles over a single period.
+    """
     return await state.feed.load_histogram_data(payload)
 
 
@@ -171,10 +203,15 @@ async def load_histogram_data(
     response_model=MarketRule,
 )
 async def get_market_rule(
-    magnitude: int,
+    magnitude: int = Path(description="Price increment magnitude from a contract's marketRuleIds, e.g. 269."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> MarketRule:
-    """Get exchange-specific market rules (min tick, price increments)."""
+    """Get exchange-specific market rules (min tick, price increments).
+
+    Loads one rule by id; the rule maps price edges to increment sizes so
+    agents can validate price levels before placing orders. Obtain valid
+    ids from a contract's marketRuleIds field or commodity metadata.
+    """
     return await state.feed.load_market_rule(magnitude)
 
 
@@ -189,11 +226,17 @@ async def get_market_rule(
     response_model=list[SmartComponent],
 )
 async def get_smart_components(
-    exchange: str,
+    exchange: str = Path(description="IBKR exchange code to list SMART routing components for, e.g. SMART."),
+    limit: int | None = Query(default=None, ge=1, le=1000, description="Optional cap on the number of components returned."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[SmartComponent]:
-    """Get smart-routing component exchanges for a given exchange."""
-    return await state.feed.load_smart_components(exchange)
+    """Get smart-routing component exchanges for a given exchange.
+
+    Lists the exchanges SMART routing can execute on with their component
+    codes; use the codes to interpret exchange flags in tick data.
+    """
+    components = await state.feed.load_smart_components(exchange)
+    return components[:limit] if limit is not None else components
 
 
 # ---------------------------------------------------------------------------
@@ -203,15 +246,24 @@ async def get_smart_components(
 
 @router.get("/head-timestamp", summary="Get earliest data date", response_model=HeadTimestampResponse)
 async def get_head_timestamp(
-    symbol: str = Query(min_length=1),
-    sec_type: str = Query(default="STK", min_length=1),
-    exchange: str = Query(default="SMART", min_length=1),
-    currency: str = Query(default="USD", min_length=1),
-    what_to_show: str = Query(default="TRADES", min_length=1),
-    use_rth: bool = Query(default=True),
+    symbol: str = Query(min_length=1, description="Ticker in IBKR notation, e.g. AAPL, ES, or EURUSD."),
+    sec_type: str = Query(default="STK", min_length=1, description="IBKR security type: STK, FUT, CASH, OPT, FOP, IND, BOND."),
+    exchange: str = Query(default="SMART", min_length=1, description="IBKR exchange or SMART for smart routing."),
+    currency: str = Query(default="USD", min_length=1, description="IBKR currency of the contract."),
+    what_to_show: str = Query(
+        default="TRADES",
+        min_length=1,
+        description="IBKR data type for the lookup, e.g. TRADES, MIDPOINT, BID_ASK.",
+    ),
+    use_rth: bool = Query(default=True, description="Use regular trading hours data availability."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> HeadTimestampResponse:
-    """Get the earliest available data date for a contract."""
+    """Get the earliest available data date for a contract.
+
+    Asks IBKR for the head timestamp of the requested data stream. Use it
+    to bound backtests before requesting bars. Returns null when IBKR
+    reports no data for the what_to_show selection.
+    """
     request = HeadTimestampRequest(
         symbol=symbol,
         sec_type=sec_type,
@@ -254,7 +306,12 @@ async def calculate_iv(
     payload: IVCalcRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> IVCalcResponse:
-    """Calculate implied volatility from the IBKR engine."""
+    """Calculate implied volatility from the IBKR engine.
+
+    Qualifies the option contract, then runs IBKR's calculateImpliedVolatility
+    with the supplied option and underlying prices. Returns null volatility
+    when the engine cannot converge.
+    """
     contract = await state.feed.qualify_contract(_option_calc_contract_spec(payload))
     iv = await state.feed.calculate_iv(contract, payload.option_price, payload.under_price)
     return IVCalcResponse(
@@ -273,7 +330,12 @@ async def calculate_option_price(
     payload: OptionPriceCalcRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> OptionPriceCalcResponse:
-    """Calculate option price from the IBKR engine."""
+    """Calculate option price from the IBKR engine.
+
+    Qualifies the option contract, then runs IBKR's calculateOptionPrice
+    with the supplied volatility and underlying price. Returns null price
+    when the engine cannot converge.
+    """
     contract = await state.feed.qualify_contract(_option_calc_contract_spec(payload))
     price = await state.feed.calculate_option_price(contract, payload.volatility, payload.under_price)
     return OptionPriceCalcResponse(
@@ -298,8 +360,15 @@ async def calculate_option_price(
     response_model=list[SymbolDescription],
 )
 async def symbol_search(
-    pattern: str = Query(min_length=1),
+    pattern: str = Query(min_length=1, description="Prefix or fuzzy pattern, e.g. 'AAPL' or 'Apple Inc'."),
+    limit: int | None = Query(default=None, ge=1, le=1000, description="Optional cap on the number of matches returned."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[SymbolDescription]:
-    """Search for matching symbols using IBKR's fuzzy symbol search."""
-    return await state.feed.search_matching_symbols(pattern)
+    """Search for matching symbols using IBKR's fuzzy symbol search.
+
+    Matches both tickers and company names and returns contract
+    descriptions (con_ids, security types, exchanges) suitable for building
+    follow-up requests.
+    """
+    results = await state.feed.search_matching_symbols(pattern)
+    return results[:limit] if limit is not None else results

@@ -80,6 +80,7 @@ class AnalyticsStore:
     def __init__(self, path: str | Path, *, clock: Callable[[], datetime] = utc_now) -> None:
         self.path = Path(path)
         self.clock = clock
+        self._schema_ready = False
 
     async def _run(self, operation: Callable[[sqlite3.Connection], T]) -> T:
         def run() -> T:
@@ -88,8 +89,13 @@ class AnalyticsStore:
             try:
                 conn.row_factory = sqlite3.Row
                 conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA synchronous=FULL")
-                conn.executescript(_SCHEMA)
+                # WAL + NORMAL fsyncs on checkpoints, not on every commit; the
+                # archive is rebuildable from IBKR, so losing the tail of a
+                # power failure is acceptable and keeps requests off fsync.
+                conn.execute("PRAGMA synchronous=NORMAL")
+                if not self._schema_ready:
+                    conn.executescript(_SCHEMA)
+                    self._schema_ready = True
                 with conn:
                     return operation(conn)
             finally:
@@ -100,19 +106,21 @@ class AnalyticsStore:
                               primary_persistence: str, persistence_error: str | None = None,
                               *, enqueue_repair: bool = True) -> DatasetManifest:
         now = aware_utc(self.clock())
-        raw_bars = [bar.model_dump(mode="json") for bar in bars]
-        bars_json = _json(raw_bars)
-        # This timestamp records local availability, not historical vendor availability.
-        manifest = DatasetManifest(
-            dataset_id=str(uuid4()), series_key=research_series_key(request), captured_at=now,
-            content_sha256=hashlib.sha256(bars_json.encode()).hexdigest(), request=request,
-            bar_count=len(bars), quarantined=quality.has_fatal,
-            adjustment_policy=str(request.metadata.get("adjustment_policy", "vendor_adjusted" if request.what_to_show == "ADJUSTED_LAST" else "vendor_unspecified")),
-            roll_policy=str(request.metadata.get("roll_policy", "vendor_continuous_unspecified" if request.continuous else "individual_contract")),
-            primary_persistence=primary_persistence, persistence_error=persistence_error,
-        )
 
         def save(conn: sqlite3.Connection) -> DatasetManifest:
+            # Serialization (model_dump, JSON, sha256) is pure CPU; it runs in
+            # this thread so large payloads never block the event loop.
+            raw_bars = [bar.model_dump(mode="json") for bar in bars]
+            bars_json = _json(raw_bars)
+            # This timestamp records local availability, not historical vendor availability.
+            manifest = DatasetManifest(
+                dataset_id=str(uuid4()), series_key=research_series_key(request), captured_at=now,
+                content_sha256=hashlib.sha256(bars_json.encode()).hexdigest(), request=request,
+                bar_count=len(bars), quarantined=quality.has_fatal,
+                adjustment_policy=str(request.metadata.get("adjustment_policy", "vendor_adjusted" if request.what_to_show == "ADJUSTED_LAST" else "vendor_unspecified")),
+                roll_policy=str(request.metadata.get("roll_policy", "vendor_continuous_unspecified" if request.continuous else "individual_contract")),
+                primary_persistence=primary_persistence, persistence_error=persistence_error,
+            )
             # Pin all revisions available for this symbol plus explicitly named universes.
             entities = [request.symbol, *request.metadata.get("research_universes", [])]
             refs = conn.execute("SELECT reference_id FROM reference_records WHERE recorded_at <= ? AND entity IN ("

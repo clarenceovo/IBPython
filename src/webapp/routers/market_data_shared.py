@@ -29,11 +29,21 @@ logger = logging.getLogger(__name__)
 class HistoricalOHLCVLoadRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    request: OHLCVRequest
-    persist: bool = False
-    cache_latest: bool = True
-    use_ttl_cache: bool = True
-    cache_ttl_seconds: float | None = Field(default=None, ge=0)
+    request: OHLCVRequest = Field(
+        description=(
+            "Full OHLCV request: symbol, asset_class (equity, fx, future, bond, index, crypto, option), "
+            "exchange, currency, duration, bar_size, what_to_show, use_rth, and optional start/end datetimes (UTC)."
+        )
+    )
+    persist: bool = Field(
+        default=False,
+        description="Deprecated: API OHLCV persistence is disabled (501 when true); durable writes are owned by the scheduler backfiller.",
+    )
+    cache_latest: bool = Field(default=True, description="Also store the newest bar in Redis for the latest-bar endpoint.")
+    use_ttl_cache: bool = Field(default=True, description="Serve identical repeated requests from the TTL cache.")
+    cache_ttl_seconds: float | None = Field(
+        default=None, ge=0, description="TTL override in seconds for the response cache. None uses the configured default."
+    )
 
 
 class UnifiedOHLCVLoadRequest(BaseModel):
@@ -131,11 +141,19 @@ class UnifiedOHLCVLoadRequest(BaseModel):
         default=None,
         description="Optional regular-trading-hours override. Defaults to false for futures/FX and true for equity/index.",
     )
-    persist: bool = False
-    cache_latest: bool = True
-    use_ttl_cache: bool = True
-    cache_ttl_seconds: float | None = Field(default=None, ge=0)
-    metadata: dict[str, object] = Field(default_factory=dict)
+    persist: bool = Field(
+        default=False,
+        description="Deprecated: API OHLCV persistence is disabled (501 when true); durable writes are owned by the scheduler backfiller.",
+    )
+    cache_latest: bool = Field(default=True, description="Also store the newest bar in Redis for the latest-bar endpoint.")
+    use_ttl_cache: bool = Field(default=True, description="Serve identical repeated requests from the TTL cache.")
+    cache_ttl_seconds: float | None = Field(
+        default=None, ge=0, description="TTL override in seconds for the response cache. None uses the configured default."
+    )
+    metadata: dict[str, object] = Field(
+        default_factory=dict,
+        description="Free-form request metadata forwarded to the loader.",
+    )
 
     @field_validator("starttime", "endtime", mode="before")
     @classmethod
@@ -262,23 +280,40 @@ class MinimalOHLCVLoadControls(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    duration: str = Field(default="1 D", min_length=1)
-    bar_size: str = Field(default="1 min", min_length=1)
+    duration: str = Field(
+        default="1 D",
+        min_length=1,
+        description="IBKR duration string for the lookback window, e.g. '1 D', '1 W', '1 M', '1 Y'. Used when start_datetime/end_datetime are not set.",
+    )
+    bar_size: str = Field(
+        default="1 min",
+        min_length=1,
+        description="IBKR bar size using IBKR spellings, e.g. '1 min', '5 mins', '1 hour', '1 day'.",
+    )
     start_datetime: datetime | None = Field(
         default=None,
-        description="Start of the date range (inclusive). When set with end_datetime, the wrapper paginates automatically.",
+        description="Start of the date range (inclusive, UTC). When set with end_datetime, the wrapper paginates automatically.",
     )
     end_datetime: datetime | None = Field(
         default=None,
-        description="End of the date range (inclusive). Defaults to now.",
+        description="End of the date range (inclusive, UTC). Defaults to now.",
     )
-    what_to_show: str = Field(default="TRADES", min_length=1)
-    use_rth: bool = True
-    persist: bool = False
-    cache_latest: bool = True
-    use_ttl_cache: bool = True
-    cache_ttl_seconds: float | None = Field(default=None, ge=0)
-    metadata: dict[str, object] = Field(default_factory=dict)
+    what_to_show: str = Field(
+        default="TRADES",
+        min_length=1,
+        description="IBKR historical data type, e.g. TRADES, MIDPOINT, BID, ASK, BID_ASK, ADJUSTED_LAST, AGGTRADES, YIELD_LAST.",
+    )
+    use_rth: bool = Field(default=True, description="Restrict bars to regular trading hours.")
+    persist: bool = Field(
+        default=False,
+        description="Deprecated: API OHLCV persistence is disabled (501 when true); durable writes are owned by the scheduler backfiller.",
+    )
+    cache_latest: bool = Field(default=True, description="Also store the newest bar in Redis for the latest-bar endpoint.")
+    use_ttl_cache: bool = Field(default=True, description="Serve identical repeated requests from the TTL cache.")
+    cache_ttl_seconds: float | None = Field(
+        default=None, ge=0, description="TTL override in seconds for the response cache. None uses the configured default."
+    )
+    metadata: dict[str, object] = Field(default_factory=dict, description="Free-form request metadata forwarded to the loader.")
 
     @field_validator("start_datetime", "end_datetime", mode="before")
     @classmethod

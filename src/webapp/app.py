@@ -8,6 +8,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, Callable, Awaitable
 
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -15,12 +17,14 @@ from src.config.settings import Settings, load_settings
 from src.config.config_constant import APP_VERSION
 from src.transport.metrics import MetricsMiddleware, metrics
 from src.webapp import matrix
+from src.webapp.api_error import error_response, http_exception_response
 from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
 from src.webapp.middleware.correlation import CorrelationIdFilter, CorrelationIdMiddleware
 from src.webapp.middleware.request_timeout import RequestTimeoutMiddleware
 from src.webapp.middleware.body_limit import RequestBodyLimitMiddleware
 from src.webapp.middleware.security import SecurityHeadersMiddleware
 from src.webapp.middleware.rate_limit import RateLimiterMiddleware, RateLimitGatekeeper
+from src.webapp.openapi_agent import enhance_openapi_for_agents
 from src.webapp.ws_broker import broker
 from src.webapp.routers import (
     account,
@@ -52,12 +56,14 @@ from src.webapp.routers import (
 from src.feeds.ibkr_historical import HistoricalRequestTooLargeError, HistoricalRequestUnsupportedError
 from src.feeds.exceptions import (
     IBKRConnectionError,
+    IBKRConnectionDisabledError,
     IBKRUnsupportedFeatureError,
     IBKRCircuitOpenError,
     IBKRContractResolutionError,
     IBKRMarketDataUnavailableError,
     IBKRPacingError,
     IBKROrderError,
+    IBKROrdersDisabledError,
     QuestDBWriteError,
     QuestDBConnectionError,
 )
@@ -226,10 +232,19 @@ def create_app(
             {"name": "orders", "description": "Order management — live place/cancel/modify, execution details, and explicit what-if preview"},
             {"name": "scanner", "description": "Contract search and scanning across IBKR's security database"},
             {"name": "streaming", "description": "Real-time market data streaming via Server-Sent Events (SSE)"},
+            {"name": "research", "description": "As-of dataset joins, dataset catalog, and quality repairs for the QuestDB research store"},
+            {"name": "event-risk", "description": "Event-contract exposure aggregation across accounts and portfolios"},
+            {"name": "portfolio-risk", "description": "Portfolio-level risk cockpit snapshots"},
         ],
         openapi_url="/api/v1/openapi.json",
         docs_url="/docs",
         redoc_url="/redoc",
+        swagger_ui_parameters={
+            "displayOperationId": True,
+            "displayRequestDuration": True,
+            "persistAuthorization": True,
+            "showExtensions": True,
+        },
     )
     # Metrics middleware must wrap early (added last = wraps outermost)
     fastapi_app.add_middleware(MetricsMiddleware)
@@ -312,37 +327,43 @@ def create_app(
         return metrics.expose().encode("utf-8")
 
     # Simple exception→status mappings: one handler factory covers them all.
+    # Each entry: (HTTP status, log level, stable machine-readable error code).
     _exc_map = {
-        IBKRConnectionError: (503, logging.WARNING),
-        IBKRUnsupportedFeatureError: (410, logging.WARNING),
-        IBKRCircuitOpenError: (503, logging.WARNING),
-        IBKRContractResolutionError: (422, logging.WARNING),
-        IBKRMarketDataUnavailableError: (503, logging.WARNING),
-        IBKROrderError: (502, logging.WARNING),
-        HistoricalRequestTooLargeError: (422, logging.WARNING),
-        HistoricalRequestUnsupportedError: (422, logging.WARNING),
-        QuestDBWriteError: (503, logging.ERROR),
-        QuestDBConnectionError: (503, logging.ERROR),
+        IBKRConnectionDisabledError: (503, logging.WARNING, "IBKR_DISABLED"),
+        IBKRConnectionError: (503, logging.WARNING, "IBKR_UNAVAILABLE"),
+        IBKRUnsupportedFeatureError: (410, logging.WARNING, "FEATURE_REMOVED"),
+        IBKRCircuitOpenError: (503, logging.WARNING, "IBKR_CIRCUIT_OPEN"),
+        IBKRContractResolutionError: (422, logging.WARNING, "CONTRACT_RESOLUTION_FAILED"),
+        IBKRMarketDataUnavailableError: (503, logging.WARNING, "MARKET_DATA_UNAVAILABLE"),
+        IBKROrdersDisabledError: (403, logging.WARNING, "ORDERS_DISABLED"),
+        IBKROrderError: (502, logging.WARNING, "ORDER_REJECTED"),
+        HistoricalRequestTooLargeError: (422, logging.WARNING, "REQUEST_TOO_LARGE"),
+        HistoricalRequestUnsupportedError: (422, logging.WARNING, "UNSUPPORTED_HISTORICAL_REQUEST"),
+        QuestDBWriteError: (503, logging.ERROR, "QUESTDB_UNAVAILABLE"),
+        QuestDBConnectionError: (503, logging.ERROR, "QUESTDB_UNAVAILABLE"),
     }
 
-    def _make_handler(status_code: int, level: int):
+    def _make_handler(status_code: int, level: int, code: str):
         async def _handler(_request: Request, exc: Exception) -> JSONResponse:
             logger.log(level, "%s: %s", type(exc).__name__, exc)
-            return JSONResponse(status_code=status_code, content={"detail": str(exc)})
+            return error_response(status_code, str(exc), code=code)
         return _handler
 
-    for exc_type, (status, level) in _exc_map.items():
-        fastapi_app.add_exception_handler(exc_type, _make_handler(status, level))
+    for exc_type, (status, level, code) in _exc_map.items():
+        fastapi_app.add_exception_handler(exc_type, _make_handler(status, level, code))
 
     # Handlers with special response logic stay explicit.
 
     @fastapi_app.exception_handler(IBKRPacingError)
     async def ibkr_pacing_error_handler(_request: Request, exc: IBKRPacingError) -> JSONResponse:
         logger.warning("IBKR pacing violation: %s", exc)
-        return JSONResponse(
-            status_code=429,
-            content={"detail": str(exc)},
-            headers={"Retry-After": "60"},
+        retry_after = getattr(exc, "retry_after_seconds", None) or 60
+        return error_response(
+            429,
+            str(exc),
+            code="IBKR_PACING",
+            retryable=True,
+            retry_after_seconds=retry_after,
         )
 
     @fastapi_app.exception_handler(RuntimeError)
@@ -350,9 +371,28 @@ def create_app(
         msg = str(exc)
         if "IBKR not available" in msg:
             logger.warning("request failed: %s", msg)
-            return JSONResponse(status_code=503, content={"detail": msg})
+            return error_response(503, msg, code="IBKR_UNAVAILABLE", retryable=True)
         logger.exception("unhandled RuntimeError in request: %s", exc)
-        return JSONResponse(status_code=500, content={"detail": "Internal error"})
+        return error_response(500, "Internal error", code="INTERNAL_ERROR")
+
+    @fastapi_app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        return http_exception_response(exc)
+
+    @fastapi_app.exception_handler(Exception)
+    async def unhandled_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("unhandled exception in request: %s", exc)
+        return error_response(500, "Internal error", code="INTERNAL_ERROR")
+
+    # Agent pass on the OpenAPI document: stable operation ids, shared error
+    # envelope (responses.default -> ApiError), tag descriptions, side-effect
+    # annotations, and the "For AI agents" guide in info.description.
+    _standard_openapi = fastapi_app.openapi
+
+    def _agent_openapi() -> dict:
+        return enhance_openapi_for_agents(_standard_openapi())
+
+    fastapi_app.openapi = _agent_openapi  # type: ignore[method-assign]
 
     from src.webapp.telemetry import configure_opentelemetry
 

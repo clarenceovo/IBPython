@@ -17,17 +17,21 @@ from src.feeds.exchange_resolver import resolve_equity
 
 
 class BusinessCacheControls(BaseModel):
+    """Shared TTL-cache controls for business read endpoints."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    use_ttl_cache: bool = True
-    cache_ttl_seconds: float | None = Field(default=300, ge=0)
+    use_ttl_cache: bool = Field(default=True, description="Serve the response from the shared TTL cache when possible.")
+    cache_ttl_seconds: float | None = Field(default=300, ge=0, description="Cache entry lifetime in seconds; null uses the cache default.")
 
 
 class BusinessDateRangeControls(BusinessCacheControls):
+    """Shared UTC time-window controls for business read endpoints."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    start_datetime: datetime | None = None
-    end_datetime: datetime | None = None
+    start_datetime: datetime | None = Field(default=None, description="Window start (ISO 8601). Naive values are treated as UTC; values are normalized to UTC.")
+    end_datetime: datetime | None = Field(default=None, description="Window end (ISO 8601). Naive values are treated as UTC; values are normalized to UTC. Must follow start_datetime when both are set.")
 
     @field_validator("start_datetime", "end_datetime", mode="before")
     @classmethod
@@ -50,53 +54,59 @@ class BusinessDateRangeControls(BusinessCacheControls):
 
 
 class BusinessOHLCVSymbol(BaseModel):
+    """One instrument in a business OHLCV request, as a string or an object."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1)
-    exchange: str | None = Field(default=None, min_length=1)
-    currency: str | None = Field(default=None, min_length=1)
-    primary_exchange: str | None = Field(default=None, min_length=1)
-    last_trade_date_or_contract_month: str | None = Field(default=None, min_length=1)
-    multiplier: str | None = Field(default=None, min_length=1)
-    local_symbol: str | None = Field(default=None, min_length=1)
-    con_id: int | None = Field(default=None, gt=0)
-    sec_id_type: str | None = Field(default=None, min_length=1)
-    sec_id: str | None = Field(default=None, min_length=1)
+    symbol: str = Field(min_length=1, description="Instrument symbol in the notation of the request's asset class, e.g. AAPL (equity), EUR.USD (fx), 0700.HK (HK equity).")
+    exchange: str | None = Field(default=None, min_length=1, description="Exchange override, e.g. SMART, NASDAQ, IDEALPRO; defaults are resolved per asset class.")
+    currency: str | None = Field(default=None, min_length=1, description="ISO 4217 currency override, e.g. USD, HKD.")
+    primary_exchange: str | None = Field(default=None, min_length=1, description="Primary listing exchange for SMART-routed equities, e.g. NASDAQ.")
+    last_trade_date_or_contract_month: str | None = Field(default=None, min_length=1, description="Futures contract month as YYYYMM (e.g. 202606) or option/future expiry.")
+    multiplier: str | None = Field(default=None, min_length=1, description="Contract multiplier, e.g. 1000 for CL.")
+    local_symbol: str | None = Field(default=None, min_length=1, description="IBKR local symbol for an exact contract, e.g. ESZ6.")
+    con_id: int | None = Field(default=None, gt=0, description="IBKR contract id for an exact contract, e.g. 76792991.")
+    sec_id_type: str | None = Field(default=None, min_length=1, description="Security identifier type (e.g. ISIN) when identifying by sec_id.")
+    sec_id: str | None = Field(default=None, min_length=1, description="Security identifier value matching sec_id_type.")
 
 
 class MarketPanelRequest(BusinessDateRangeControls):
+    """Request body for the market panel: latest bars for several symbols."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbols: list[str | BusinessOHLCVSymbol] = Field(min_length=1)
-    asset_class: AssetClass = AssetClass.EQUITY
-    exchange: str | None = Field(default=None, min_length=1)
-    currency: str | None = Field(default=None, min_length=1)
-    duration: str = Field(default="1 D", min_length=1)
-    bar_size: str = Field(default="1 min", min_length=1)
-    what_to_show: str = Field(default="TRADES", min_length=1)
-    use_rth: bool = True
-    cache_latest: bool = False
-    max_concurrent_requests: int = Field(default=4, ge=1, le=20)
+    symbols: list[str | BusinessOHLCVSymbol] = Field(min_length=1, description="Instruments to load: plain symbol strings or objects with contract qualifiers.")
+    asset_class: AssetClass = Field(default=AssetClass.EQUITY, description="Asset class applied to plain symbol strings: equity, fx, future, bond, index, crypto, option.")
+    exchange: str | None = Field(default=None, min_length=1, description="Default exchange for symbols that do not carry one.")
+    currency: str | None = Field(default=None, min_length=1, description="Default ISO 4217 currency for symbols that do not carry one.")
+    duration: str = Field(default="1 D", min_length=1, description="IBKR duration string for the lookback, e.g. '1 D', '1 W', '1 M', '1 Y'.")
+    bar_size: str = Field(default="1 min", min_length=1, description="IBKR bar size with its exact spacing, e.g. '1 min', '5 mins', '1 hour', '1 day'.")
+    what_to_show: str = Field(default="TRADES", min_length=1, description="IBKR whatToShow value, e.g. TRADES, MIDPOINT, BID, ASK, YIELD_LAST, OPTION_IMPLIED_VOLATILITY.")
+    use_rth: bool = Field(default=True, description="Restrict bars to regular trading hours.")
+    cache_latest: bool = Field(default=False, description="Store the newest bar of each symbol in the latest-bar cache.")
+    max_concurrent_requests: int = Field(default=4, ge=1, le=20, description="Upper bound on concurrent IBKR history requests.")
 
 
 class UniverseBarsRequest(BusinessDateRangeControls):
+    """Request body for universe bars: bars for every member of a universe."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    universe: str = Field(min_length=1)
+    universe: str = Field(min_length=1, description="Universe key whose Redis index composition supplies the symbols.")
     symbols: list[str] | None = Field(
         default=None,
         description="Optional explicit symbols. When omitted, the endpoint reads Redis index composition by universe.",
     )
-    asset_class: AssetClass = AssetClass.EQUITY
-    exchange: str | None = Field(default=None, min_length=1)
-    currency: str | None = Field(default=None, min_length=1)
-    duration: str = Field(default="1 D", min_length=1)
-    bar_size: str = Field(default="1 min", min_length=1)
-    what_to_show: str = Field(default="TRADES", min_length=1)
-    use_rth: bool = True
-    cache_latest: bool = False
-    max_symbols: int = Field(default=100, ge=1, le=500)
-    max_concurrent_requests: int = Field(default=4, ge=1, le=20)
+    asset_class: AssetClass = Field(default=AssetClass.EQUITY, description="Asset class applied to the symbols: equity, fx, future, bond, index, crypto, option.")
+    exchange: str | None = Field(default=None, min_length=1, description="Default exchange for symbols that do not carry one.")
+    currency: str | None = Field(default=None, min_length=1, description="Default ISO 4217 currency for symbols that do not carry one.")
+    duration: str = Field(default="1 D", min_length=1, description="IBKR duration string for the lookback, e.g. '1 D', '1 W', '1 M', '1 Y'.")
+    bar_size: str = Field(default="1 min", min_length=1, description="IBKR bar size with its exact spacing, e.g. '1 min', '5 mins', '1 hour', '1 day'.")
+    what_to_show: str = Field(default="TRADES", min_length=1, description="IBKR whatToShow value, e.g. TRADES, MIDPOINT, BID, ASK, YIELD_LAST, OPTION_IMPLIED_VOLATILITY.")
+    use_rth: bool = Field(default=True, description="Restrict bars to regular trading hours.")
+    cache_latest: bool = Field(default=False, description="Store the newest bar of each symbol in the latest-bar cache.")
+    max_symbols: int = Field(default=100, ge=1, le=500, description="Upper bound on symbols loaded from the universe.")
+    max_concurrent_requests: int = Field(default=4, ge=1, le=20, description="Upper bound on concurrent IBKR history requests.")
 
 
 _COMMODITY_FUTURES_PRESETS: dict[str, tuple[str, str]] = {
@@ -324,21 +334,25 @@ def symbol_to_ohlcv_request(item: str | BusinessOHLCVSymbol, payload: MarketPane
 
 
 class InstrumentBarsResult(BaseModel):
+    """Per-instrument outcome of a multi-symbol bar load."""
+
     model_config = ConfigDict(extra="forbid")
 
-    input_index: int
-    requested_symbol: str
-    request: OHLCVRequest
-    status: Literal["success", "empty", "error"]
-    bars: list[SerializeAsAny[OHLCVBar]] = Field(default_factory=list)
-    error: str | None = None
+    input_index: int = Field(description="Zero-based position of the instrument in the request.")
+    requested_symbol: str = Field(description="Symbol as the caller wrote it (string form or object's symbol).")
+    request: OHLCVRequest = Field(description="The resolved OHLCV request sent to IBKR.")
+    status: Literal["success", "empty", "error"] = Field(description="success = bars returned; empty = IBKR returned none; error = load failed.")
+    bars: list[SerializeAsAny[OHLCVBar]] = Field(default_factory=list, description="Bars for this instrument; empty on error or empty result.")
+    error: str | None = Field(default=None, description="Error text when status is error; null otherwise.")
 
 
 class DetailedBarsResponse(BaseModel):
+    """Envelope for multi-instrument bar loads with per-instrument status."""
+
     model_config = ConfigDict(extra="forbid")
 
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    results: list[InstrumentBarsResult]
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="UTC time the response was assembled.")
+    results: list[InstrumentBarsResult] = Field(description="One entry per requested instrument, in request order.")
 
     def flattened_bars(self) -> list[OHLCVBar]:
         return sorted([bar for result in self.results for bar in result.bars], key=lambda bar: (bar.symbol, bar.timestamp))

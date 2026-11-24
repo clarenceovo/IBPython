@@ -69,11 +69,11 @@ class StreamRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str = Field(min_length=1, examples=["SPY", "AAPL", "EURUSD"])
-    asset_class: AssetClass = Field(default=AssetClass.EQUITY)
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
-    primary_exchange: str | None = None
+    symbol: str = Field(min_length=1, examples=["SPY", "AAPL", "EURUSD"], description="Instrument symbol, for example 'AAPL', 'ES', 'EUR.USD'.")
+    asset_class: AssetClass = Field(default=AssetClass.EQUITY, description="Asset class: 'equity', 'fx', 'future', 'index', 'bond', 'option', 'crypto' (case-insensitive; aliases accepted).")
+    exchange: str = Field(default="SMART", min_length=1, description="Exchange or routing destination, for example 'SMART', 'NASDAQ', 'CME', 'IDEALPRO'.")
+    currency: str = Field(default="USD", min_length=1, description="IBKR currency code, for example 'USD', 'HKD', 'JPY'.")
+    primary_exchange: str | None = Field(default=None, description="Primary exchange; use to disambiguate 'SMART' routing.")
     update_interval_seconds: float = Field(
         default=0.5,
         ge=0.1,

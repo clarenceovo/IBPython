@@ -274,7 +274,7 @@ class OptionOHLCVBar(OHLCVBar):
     strike: float = Field(gt=0)
     right: str = Field(min_length=1, description="Option right: C/CALL or P/PUT.")
     multiplier: str | None = None
-    trading_class: str | None = None
+    trading_class: str | None = Field(default=None, description="IBKR trading class, for example 'ESM6' versus 'CN8H6'.")
     contract_month: str | None = None
     con_id: int | None = Field(default=None, gt=0)
 
@@ -380,24 +380,24 @@ class OHLCVRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1)
-    asset_class: AssetClass
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
+    symbol: str = Field(min_length=1, description="Instrument symbol, for example 'AAPL', 'ES', 'EUR.USD'.")
+    asset_class: AssetClass = Field(description="Asset class: 'equity', 'fx', 'future', 'index', 'bond', 'option', 'crypto' (case-insensitive; aliases accepted).")
+    exchange: str = Field(default="SMART", min_length=1, description="Exchange or routing destination, for example 'SMART', 'NASDAQ', 'CME', 'IDEALPRO'.")
+    currency: str = Field(default="USD", min_length=1, description="IBKR currency code, for example 'USD', 'HKD', 'JPY'.")
     start_datetime: datetime | None = Field(
         default=None,
         description="Optional inclusive start timestamp for paginated historical range loads.",
     )
-    end_datetime: datetime | None = None
-    duration: str = Field(default="1 D", min_length=1)
-    bar_size: str = Field(default="1 min", min_length=1)
-    what_to_show: str = Field(default="TRADES", min_length=1)
-    use_rth: bool = True
-    source: str = Field(default="ibkr", min_length=1)
-    primary_exchange: str | None = None
-    last_trade_date_or_contract_month: str | None = None
-    multiplier: str | None = None
-    local_symbol: str | None = None
+    end_datetime: datetime | None = Field(default=None, description="Request window end, UTC ISO-8601. Omit for 'now'.")
+    duration: str = Field(default="1 D", min_length=1, description="IBKR duration string: '30 S', '1 D', '1 W', '1 M', '1 Y'.")
+    bar_size: str = Field(default="1 min", min_length=1, description="IBKR bar size, spelled exactly: '5 secs', '1 min', '5 mins', '15 mins', '30 mins', '1 hour', '4 hours', '1 day', '1 week', '1 month'.")
+    what_to_show: str = Field(default="TRADES", min_length=1, description="IBKR whatToShow value, for example 'TRADES', 'MIDPOINT', 'BID', 'ASK', 'BID_ASK', 'HISTORICAL_VOLATILITY', 'OPTION_IMPLIED_VOLATILITY'.")
+    use_rth: bool = Field(default=True, description="True: regular trading hours only. False: include extended hours.")
+    source: str = Field(default="ibkr", min_length=1, description="Provenance source label.")
+    primary_exchange: str | None = Field(default=None, description="Primary exchange; use to disambiguate 'SMART' routing.")
+    last_trade_date_or_contract_month: str | None = Field(default=None, description="Futures expiry: YYYYMM contract month or YYYYMMDD last trade date.")
+    multiplier: str | None = Field(default=None, description="Contract multiplier, for example 100 for equity options.")
+    local_symbol: str | None = Field(default=None, description="Exchange-local symbol, for example 'ESZ6'.")
     continuous: bool = Field(
         default=False,
         description="Use an IBKR continuous futures contract (CONTFUT) for historical data only.",
@@ -406,15 +406,15 @@ class OHLCVRequest(BaseModel):
         default=None,
         description="IBKR option secType. Use OPT for stock/index options and FOP for futures options.",
     )
-    underlying_symbol: str | None = None
-    expiry: str | None = None
-    strike: float | None = Field(default=None, gt=0)
+    underlying_symbol: str | None = Field(default=None, description="Underlying symbol for option and futures contracts.")
+    expiry: str | None = Field(default=None, description="Option or future expiry date, format YYYYMMDD.")
+    strike: float | None = Field(default=None, gt=0, description="Option strike price.")
     right: str | None = Field(default=None, description="Option right: C/CALL or P/PUT.")
-    trading_class: str | None = None
-    sec_id_type: str | None = None
-    sec_id: str | None = None
-    con_id: int | None = Field(default=None, gt=0)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    trading_class: str | None = Field(default=None, description="IBKR trading class, for example 'ESM6' versus 'CN8H6'.")
+    sec_id_type: str | None = Field(default=None, description="Alternative identifier type: 'CUSIP' or 'ISIN'. Use with sec_id.")
+    sec_id: str | None = Field(default=None, description="Alternative identifier value (CUSIP or ISIN). Takes precedence over symbol/exchange.")
+    con_id: int | None = Field(default=None, gt=0, description="IBKR contract ID. Takes precedence over symbol when set.")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Free-form caller metadata; echoed in diagnostics only.")
 
     @field_validator("symbol", "exchange", "currency", mode="before")
     @classmethod

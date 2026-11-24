@@ -318,13 +318,13 @@ class FXOptionSnapshotQuery(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str = Field(min_length=1)
-    expiry: str | None = None
-    strike: float | None = Field(default=None, gt=0)
-    right: str | None = None
-    start: datetime | None = None
-    end: datetime | None = None
-    limit: int = Field(default=1000, ge=1, le=10000)
+    symbol: str = Field(min_length=1, description="Instrument symbol, for example 'AAPL', 'ES', 'EUR.USD'.")
+    expiry: str | None = Field(default=None, description="Option or future expiry date, format YYYYMMDD.")
+    strike: float | None = Field(default=None, gt=0, description="Option strike price.")
+    right: str | None = Field(default=None, description="Option right: 'C'/'CALL' or 'P'/'PUT' (case-insensitive).")
+    start: datetime | None = Field(default=None, description="Window start, UTC ISO-8601.")
+    end: datetime | None = Field(default=None, description="Window end, UTC ISO-8601.")
+    limit: int = Field(default=1000, ge=1, le=10000, description="Max rows to return.")
 
     @field_validator("symbol", "expiry", "right", mode="before")
     @classmethod
@@ -364,10 +364,10 @@ class SnapshotQuery(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str = Field(min_length=1)
-    start: datetime | None = None
-    end: datetime | None = None
-    limit: int = Field(default=1000, ge=1, le=10000)
+    symbol: str = Field(min_length=1, description="Instrument symbol, for example 'AAPL', 'ES', 'EUR.USD'.")
+    start: datetime | None = Field(default=None, description="Window start, UTC ISO-8601.")
+    end: datetime | None = Field(default=None, description="Window end, UTC ISO-8601.")
+    limit: int = Field(default=1000, ge=1, le=10000, description="Max rows to return.")
 
     @field_validator("symbol", mode="before")
     @classmethod

@@ -76,9 +76,9 @@ class CockpitRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    account: str = Field(default="ALL", examples=["ALL", "U1234567"])
-    spot_shocks_pct: list[float] = Field(default_factory=lambda: list(DEFAULT_SPOT_SHOCKS_PCT))
-    vol_shocks_pts: list[float] = Field(default_factory=lambda: list(DEFAULT_VOL_SHOCKS_PTS))
+    account: str = Field(default="ALL", examples=["ALL", "U1234567"], description="Account filter for positions; ALL keeps every account.")
+    spot_shocks_pct: list[float] = Field(default_factory=lambda: list(DEFAULT_SPOT_SHOCKS_PCT), description="Spot shock grid in percent (negative is down); paired with every vol shock.")
+    vol_shocks_pts: list[float] = Field(default_factory=lambda: list(DEFAULT_VOL_SHOCKS_PTS), description="Implied-vol shock grid in points; paired with every spot shock.")
     skip_greeks: bool = Field(default=False, description="Skip per-contract Greek snapshots; aggregate linear exposure only.")
 
 
@@ -87,9 +87,9 @@ class ExpiryBucketRisk(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    bucket: str
-    delta_shares: float = 0.0
-    vega_per_pt: float = 0.0
+    bucket: str = Field(description="Expiry bucket: front (<=45 days), next (<=135 days), back, or unknown.")
+    delta_shares: float = Field(default=0.0, description="Net delta share-equivalents in the bucket.")
+    vega_per_pt: float = Field(default=0.0, description="Net vega dollars per volatility point in the bucket.")
 
 
 class UnderlyingRisk(BaseModel):
@@ -97,17 +97,17 @@ class UnderlyingRisk(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    underlying: str
-    spot: float | None = None
-    linear_position: float = 0.0
-    linear_value: float = 0.0
-    option_position_count: int = 0
-    net_delta_shares: float = 0.0
-    dollar_delta: float = 0.0
-    gamma_per_1pct: float = 0.0
-    vega_per_pt: float = 0.0
-    theta_per_day: float = 0.0
-    expiry_buckets: list[ExpiryBucketRisk] = Field(default_factory=list)
+    underlying: str = Field(description="Uppercase underlying symbol.")
+    spot: float | None = Field(default=None, description="Reference spot price; null when unavailable.")
+    linear_position: float = Field(default=0.0, description="Signed linear (non-option) position size, share or contract count.")
+    linear_value: float = Field(default=0.0, description="Market value of the linear position in the quote currency.")
+    option_position_count: int = Field(default=0, description="Number of option positions on the underlying.")
+    net_delta_shares: float = Field(default=0.0, description="Net delta in share-equivalents (linear plus option delta).")
+    dollar_delta: float = Field(default=0.0, description="Net delta shares times spot; zero when spot is unavailable.")
+    gamma_per_1pct: float = Field(default=0.0, description="Dollar P&L sensitivity to a one percent spot move.")
+    vega_per_pt: float = Field(default=0.0, description="Dollar P&L per one volatility point.")
+    theta_per_day: float = Field(default=0.0, description="Dollar P&L per calendar day.")
+    expiry_buckets: list[ExpiryBucketRisk] = Field(default_factory=list, description="Delta and vega split by expiry bucket.")
 
 
 class ScenarioPnl(BaseModel):
@@ -115,17 +115,17 @@ class ScenarioPnl(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    spot_shock_pct: float
-    vol_shock_pts: float
-    label: str = ""
-    pnl: float
-    by_underlying: dict[str, float] = Field(default_factory=dict)
+    spot_shock_pct: float = Field(description="Spot shock in percent.")
+    vol_shock_pts: float = Field(description="Implied-vol shock in points.")
+    label: str = Field(default="", description="Human-readable shock label, e.g. 'spot +5% / vol +3pt'.")
+    pnl: float = Field(description="Total P&L in the account base currency under the shock.")
+    by_underlying: dict[str, float] = Field(default_factory=dict, description="P&L contribution keyed by uppercase underlying symbol.")
 
 
 class EpisodePnl(ScenarioPnl):
     """Scenario P&L plus the episode description."""
 
-    description: str = ""
+    description: str = Field(default="", description="What the preset episode shocks represent.")
 
 
 class HedgeSuggestion(BaseModel):
@@ -133,12 +133,12 @@ class HedgeSuggestion(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    underlying: str
-    net_delta_shares: float
-    shares_to_trade: int
-    residual_delta_shares: float
-    hedge_notional: float
-    hedge_unit: str = "delta shares"
+    underlying: str = Field(description="Uppercase underlying symbol.")
+    net_delta_shares: float = Field(description="Current net delta in share-equivalents.")
+    shares_to_trade: int = Field(description="Whole shares to trade to flatten delta (negative means sell).")
+    residual_delta_shares: float = Field(description="Delta left after rounding to whole shares.")
+    hedge_notional: float = Field(description="Absolute value of the trade at the reference spot.")
+    hedge_unit: str = Field(default="delta shares", description="Unit of the hedge; carries the multiplier for futures.")
 
 
 class CockpitTotals(BaseModel):
@@ -146,11 +146,11 @@ class CockpitTotals(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    net_dollar_delta: float = 0.0
-    net_vega_per_pt: float = 0.0
-    net_theta_per_day: float = 0.0
-    net_gamma_per_1pct: float = 0.0
-    gross_exposure: float = 0.0
+    net_dollar_delta: float = Field(default=0.0, description="Sum of dollar delta across underlyings.")
+    net_vega_per_pt: float = Field(default=0.0, description="Sum of vega per point across underlyings.")
+    net_theta_per_day: float = Field(default=0.0, description="Sum of theta per day across underlyings.")
+    net_gamma_per_1pct: float = Field(default=0.0, description="Sum of gamma per one percent move across underlyings.")
+    gross_exposure: float = Field(default=0.0, description="Sum of absolute linear market values.")
 
 
 class CockpitResponse(BaseModel):
@@ -158,14 +158,14 @@ class CockpitResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    account: str = "ALL"
-    underlyings: list[UnderlyingRisk] = Field(default_factory=list)
-    totals: CockpitTotals = Field(default_factory=CockpitTotals)
-    scenarios: list[ScenarioPnl] = Field(default_factory=list)
-    stress_episodes: list[EpisodePnl] = Field(default_factory=list)
-    hedges: list[HedgeSuggestion] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="UTC time the cockpit was assembled.")
+    account: str = Field(default="ALL", description="Account filter echoed back.")
+    underlyings: list[UnderlyingRisk] = Field(default_factory=list, description="Risk aggregated per underlying, sorted by symbol.")
+    totals: CockpitTotals = Field(default_factory=CockpitTotals, description="Portfolio-wide sums.")
+    scenarios: list[ScenarioPnl] = Field(default_factory=list, description="Full spot x vol shock grid P&L, including the zero-zero base row.")
+    stress_episodes: list[EpisodePnl] = Field(default_factory=list, description="Preset historical-style stress episodes.")
+    hedges: list[HedgeSuggestion] = Field(default_factory=list, description="Delta-flattening trades above the minimum size thresholds.")
+    warnings: list[str] = Field(default_factory=list, description="Degradation notes, for example missing Greek snapshots or spots.")
 
 
 # ---------------------------------------------------------------------------
@@ -496,5 +496,15 @@ async def get_risk_cockpit(
     payload: Annotated[CockpitRequest, Body(openapi_examples={"default": {"value": {}}})],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> CockpitResponse:
-    """Net Greeks, scenario P&L grid, stress episodes, and hedge suggestions."""
+    """Net Greeks, scenario P&L grid, stress episodes, and hedge suggestions.
+
+    Aggregates live positions per underlying: option Greeks come from IBKR
+    model-Greek snapshots scaled by position size and multiplier; linear
+    positions contribute share-equivalent delta. Returns the spot x vol
+    scenario grid (delta-gamma-vega approximation for options), five preset
+    stress episodes, expiry-bucketed delta and vega, and whole-share hedges
+    that flatten net delta above the size thresholds. Set skip_greeks to
+    aggregate linear exposure only. Warnings list missing snapshots; the
+    response still returns with zeroed contributions for skipped options.
+    """
     return await build_cockpit(payload, state)

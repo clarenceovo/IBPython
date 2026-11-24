@@ -17,9 +17,9 @@ class ContractSearchRequest(BaseModel):
         default=None,
         description="Security type filter: STK, OPT, FUT, CASH, IND, BOND, CRYPTO",
     )
-    exchange: str | None = Field(default=None, min_length=1)
-    currency: str | None = Field(default=None, min_length=1)
-    con_id: int | None = Field(default=None, gt=0)
+    exchange: str | None = Field(default=None, min_length=1, description="Restrict matches to one exchange code, e.g. SMART, NASDAQ, IDEALPRO, CBOE.")
+    currency: str | None = Field(default=None, min_length=1, description="ISO 4217 currency filter, e.g. USD, HKD, EUR.")
+    con_id: int | None = Field(default=None, gt=0, description="IBKR contract id to look up directly; supply symbol or con_id.")
 
     @model_validator(mode="after")
     def validate_has_search_criteria(self) -> ContractSearchRequest:
@@ -65,10 +65,10 @@ class ContractScanRequest(BaseModel):
         default="STK",
         description="Security type: STK, OPT, FUT, CASH, IND, BOND, CRYPTO",
     )
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
-    primary_exchange: str | None = None
-    max_results: int = Field(default=20, ge=1, le=100)
+    exchange: str = Field(default="SMART", min_length=1, description="Exchange to scan, e.g. SMART or a direct exchange code.")
+    currency: str = Field(default="USD", min_length=1, description="ISO 4217 currency filter, e.g. USD, HKD, EUR.")
+    primary_exchange: str | None = Field(default=None, description="Primary listing exchange for SMART-routed equities, e.g. NASDAQ.")
+    max_results: int = Field(default=20, ge=1, le=100, description="Maximum number of matching contracts to return.")
 
 
 class MarketScannerFilter(BaseModel):

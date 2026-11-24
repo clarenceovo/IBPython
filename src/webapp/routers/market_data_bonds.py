@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.feeds.bonds import BondYieldBar, BondYieldHistoryRequest
+from src.feeds.ibkr_historical import HistoricalRequestTooLargeError, HistoricalRequestUnsupportedError
 from src.feeds.models import AssetClass, OHLCVBar, OHLCVRequest
 from src.webapp.cache import stable_cache_key
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
@@ -17,12 +18,25 @@ router = APIRouter(prefix="/market-data", tags=["market-data"])
 
 
 class BondOHLCVLoadRequest(MinimalOHLCVLoadControls):
-    symbol: str | None = Field(default=None, min_length=1, examples=["91282CJN2"])
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
-    sec_id_type: str | None = Field(default=None, examples=["CUSIP"])
-    sec_id: str | None = Field(default=None, examples=["91282CJN2"])
-    con_id: int | None = Field(default=None, gt=0)
+    symbol: str | None = Field(
+        default=None,
+        min_length=1,
+        examples=["91282CJN2"],
+        description="Bond symbol or CUSIP, e.g. 91282CJN2. Optional when sec_id or con_id identifies the bond.",
+    )
+    exchange: str = Field(default="SMART", min_length=1, description="IBKR exchange; SMART routes bond data requests.")
+    currency: str = Field(default="USD", min_length=1, description="IBKR settlement currency of the bond.")
+    sec_id_type: str | None = Field(
+        default=None,
+        examples=["CUSIP"],
+        description="Security identifier type matching sec_id, e.g. CUSIP or ISIN.",
+    )
+    sec_id: str | None = Field(
+        default=None,
+        examples=["91282CJN2"],
+        description="Security identifier value for sec_id_type, e.g. the CUSIP.",
+    )
+    con_id: int | None = Field(default=None, gt=0, description="Optional IBKR contract id for exact bond identification.")
 
     @model_validator(mode="after")
     def validate_bond_identifier(self) -> "BondOHLCVLoadRequest":
@@ -46,9 +60,13 @@ class BondOHLCVLoadRequest(MinimalOHLCVLoadControls):
 class CachedBondYieldHistoryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    request: BondYieldHistoryRequest
-    use_ttl_cache: bool = True
-    cache_ttl_seconds: float | None = Field(default=None, ge=0)
+    request: BondYieldHistoryRequest = Field(
+        description="Bond yield history request: symbol/con_id plus bar_size, duration, and optional lookback window (UTC)."
+    )
+    use_ttl_cache: bool = Field(default=True, description="Serve identical repeated requests from the TTL cache.")
+    cache_ttl_seconds: float | None = Field(
+        default=None, ge=0, description="TTL override in seconds for the response cache. None uses the configured default."
+    )
 
 
 BOND_OHLCV_REQUEST_EXAMPLES = {
@@ -86,6 +104,13 @@ async def load_bond_ohlcv(
     payload: Annotated[BondOHLCVLoadRequest, Body(openapi_examples=BOND_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[OHLCVBar]:
+    """Load historical OHLCV bars for one bond with asset_class preset to bond.
+
+    Accepts symbol, CUSIP/ISIN via sec_id_type/sec_id, or con_id; SMART is
+    the default routing exchange. Returns OHLCVBar rows with UTC timestamps;
+    oversized ranges are auto-chunked and rejected with 422 beyond the chunk
+    cap. Use /market-data/bonds/yields for yield-valued series instead.
+    """
     return await load_ohlcv_with_controls(
         request=payload.to_request(),
         start_datetime=payload.start_datetime,
@@ -103,6 +128,14 @@ async def load_bond_yield_history(
     payload: CachedBondYieldHistoryRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[BondYieldBar]:
+    """Load bid/ask/last yield history for one bond from IBKR.
+
+    Requests the configured yield_fields (bid, ask, last by default) for the
+    bond over the duration/bar_size window and returns BondYieldBar rows
+    with UTC timestamps. Identical requests are served from a TTL cache when
+    enabled. Contract qualification failures return 422; IBKR availability
+    problems surface as 503 through the shared error envelope.
+    """
     async def load() -> list[BondYieldBar]:
         return await state.feed.load_bond_yield_history(payload.request)
 
@@ -121,18 +154,47 @@ class BondYieldDataRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str = Field(min_length=1, examples=["91282CJN2"])
+    symbol: str = Field(
+        min_length=1,
+        examples=["91282CJN2"],
+        description="Bond symbol or CUSIP, e.g. 91282CJN2 for a US Treasury.",
+    )
     what_to_show: str = Field(
         default="YIELD_LAST",
         examples=["YIELD_ASK", "YIELD_BID", "YIELD_BID_ASK", "YIELD_LAST"],
+        description="IBKR yield data type: YIELD_ASK, YIELD_BID, YIELD_BID_ASK, or YIELD_LAST.",
     )
-    bar_size: str = Field(default="1 day", examples=["1 min", "5 mins", "1 hour", "1 day"])
-    duration: str = Field(default="1 Y", examples=["1 M", "6 M", "1 Y"])
-    exchange: str = Field(default="SMART")
-    currency: str = Field(default="USD")
-    use_rth: bool = True
-    use_ttl_cache: bool = True
-    cache_ttl_seconds: float | None = Field(default=300, ge=0)
+    bar_size: str = Field(
+        default="1 day",
+        examples=["1 min", "5 mins", "1 hour", "1 day"],
+        description="IBKR bar size spelling, e.g. '1 min', '5 mins', '1 hour', '1 day'.",
+    )
+    duration: str = Field(
+        default="1 Y",
+        examples=["1 M", "6 M", "1 Y"],
+        description="IBKR lookback window, e.g. '1 D', '1 W', '1 M', '6 M', '1 Y'.",
+    )
+    exchange: str = Field(default="SMART", description="IBKR exchange; SMART routes bond data requests.")
+    currency: str = Field(default="USD", description="IBKR settlement currency of the bond.")
+    use_rth: bool = Field(default=True, description="Restrict bars to regular trading hours.")
+    use_ttl_cache: bool = Field(default=True, description="Serve identical repeated requests from the TTL cache.")
+    cache_ttl_seconds: float | None = Field(
+        default=300, ge=0, description="TTL override in seconds for the response cache."
+    )
+
+
+class BondYieldDataRow(BaseModel):
+    """One bond yield bar; the yield value rides the bar's average price field."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    timestamp: str = Field(description="Bar timestamp as an ISO-8601 UTC string.")
+    open: float = Field(description="Bar open yield.")
+    high: float = Field(description="Bar high yield.")
+    low: float = Field(description="Bar low yield.")
+    close: float = Field(description="Bar close yield.")
+    volume: float = Field(description="Bar volume.")
+    average_yield: float | None = Field(description="Average yield for the bar, mapped from IBKR's average price field.")
 
 
 BOND_YIELD_DATA_EXAMPLES = {
@@ -151,6 +213,7 @@ BOND_YIELD_DATA_EXAMPLES = {
 @router.post(
     "/bonds/yields",
     summary="Get bond yield time series",
+    response_model=list[BondYieldDataRow],
 )
 async def get_yield_data(
     payload: Annotated[
@@ -158,10 +221,15 @@ async def get_yield_data(
         Body(openapi_examples=BOND_YIELD_DATA_EXAMPLES),
     ],
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[dict[str, Any]]:
-    """Get bond yield time series from IBKR.
+) -> list[BondYieldDataRow]:
+    """Load a yield time series for one bond from IBKR.
 
-    Uses IBKR yield-specific whatToShow values (YIELD_ASK, YIELD_BID, YIELD_BID_ASK, YIELD_LAST).
+    Uses IBKR yield-specific whatToShow values (YIELD_ASK, YIELD_BID,
+    YIELD_BID_ASK, YIELD_LAST) instead of prices. Each row carries the bar's
+    OHLCV fields plus `average_yield`; timestamps are ISO-8601 UTC strings.
+    Oversized ranges are auto-chunked and rejected with 422 beyond the chunk
+    cap. Pacing and connection problems surface as 429/503 through the
+    shared error envelope.
     """
     from src.feeds.ibkr_historical import ensure_historical_chunk_limit, plan_historical_auto_chunk
     from src.feeds.models import AssetClass, OHLCVRequest, normalize_bar_size
@@ -196,15 +264,15 @@ async def get_yield_data(
             )
 
         result = [
-            {
-                "timestamp": bar.timestamp.isoformat(),
-                "open": bar.open,
-                "high": bar.high,
-                "low": bar.low,
-                "close": bar.close,
-                "volume": bar.volume,
-                "average_yield": bar.vwap,
-            }
+            BondYieldDataRow(
+                timestamp=bar.timestamp.isoformat(),
+                open=bar.open,
+                high=bar.high,
+                low=bar.low,
+                close=bar.close,
+                volume=bar.volume,
+                average_yield=bar.vwap,
+            )
             for bar in bars
         ]
 
@@ -218,6 +286,9 @@ async def get_yield_data(
                 key, _cached_result, ttl_seconds=payload.cache_ttl_seconds,
             )
         return result
-    except Exception as e:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=500, detail=str(e))
+    except HistoricalRequestTooLargeError:
+        raise
+    except HistoricalRequestUnsupportedError:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e

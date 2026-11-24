@@ -15,6 +15,7 @@ All existing import paths remain backward-compatible:
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import time as monotonic_time
 from collections.abc import Sequence
@@ -411,6 +412,19 @@ class IBKRFeedClient:
     # ------------------------------------------------------------------
 
     async def qualify_contract(self, spec: ContractSpec) -> Any:
+        # Session-scoped memo (see IBKRHistoricalClient.qualify_contract).
+        cache = getattr(self._connection, "qualification_cache", None)
+        cached = cache.get(spec) if cache is not None else None
+        if cached is not None:
+            logger.debug("qualify_contract cache hit for %s", spec.symbol)
+            return cached
+        contract = await self._qualify_contract_uncached(spec)
+        if cache is not None:
+            cache.set(spec, contract)
+            return copy.deepcopy(contract)
+        return contract
+
+    async def _qualify_contract_uncached(self, spec: ContractSpec) -> Any:
         # NOTE: Intentionally not delegating to self._historical.qualify_contract()
         # because tests monkeypatch build_ibkr_contract in this module's namespace.
         await self._ensure_connected()

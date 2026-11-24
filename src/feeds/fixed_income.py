@@ -41,14 +41,14 @@ class BondFutureContractSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    market: str = Field(min_length=1)
-    futures_symbol: str | None = Field(default=None, min_length=1)
-    exchange: str | None = Field(default=None, min_length=1)
-    currency: str | None = Field(default=None, min_length=1)
-    contract_month: str | None = Field(default=None, min_length=1)
-    local_symbol: str | None = Field(default=None, min_length=1)
-    con_id: int | None = Field(default=None, gt=0)
-    multiplier: str | None = Field(default=None, min_length=1)
+    market: str = Field(min_length=1, description="Sovereign market name or alias: UST/US_TREASURY, JGB, KTB, BUND/GERMAN_BUND, GILT/UK_GILT.")
+    futures_symbol: str | None = Field(default=None, min_length=1, description="Futures root symbol, e.g. ZN, ZB, ZF, ZT, JGB, GBL, FGBM. Defaults to the market's first standard future.")
+    exchange: str | None = Field(default=None, min_length=1, description="Futures exchange; defaults per market (CBOT, OSE.JPN, KRX, EUREX, ICEEU).")
+    currency: str | None = Field(default=None, min_length=1, description="ISO 4217 currency; defaults per market (USD, JPY, KRW, EUR, GBP).")
+    contract_month: str | None = Field(default=None, min_length=1, description="Contract month as YYYYMM, e.g. 202606. One of contract_month, local_symbol, or con_id is required.")
+    local_symbol: str | None = Field(default=None, min_length=1, description="IBKR local symbol for the exact future, e.g. ZNM6.")
+    con_id: int | None = Field(default=None, gt=0, description="IBKR contract id for the exact future.")
+    multiplier: str | None = Field(default=None, min_length=1, description="Contract multiplier override, e.g. 1000.")
 
     @field_validator("market", "futures_symbol", "exchange", "currency", "contract_month", "local_symbol", "multiplier", mode="before")
     @classmethod
@@ -108,15 +108,15 @@ class BondFutureContractSpec(BaseModel):
 class BondFutureQuote(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    market: SovereignBondMarket
-    futures_symbol: str
-    exchange: str
-    currency: str
-    contract_month: str | None = None
-    timestamp: datetime
-    price: float = Field(gt=0)
-    bar: OHLCVBar
-    source: str = "ibkr"
+    market: SovereignBondMarket = Field(description="Sovereign market of the future.")
+    futures_symbol: str = Field(description="Futures root symbol, e.g. ZN.")
+    exchange: str = Field(description="Futures exchange, e.g. CBOT.")
+    currency: str = Field(description="ISO 4217 quote currency.")
+    contract_month: str | None = Field(default=None, description="Contract month as YYYYMM; null when quoted by conId only.")
+    timestamp: datetime = Field(description="UTC timestamp of the latest bar behind the quote.")
+    price: float = Field(gt=0, description="Latest traded (or bid/ask) price from the most recent bar.")
+    bar: OHLCVBar = Field(description="The underlying latest OHLCV bar.")
+    source: str = Field(default="ibkr", description="Quote source identifier.")
 
 
 class DeliverableBondInput(BaseModel):
@@ -124,13 +124,13 @@ class DeliverableBondInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    bond: BondInstrument
-    conversion_factor: float = Field(gt=0)
-    clean_price: float = Field(gt=0)
-    accrued_interest: float = 0.0
-    carry: float = 0.0
-    delivery_date: date | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    bond: BondInstrument = Field(description="Static bond term data (coupon, maturity, symbol).")
+    conversion_factor: float = Field(gt=0, description="Exchange conversion factor for delivery into the future.")
+    clean_price: float = Field(gt=0, description="Provider clean price used for CTD ranking.")
+    accrued_interest: float = Field(default=0.0, description="Accrued interest per unit notional.")
+    carry: float = Field(default=0.0, description="Carry adjustment used by the provider.")
+    delivery_date: date | None = Field(default=None, description="Delivery date when the provider supplies one; null otherwise.")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Provider passthrough metadata for the basket row.")
 
 
 class DeliverableBasketRequest(BaseModel):
@@ -152,58 +152,70 @@ class DeliverableBasketRequest(BaseModel):
 class FixedIncomeCurveDiagnostics(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: FixedIncomeCurveMode
-    provider: str
-    warnings: tuple[str, ...] = ()
-    inputs_used: int = 0
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    mode: FixedIncomeCurveMode = Field(description="Curve construction mode: cash_bond, futures_implied, or indicative_placeholder.")
+    provider: str = Field(description="Reference provider used for basket and bond term data.")
+    warnings: tuple[str, ...] = Field(default=(), description="Non-fatal warnings produced while building the curve.")
+    inputs_used: int = Field(default=0, description="Number of curve instruments that contributed.")
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="UTC time the curve was generated.")
 
 
 class CTDAnalyticsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    market: SovereignBondMarket
-    futures_symbol: str
-    contract_month: str | None
-    valuation_date: date
-    futures_price: float
-    snapshot: CTDBondSnapshot
-    selected: CTDBondCandidate
-    provider: str
-    diagnostics: FixedIncomeCurveDiagnostics
+    market: SovereignBondMarket = Field(description="Sovereign market of the future.")
+    futures_symbol: str = Field(description="Futures root symbol, e.g. ZN.")
+    contract_month: str | None = Field(description="Contract month as YYYYMM; null when driven by conId/local_symbol.")
+    valuation_date: date = Field(description="Valuation date for the analytics.")
+    futures_price: float = Field(description="Futures settlement/last price used in the CTD calculation.")
+    snapshot: CTDBondSnapshot = Field(description="Cheapest-to-deliver bond snapshot (clean/dirty price, net basis, implied repo).")
+    selected: CTDBondCandidate = Field(description="The selected cheapest-to-deliver bond.")
+    provider: str = Field(description="Reference provider that supplied the deliverable basket.")
+    diagnostics: FixedIncomeCurveDiagnostics = Field(description="Construction mode, warnings, and input count.")
 
 
 class FuturesImpliedCurvePoint(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    futures_symbol: str
-    contract_month: str | None
-    selected_ctd: BondInstrument
-    implied_clean_price: float = Field(gt=0)
+    futures_symbol: str = Field(description="Futures root symbol backing this curve point.")
+    contract_month: str | None = Field(description="Contract month as YYYYMM; null when driven by conId/local_symbol.")
+    selected_ctd: BondInstrument = Field(description="Cheapest-to-deliver bond selected for this expiry.")
+    implied_clean_price: float = Field(gt=0, description="Clean price implied by the futures quote (futures price times conversion factor plus carry).")
     implied_yield: float = Field(description="Decimal yield to maturity solved from the futures-implied clean price.")
-    maturity_date: date
+    maturity_date: date = Field(description="Maturity date of the selected deliverable bond.")
 
 
 class FuturesImpliedCurveResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    market: SovereignBondMarket
-    currency: str
-    valuation_date: date
-    curve: YieldCurveDTO
-    points: tuple[FuturesImpliedCurvePoint, ...]
-    ctd_snapshots: tuple[CTDAnalyticsResponse, ...]
-    diagnostics: FixedIncomeCurveDiagnostics
+    market: SovereignBondMarket = Field(description="Sovereign market of the curve.")
+    currency: str = Field(description="ISO 4217 curve currency.")
+    valuation_date: date = Field(description="Valuation date of the curve.")
+    curve: YieldCurveDTO = Field(description="Bootstrapped zero curve (dates, zero rates, discount factors).")
+    points: tuple[FuturesImpliedCurvePoint, ...] = Field(description="One point per futures expiry, with its CTD and implied yield.")
+    ctd_snapshots: tuple[CTDAnalyticsResponse, ...] = Field(description="Full CTD analytics per expiry used to build the curve.")
+    diagnostics: FixedIncomeCurveDiagnostics = Field(description="Construction mode, provider, warnings, and input count.")
+
+
+class CurveSpreadPoint(BaseModel):
+    """Zero-rate spread between the cash and futures-implied curve at one maturity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cash_maturity_date: str = Field(description="Maturity date of the cash-curve point (ISO date string).")
+    futures_maturity_date: str = Field(description="Maturity date of the futures-implied point (ISO date string).")
+    cash_zero_rate: float = Field(description="Decimal zero rate on the cash curve.")
+    futures_zero_rate: float = Field(description="Decimal zero rate on the futures-implied curve.")
+    spread: float = Field(description="Futures zero rate minus cash zero rate, in decimals.")
 
 
 class CurveComparisonResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    market: SovereignBondMarket
-    valuation_date: date
-    cash_curve: BondCurveResponse
-    futures_implied_curve: FuturesImpliedCurveResponse
-    zero_rate_spreads: tuple[dict[str, Any], ...]
+    market: SovereignBondMarket = Field(description="Sovereign market of both curves.")
+    valuation_date: date = Field(description="Valuation date of the comparison.")
+    cash_curve: BondCurveResponse = Field(description="Indicative cash-bond curve.")
+    futures_implied_curve: FuturesImpliedCurveResponse = Field(description="Futures-implied curve built from IBKR prices plus provider data.")
+    zero_rate_spreads: tuple[CurveSpreadPoint, ...] = Field(description="Point-by-point zero-rate spreads between the two curves.")
 
 
 @runtime_checkable
@@ -459,16 +471,16 @@ def compare_curves(
     cash_curve: BondCurveResponse,
     futures_curve: FuturesImpliedCurveResponse,
 ) -> CurveComparisonResponse:
-    spreads: list[dict[str, Any]] = []
+    spreads: list[CurveSpreadPoint] = []
     for cash_point, futures_point in zip(cash_curve.curve.points, futures_curve.curve.points, strict=False):
         spreads.append(
-            {
-                "cash_maturity_date": cash_point.maturity_date.isoformat(),
-                "futures_maturity_date": futures_point.maturity_date.isoformat(),
-                "cash_zero_rate": cash_point.zero_rate,
-                "futures_zero_rate": futures_point.zero_rate,
-                "spread": futures_point.zero_rate - cash_point.zero_rate,
-            }
+            CurveSpreadPoint(
+                cash_maturity_date=cash_point.maturity_date.isoformat(),
+                futures_maturity_date=futures_point.maturity_date.isoformat(),
+                cash_zero_rate=cash_point.zero_rate,
+                futures_zero_rate=futures_point.zero_rate,
+                spread=futures_point.zero_rate - cash_point.zero_rate,
+            )
         )
     return CurveComparisonResponse(
         market=cash_curve.market,

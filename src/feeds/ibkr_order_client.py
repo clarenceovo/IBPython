@@ -88,7 +88,7 @@ def _require_orders_enabled(method: Any) -> Any:
 
 
 def _is_deactivated_order(order: Any) -> bool:
-    """TWS API 10.47: reqOpenOrders may return de-activated orders."""
+    """TWS API 10.48: reqOpenOrders may return de-activated orders."""
     raw = str(getattr(order, "status", "") or "").strip().lower()
     return raw.replace("-", "").replace("_", "").replace(" ", "") == "deactivated"
 
@@ -328,7 +328,7 @@ class IBKROrderClient:
         if request.outside_rth:
             order.outsideRth = True
 
-        # TWS API 10.47 order fields. ib_async 2.1.0 does not model them yet,
+        # TWS API 10.45/10.50 order fields. ib_async 2.1.0 does not model them yet,
         # so apply defensively: the fields light up once the client catches up.
         if request.hedge_max_size is not None:
             if hasattr(order, "hedgeMaxSize"):
@@ -336,7 +336,7 @@ class IBKROrderClient:
             else:
                 raise IBKROrderError(
                     "hedge_max_size requires an ib_async release that models "
-                    "Order.hedgeMaxSize (TWS API 10.47); installed client does not."
+                    "Order.hedgeMaxSize (TWS API 10.45); installed client does not."
                 )
         if request.conditions_include_overnight:
             if hasattr(order, "conditionsIncludeOvernight"):
@@ -344,7 +344,7 @@ class IBKROrderClient:
             else:
                 raise IBKROrderError(
                     "conditions_include_overnight requires an ib_async release that "
-                    "models Order.conditionsIncludeOvernight (TWS API 10.47); "
+                    "models Order.conditionsIncludeOvernight (TWS API 10.50); "
                     "installed client does not."
                 )
 
@@ -886,7 +886,7 @@ class IBKROrderClient:
     async def load_open_orders(self, *, include_deactivated: bool = False) -> list[OpenOrder]:
         """Load all currently open (working) orders.
 
-        TWS API 10.47: reqOpenOrders responses now include de-activated orders.
+        TWS API 10.48: reqOpenOrders responses now include de-activated orders.
         De-activated orders are filtered out unless include_deactivated is set.
         """
         await self._connection.ensure_connected()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -31,18 +32,20 @@ router = APIRouter()
 
 
 class SymbolNewsRequest(BusinessDateRangeControls):
+    """Request body for symbol news: historical headlines plus optional article bodies."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1)
-    asset_class: AssetClass = AssetClass.EQUITY
-    exchange: str | None = Field(default=None, min_length=1)
-    currency: str | None = Field(default=None, min_length=1)
-    primary_exchange: str | None = Field(default=None, min_length=1)
-    con_id: int | None = Field(default=None, gt=0)
-    provider_codes: tuple[str, ...] | None = None
-    total_results: int = Field(default=20, ge=1, le=300)
-    include_articles: bool = False
-    max_concurrent_article_requests: int = Field(default=4, ge=1, le=10)
+    symbol: str = Field(min_length=1, description="Underlying symbol in the notation of asset_class, e.g. AAPL (equity), 0700.HK (HK equity), EUR.USD (fx).")
+    asset_class: AssetClass = Field(default=AssetClass.EQUITY, description="Asset class used to qualify the symbol: equity, fx, future, bond, index, crypto, option.")
+    exchange: str | None = Field(default=None, min_length=1, description="Exchange override for qualification; defaults are resolved per asset class (SMART for equities, IDEALPRO for fx).")
+    currency: str | None = Field(default=None, min_length=1, description="ISO 4217 currency override, e.g. USD, HKD.")
+    primary_exchange: str | None = Field(default=None, min_length=1, description="Primary listing exchange for SMART-routed equities, e.g. NASDAQ.")
+    con_id: int | None = Field(default=None, gt=0, description="IBKR contract id; skips symbol qualification when supplied.")
+    provider_codes: tuple[str, ...] | None = Field(default=None, description="News provider codes to query (e.g. DJNL, Reuters); null queries all entitled providers. Codes are uppercased.")
+    total_results: int = Field(default=20, ge=1, le=300, description="Maximum number of headlines IBKR returns.")
+    include_articles: bool = Field(default=False, description="Also fetch full article bodies for the returned headlines (one request per headline, bounded by max_concurrent_article_requests).")
+    max_concurrent_article_requests: int = Field(default=4, ge=1, le=10, description="Upper bound on concurrent article fetches when include_articles is true.")
 
     @field_validator("provider_codes", mode="before")
     @classmethod
@@ -56,31 +59,37 @@ class SymbolNewsRequest(BusinessDateRangeControls):
 
 
 class BusinessNewsHeadline(BaseModel):
+    """One news headline returned by the business news endpoints."""
+
     model_config = ConfigDict(extra="forbid")
 
-    timestamp: object
-    provider_code: str
-    article_id: str
-    headline: str
-    article: NewsArticle | None = None
-    source: str = "ibkr_news"
+    timestamp: datetime = Field(description="UTC publication time of the headline.")
+    provider_code: str = Field(description="IBKR news provider code, e.g. DJNL.")
+    article_id: str = Field(description="Provider-side article identifier for getNewsArticle lookups.")
+    headline: str = Field(description="Headline text.")
+    article: NewsArticle | None = Field(default=None, description="Full article body when include_articles was set and the fetch succeeded; null otherwise.")
+    source: str = Field(default="ibkr_news", description="Source identifier.")
 
 
 class SymbolNewsResponse(BaseModel):
+    """Response envelope for symbol news."""
+
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str
-    asset_class: AssetClass
-    con_id: int
-    provider_codes: tuple[str, ...]
-    headlines: list[BusinessNewsHeadline]
+    symbol: str = Field(description="Uppercase symbol the news was queried for.")
+    asset_class: AssetClass = Field(description="Asset class used for qualification.")
+    con_id: int = Field(description="IBKR contract id the news is bound to.")
+    provider_codes: tuple[str, ...] = Field(description="Provider codes actually queried.")
+    headlines: list[BusinessNewsHeadline] = Field(description="Headlines, newest first as IBKR returns them, bounded by total_results.")
 
 
 class CachedNewsArticleRequest(BusinessCacheControls):
+    """Request body for a single news article body."""
+
     model_config = ConfigDict(extra="forbid")
 
-    provider_code: str = Field(min_length=1)
-    article_id: str = Field(min_length=1)
+    provider_code: str = Field(min_length=1, description="IBKR news provider code, e.g. DJNL; uppercased.")
+    article_id: str = Field(min_length=1, description="Provider-side article identifier from a headline.")
 
     @field_validator("provider_code", mode="before")
     @classmethod
@@ -96,10 +105,26 @@ class CachedNewsArticleRequest(BusinessCacheControls):
     summary="Get entitled IBKR news providers",
 )
 async def get_news_providers(
-    use_ttl_cache: bool = Query(default=True),
-    cache_ttl_seconds: float | None = Query(default=300, ge=0),
+    use_ttl_cache: bool = Query(default=True, description="Serve from the shared TTL cache when possible."),
+    cache_ttl_seconds: float | None = Query(default=300, ge=0, description="Cache entry lifetime in seconds."),
+    limit: int | None = Query(default=None, ge=1, le=1000, description="Return at most the first N providers; omit for all."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[NewsProvider]:
+    """Return the news providers this account is entitled to query.
+
+    Each entry carries a provider_code and a display name. Use the codes in
+    getSymbolNews provider_codes and getNewsArticle lookups. An empty list
+    means the account has no news entitlement (symbol-news endpoints then
+    fail with 503). Responses are cached for cache_ttl_seconds by default.
+    """
+    providers = await _load_news_providers(use_ttl_cache=use_ttl_cache, cache_ttl_seconds=cache_ttl_seconds, state=state)
+    return providers[:limit] if isinstance(limit, int) else providers
+
+
+async def _load_news_providers(
+    *, use_ttl_cache: bool, cache_ttl_seconds: float | None, state: IBKRRestAppState
+) -> list[NewsProvider]:
+    """Load entitled news providers with optional TTL caching."""
     async def load() -> list[NewsProvider]:
         return await state.feed.load_news_providers()
 
@@ -124,6 +149,16 @@ async def get_symbol_news(
     ],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> SymbolNewsResponse:
+    """Return historical news headlines for one symbol, with optional article bodies.
+
+    Qualifies the symbol to a con_id when one is not supplied, then loads up
+    to total_results headlines from the entitled providers. When
+    include_articles is true, article bodies are fetched concurrently and
+    attached per headline. The response carries the resolved con_id and the
+    provider codes used. Errors: 503 when no news providers are entitled,
+    422 for provider codes that are not entitled, 404 when IBKR cannot
+    qualify the symbol.
+    """
     async def load() -> SymbolNewsResponse:
         return await _load_symbol_news(payload, state)
 
@@ -148,6 +183,13 @@ async def get_news_article(
     ],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> NewsArticle:
+    """Return the full body of one IBKR news article.
+
+    Identify the article by provider_code plus article_id, exactly as a
+    getSymbolNews headline reports them. The response carries the article
+    text, type, and UTC receive time. Cached for cache_ttl_seconds by
+    default.
+    """
     request = NewsArticleRequest(provider_code=payload.provider_code, article_id=payload.article_id)
 
     async def load() -> NewsArticle:
@@ -163,7 +205,7 @@ async def get_news_article(
 
 
 async def _load_symbol_news(payload: SymbolNewsRequest, state: IBKRRestAppState) -> SymbolNewsResponse:
-    providers = await get_news_providers(
+    providers = await _load_news_providers(
         use_ttl_cache=payload.use_ttl_cache,
         cache_ttl_seconds=payload.cache_ttl_seconds,
         state=state,

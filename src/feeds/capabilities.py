@@ -59,15 +59,15 @@ def gateway_capabilities(connection: Any, *, orders_enabled: bool = True) -> Gat
             "IBKR_ORDERS_ENABLED master switch; read-only order queries stay available."
         ),
     )
-    features.update(_tws_1047_features())
+    features.update(_tws_modern_features())
     return GatewayCapabilities(
         client_version=version("ib-async"), connected=connected,
         negotiated_server_protocol=protocol, features=features,
     )
 
 
-def _tws_1047_features() -> dict[str, FeatureCapability]:
-    """Feature surface introduced in the TWS API 10.4x production line.
+def _tws_modern_features() -> dict[str, FeatureCapability]:
+    """Feature surface from the TWS API 10.45-10.52 production line.
 
     Fields that the installed ib_async does not model yet are reported as
     client-unsupported so callers can degrade instead of sending dead fields.
@@ -85,14 +85,14 @@ def _tws_1047_features() -> dict[str, FeatureCapability]:
         implemented=True,
         client_supported="hedgeMaxSize" in modeled,
         availability="unknown",
-        reason="Order field hedgeMaxSize (TWS API 10.47); REST surface ready, "
+        reason="Order field hedgeMaxSize (TWS API 10.45); REST surface ready, "
         "wire support arrives with an ib_async release that models the field.",
     )
     features["overnight_conditions"] = FeatureCapability(
         implemented=True,
         client_supported="conditionsIncludeOvernight" in modeled,
         availability="unknown",
-        reason="Order field conditionsIncludeOvernight (TWS API 10.47); REST "
+        reason="Order field conditionsIncludeOvernight (TWS API 10.50); REST "
         "surface ready, wire support arrives with an ib_async release that "
         "models the field.",
     )
@@ -100,21 +100,43 @@ def _tws_1047_features() -> dict[str, FeatureCapability]:
         implemented=True,
         client_supported=None,
         availability="unknown",
-        reason="TWS API 10.47: reqOpenOrders responses include de-activated "
+        reason="TWS API 10.48: reqOpenOrders responses include de-activated "
         "orders; load_open_orders filters them unless include_deactivated is set.",
+    )
+    features["early_session_tifs"] = FeatureCapability(
+        implemented=True,
+        client_supported=True,
+        availability="unknown",
+        reason="TWS API EARLY session (live 2026-12-06): TIFs ERL (20:00-21:00 "
+        "US/Eastern) and EPD (EARLY+DAY) are accepted; outside_rth is rejected "
+        "with them. The OVERNIGHT exchange and OVT/OND TIFs deprecate the same day.",
+    )
+    features["contract_settlement_type"] = FeatureCapability(
+        implemented=False,
+        client_supported=False,
+        availability="unsupported",
+        reason="ContractDetails.settlementMethod (TWS API 10.49, requires "
+        "TWS/Gateway 10.49.01+): ib_async 2.1.0 does not decode the field.",
+    )
+    features["order_execution_submitter"] = FeatureCapability(
+        implemented=False,
+        client_supported=False,
+        availability="unsupported",
+        reason="Order/Execution submitter username (TWS API 10.34.01): ib_async "
+        "2.1.0 does not model the field on either object.",
     )
     features["odd_lot_ticks"] = FeatureCapability(
         implemented=False,
         client_supported=False,
         availability="unsupported",
-        reason="Tick types 105-110 (oddLotBid/Ask and sizes) need an ib_async "
-        "decoder release; no local mapping yet.",
+        reason="Tick types 105-110 (oddLotBid/Ask and sizes, TWS API 10.46) need "
+        "an ib_async decoder release; no local mapping yet.",
     )
     features["fractional_last_sizes"] = FeatureCapability(
         implemented=False,
         client_supported=False,
         availability="unsupported",
-        reason="Fractional last sizes in tickSize responses need an ib_async "
-        "decoder release; no local mapping yet.",
+        reason="Fractional/Decimal last sizes on ticks 5/71 (TWS API 10.44) need "
+        "an ib_async decoder release; no local mapping yet.",
     )
     return features

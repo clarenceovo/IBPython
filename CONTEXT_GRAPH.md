@@ -8,7 +8,9 @@ Python service over TWS API (ib_async) plus IBKR Web API. It serves market data,
 
 ## Layers
 
-- `src/webapp/` — FastAPI app. `routers/` holds all HTTP endpoints. `dependencies.py` builds the shared state (`feed`, `loader`, `redis`, `event_contracts`). `consolidated.py` holds the shared section runner for consolidated endpoints.
+- `src/webapp/` — FastAPI app. `routers/` holds all HTTP endpoints. `dependencies.py` builds the shared state (`feed`, `loader`, `redis`, `event_contracts`). `consolidated.py` holds the shared section runner for consolidated endpoints (per-section timeout, default 20 s, `IBKR_REST_CONSOLIDATED_SECTION_TIMEOUT_SECONDS`).
+- `src/webapp/api_error.py` — shared error envelope. Every 4xx/5xx body carries `detail`, `code` (stable classification), `retryable`, and `retry_after_seconds`. One handler family in `app.py` maps typed feed exceptions to statuses and codes; `classify_error` derives codes for plain `HTTPException`s.
+- `src/webapp/openapi_agent.py` — OpenAPI post-pass (run once, idempotent). Replaces auto-generated operation ids with path-derived camelCase ids, adds `responses.default -> ApiError` on every operation, annotates `x-agent-side-effect: read | mutate`, fills tag descriptions, and appends the "For AI agents" guide to `info.description`.
 - `src/webapp/routers/business_consolidated.py` — `GET /business/consolidated/overview`: account summary, PnL, positions, portfolio, open orders. One call, isolated failures.
 - `src/webapp/routers/market_data_consolidated.py` — `GET /market-data/consolidated/resolve/{symbol}` (universal converter) and `GET /market-data/consolidated/universal/{symbol}` (all-asset-class fetch: resolve, then ohlcv/ticks/depth/schedule/snapshot sections).
 - `src/feeds/symbol_resolver.py` — universal symbol converter. One notation in (equity suffixes, FX separators, crypto roots, futures continuous/dated notations, index aliases), one ResolvedSymbol out. `matched_rule` records why. Explicit `asset_class` pins option/bond pass-through.
@@ -45,7 +47,10 @@ Read-only order queries stay open: open orders, completed orders, executions, or
 - Order writes fail closed. A missing or unreadable config means "no orders".
 - The event-contract live order needs two flags: `IBKR_ORDERS_ENABLED=true` and `IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED=true`.
 - Order REST endpoints also need a bearer token from Redis (`OrderAuth::bearer_token`).
-- TWS API baseline 10.47. Fundamental data endpoints are removed; WSH events replace them. See `src/feeds/capabilities.py`.
+- TWS API baseline 10.52 (Stable 10.50 / Latest 10.52). Fundamental data endpoints are removed; WSH events replace them. EARLY-session TIFs `ERL`/`EPD` are accepted (live 2026-12-06); `outside_rth` is rejected with them. See `src/feeds/capabilities.py`.
+- Contract qualification is memoised per gateway session (`QualificationCache` on `IBKRConnectionManager`, TTL 600 s, cleared on session end; hits return deep copies).
+- FX-option snapshot capture batches qualification and uses one shared wait for the whole batch (mirrors the equity capture pattern).
+- OHLCV CPU work (sort, validation, provenance copy, archive serialization) runs off the event loop via `asyncio.to_thread`.
 
 ## Test Entry Points
 

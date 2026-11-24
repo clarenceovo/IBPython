@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import math
 import time as monotonic_time
@@ -441,6 +442,20 @@ class IBKRHistoricalClient:
         return self._connection.ib
 
     async def qualify_contract(self, spec: ContractSpec) -> Any:
+        # Session-scoped memo: chunked backfills and consolidated endpoints
+        # qualify the same spec repeatedly; conIds are stable per session.
+        cache = getattr(self._connection, "qualification_cache", None)
+        cached = cache.get(spec) if cache is not None else None
+        if cached is not None:
+            logger.debug("qualify_contract cache hit for %s", spec.symbol)
+            return cached
+        contract = await self._qualify_contract_uncached(spec)
+        if cache is not None:
+            cache.set(spec, contract)
+            return copy.deepcopy(contract)
+        return contract
+
+    async def _qualify_contract_uncached(self, spec: ContractSpec) -> Any:
         await self._connection.ensure_connected()
         logger.info(
             "qualify_contract: symbol=%s asset_class=%s exchange=%s primary_exchange=%s con_id=%s",

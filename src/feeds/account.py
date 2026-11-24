@@ -10,66 +10,66 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class AccountValueDTO(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    account: str
-    tag: str
-    value: str
-    currency: str = ""
-    model_code: str = ""
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    account: str = Field(description="IBKR account id that reported this value.")
+    tag: str = Field(description="IBKR summary tag, e.g. NetLiquidation, TotalCashValue, AvailableFunds, ExcessLiquidity, Cushion, GrossPositionValue.")
+    value: str = Field(description="Value as reported by IBKR (string; may contain thousands separators).")
+    currency: str = Field(default="", description="ISO 4217 currency of the value; empty when IBKR reports none.")
+    model_code: str = Field(default="", description="IBKR model code used for the value; empty for the base model.")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="UTC time the value snapshot was normalized.")
 
 
 class AccountSummaryDTO(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    account: str
-    values: dict[str, AccountValueDTO]
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    account: str = Field(description="IBKR account id.")
+    values: dict[str, AccountValueDTO] = Field(description="Summary values keyed by IBKR tag (NetLiquidation, TotalCashValue, ...).")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="UTC time the summary was normalized.")
 
 
 class LivePositionDTO(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    account: str
-    con_id: int | None = None
-    symbol: str
-    sec_type: str
-    exchange: str = ""
-    currency: str = ""
-    position: float
-    average_cost: float
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    account: str = Field(description="IBKR account id holding the position.")
+    con_id: int | None = Field(default=None, description="IBKR contract id; null when IBKR reports none.")
+    symbol: str = Field(description="Contract symbol, e.g. AAPL or ESZ6.")
+    sec_type: str = Field(description="IBKR security type, e.g. STK, OPT, FUT, CASH, IND.")
+    exchange: str = Field(default="", description="Listing or routing exchange; empty when IBKR reports none.")
+    currency: str = Field(default="", description="ISO 4217 position currency.")
+    position: float = Field(description="Signed quantity; negative for short positions.")
+    average_cost: float = Field(description="Average open cost per contract in the position currency.")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="UTC time the position snapshot was normalized.")
     # Option contract identity (None for non-option positions).
-    strike: float | None = None
-    expiry: str | None = None  # YYYYMMDD or YYYYMM from IBKR
-    right: str | None = None  # C or P
-    multiplier: float | None = None
-    local_symbol: str | None = None
-    underlying_symbol: str | None = None
+    strike: float | None = Field(default=None, description="Option strike; null for non-option positions.")
+    expiry: str | None = Field(default=None, description="Option expiry as IBKR reports it (YYYYMMDD or YYYYMM); null for non-option positions.")
+    right: str | None = Field(default=None, description="Option right: C or P; null for non-option positions.")
+    multiplier: float | None = Field(default=None, description="Contract multiplier applied to price and Greeks.")
+    local_symbol: str | None = Field(default=None, description="IBKR local symbol, e.g. AAPL 211120C00150000.")
+    underlying_symbol: str | None = Field(default=None, description="Underlying symbol for option or futures positions; null otherwise.")
 
 
 class PortfolioItemDTO(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    account: str
-    con_id: int | None = None
-    symbol: str
-    sec_type: str
-    exchange: str = ""
-    currency: str = ""
-    position: float
-    market_price: float | None = None
-    market_value: float | None = None
-    average_cost: float | None = None
-    unrealized_pnl: float | None = None
-    realized_pnl: float | None = None
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    account: str = Field(description="IBKR account id holding the item.")
+    con_id: int | None = Field(default=None, description="IBKR contract id; null when IBKR reports none.")
+    symbol: str = Field(description="Contract symbol, e.g. AAPL or ESZ6.")
+    sec_type: str = Field(description="IBKR security type, e.g. STK, OPT, FUT, CASH, IND.")
+    exchange: str = Field(default="", description="Listing or routing exchange; empty when IBKR reports none.")
+    currency: str = Field(default="", description="ISO 4217 item currency.")
+    position: float = Field(description="Signed quantity; negative for short positions.")
+    market_price: float | None = Field(default=None, description="Last mark price per contract; null when not reported.")
+    market_value: float | None = Field(default=None, description="Mark-to-market value of the position; null when not reported.")
+    average_cost: float | None = Field(default=None, description="Average open cost per contract; null when not reported.")
+    unrealized_pnl: float | None = Field(default=None, description="Unrealized profit and loss in the item currency; null when not reported.")
+    realized_pnl: float | None = Field(default=None, description="Realized profit and loss in the item currency; null when not reported.")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="UTC time the item was normalized.")
     # Option contract identity (None for non-option positions).
-    strike: float | None = None
-    expiry: str | None = None
-    right: str | None = None
-    multiplier: float | None = None
-    local_symbol: str | None = None
-    underlying_symbol: str | None = None
+    strike: float | None = Field(default=None, description="Option strike; null for non-option positions.")
+    expiry: str | None = Field(default=None, description="Option expiry as IBKR reports it (YYYYMMDD or YYYYMM); null for non-option positions.")
+    right: str | None = Field(default=None, description="Option right: C or P; null for non-option positions.")
+    multiplier: float | None = Field(default=None, description="Contract multiplier applied to price and Greeks.")
+    local_symbol: str | None = Field(default=None, description="IBKR local symbol.")
+    underlying_symbol: str | None = Field(default=None, description="Underlying symbol for option or futures positions; null otherwise.")
 
     @field_validator("market_price", "market_value", "average_cost", "unrealized_pnl", "realized_pnl", mode="before")
     @classmethod
@@ -80,12 +80,12 @@ class PortfolioItemDTO(BaseModel):
 class AccountPnLDTO(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    account: str
-    model_code: str = ""
-    daily_pnl: float | None = None
-    unrealized_pnl: float | None = None
-    realized_pnl: float | None = None
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    account: str = Field(description="IBKR account id.")
+    model_code: str = Field(default="", description="IBKR PnL model code; empty for the base model.")
+    daily_pnl: float | None = Field(default=None, description="Day profit and loss in the account currency; null when not reported.")
+    unrealized_pnl: float | None = Field(default=None, description="Unrealized profit and loss; null when not reported.")
+    realized_pnl: float | None = Field(default=None, description="Realized profit and loss; null when not reported.")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="UTC time the PnL snapshot was normalized.")
 
     @field_validator("daily_pnl", "unrealized_pnl", "realized_pnl", mode="before")
     @classmethod
@@ -94,9 +94,9 @@ class AccountPnLDTO(BaseModel):
 
 
 class PositionPnLDTO(AccountPnLDTO):
-    con_id: int = Field(gt=0)
-    position: float | None = None
-    value: float | None = None
+    con_id: int = Field(gt=0, description="IBKR contract id of the position.")
+    position: float | None = Field(default=None, description="Signed quantity of the position; null when not reported.")
+    value: float | None = Field(default=None, description="Mark-to-market value of the position; null when not reported.")
 
     @field_validator("position", "value", mode="before")
     @classmethod

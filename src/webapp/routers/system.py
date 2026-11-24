@@ -24,6 +24,7 @@ from src.feeds.exceptions import ConnectionStatus
 from src.feeds.capabilities import GatewayCapabilities
 from src.feeds.ibkr_connection import IBKRConnectionManager, IBKRConnectionSwitch
 from src.config.config_constant import APP_VERSION
+from src.transport.scheduler_health import SchedulerHealthReport
 
 router = APIRouter(prefix="/system", tags=["system"])
 # Secondary router for endpoints outside the /system/ prefix (migrated from alerts).
@@ -40,8 +41,8 @@ class LivenessResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: str  # always "alive"
-    app_name: str
+    status: str = Field(description="Always 'alive'.")  # always "alive"
+    app_name: str = Field(description="Configured REST app name.")
 
 
 class HealthResponse(BaseModel):
@@ -49,26 +50,26 @@ class HealthResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: str  # "ok", "degraded", "down"
-    app_name: str
-    ibkr_connection: str | None = None
-    redis_connection: str | None = None
+    status: str = Field(description="'ok' or 'degraded'.")  # "ok", "degraded", "down"
+    app_name: str = Field(description="Configured REST app name.")
+    ibkr_connection: str | None = Field(default=None, description="IBKR connection state or null when no feed is attached.")
+    redis_connection: str | None = Field(default=None, description="Redis connection state or null when not configured.")
 
 
 class ReadinessResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: str  # "ready" or "unavailable"
-    app_name: str
-    ibkr_connection: str | None = None
-    redis_connection: str | None = None
+    status: str = Field(description="'ready' or 'unavailable'; unavailable responses carry HTTP 503.")  # "ready" or "unavailable"
+    app_name: str = Field(description="Configured REST app name.")
+    ibkr_connection: str | None = Field(default=None, description="IBKR connection state or null when no feed is attached.")
+    redis_connection: str | None = Field(default=None, description="Redis connection state or null when not configured.")
 
 
 class MarketDataTypeResponse(BaseModel):
     """Response model for market data type switch."""
 
-    market_data_type: int
-    status: str
+    market_data_type: int = Field(description="Applied market data type: 1=Live, 2=Frozen, 3=Delayed, 4=Delayed Frozen.")
+    status: str = Field(description="'ok' or the status reported by the feed.")
 
 
 class IBKRClientConnectionStatus(BaseModel):
@@ -174,23 +175,58 @@ async def set_ibkr_connection_control(
 class ServerTimeResponse(BaseModel):
     """Response model for IBKR server time."""
 
-    server_time: str
-    timezone: str | None = None
+    server_time: str = Field(description="Current IBKR server time as a string.")
+    timezone: str | None = Field(default=None, description="Timezone name reported by IBKR, when available.")
+
+
+class VersionResponse(BaseModel):
+    """Running application version."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str = Field(description="Application version from APP_VERSION.")
+
+
+class RateLimitsNotConfiguredResponse(BaseModel):
+    """Placeholder returned when no pacing controller is attached to the connection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(description="Always false in this variant.")
+    reason: str = Field(description="Why pacing is disabled, e.g. 'not_configured'.")
+
+
+class RateLimitSnapshotResponse(BaseModel):
+    """Snapshot of the internal IBKR pacing controller."""
+
+    enabled: bool = Field(description="Whether request pacing is enforced.")
+    redis_backed: bool = Field(description="Whether the controller coordinates through Redis.")
+    redis_available: bool = Field(description="Whether Redis answered the last coordination call.")
+    global_messages_per_second: int = Field(description="Configured global IBKR message budget per second.")
+    global_messages_in_current_second: int = Field(description="Messages counted in the current one-second window.")
+    market_data_lines: int = Field(description="Configured concurrent market-data line budget.")
+    market_data_line_reserve: int = Field(description="Lines reserved from general market-data traffic.")
+    max_active_market_data_lines: int = Field(description="Maximum lines available to this process.")
+    active_market_data_lines: int = Field(description="Lines currently held.")
+    market_data_lease_ttl_seconds: float = Field(description="TTL of a market-data line lease in seconds.")
+    calls_by_operation: dict[str, int] = Field(description="Guarded calls counted per operation name.")
+    wait_seconds_by_operation: dict[str, float] = Field(description="Accumulated wait time in seconds per operation.")
+    redis_errors: int = Field(description="Number of Redis coordination failures so far.")
 
 
 class DepthExchangeInfo(BaseModel):
     """Single exchange entry in the depth exchanges list."""
 
-    exchange: str
-    sec_type: str | None = None
-    listing_rules: list[Any] | None = None
+    exchange: str = Field(description="Exchange code, e.g. SMART or CBOE.")
+    sec_type: str | None = Field(default=None, description="Security type the exchange supports depth for.")
+    listing_rules: list[Any] | None = Field(default=None, description="Exchange listing rules as reported by IBKR.")
 
 
 class DepthExchangesResponse(BaseModel):
     """Response model for L2 depth exchange list."""
 
-    total_count: int
-    exchanges: list[Any]
+    total_count: int = Field(description="Number of exchanges supporting L2 depth.")
+    exchanges: list[Any] = Field(description="Exchange entries as reported by reqMktDepthExchanges.")
 
 
 @router.get("/live", response_model=LivenessResponse)
@@ -206,14 +242,24 @@ async def live(state: IBKRRestAppState = Depends(get_rest_state)) -> LivenessRes
     )
 
 
-@router.get("/version")
-async def version() -> dict[str, str]:
-    """Return the running application version."""
-    return {"version": APP_VERSION}
+@router.get("/version", response_model=VersionResponse, summary="Get the running application version")
+async def version() -> VersionResponse:
+    """Return the running application version.
+
+    Reads the packaged APP_VERSION constant; it does not contact IBKR or
+    Redis. Use it to sanity-check which build an agent is talking to.
+    """
+    return VersionResponse(version=APP_VERSION)
 
 
 @router.get("/health", response_model=HealthResponse)
 async def health(state: IBKRRestAppState = Depends(get_rest_state)) -> HealthResponse:
+    """Report aggregate service health from the IBKR and Redis dependencies.
+
+    Returns status 'ok' only when IBKR reports connected; any down
+    dependency or disconnected IBKR yields 'degraded'. Prefer /live for
+    process liveness and /readiness for traffic gating.
+    """
     ibkr_status = _ibkr_connection_status(state)
     redis_status = await _redis_connection_status(state)
 
@@ -256,39 +302,67 @@ async def readiness(response: Response, state: IBKRRestAppState = Depends(get_re
 
 @router.get("/cache/market-data", response_model=CacheStats)
 async def market_data_cache_stats(state: IBKRRestAppState = Depends(get_rest_state)) -> CacheStats:
+    """Return hit/miss and size statistics for the market-data response cache.
+
+    Counters cover the process-local TTL cache used by the OHLCV and depth
+    endpoints. Reads are cheap and do not disturb the cache.
+    """
     return await state.market_data_cache.stats()
 
 
 @router.delete("/cache/market-data", response_model=CacheStats)
 async def clear_market_data_cache(state: IBKRRestAppState = Depends(get_rest_state)) -> CacheStats:
+    """Clear every entry from the market-data response cache.
+
+    Drops all cached bar/depth/snapshot responses for this process and
+    returns the (now empty) cache statistics. The next identical request
+    re-fetches from IBKR.
+    """
     await state.market_data_cache.clear()
     return await state.market_data_cache.stats()
 
 
-@router.get("/rate-limits", summary="Get IBKR pacing controller snapshot")
-async def ibkr_rate_limits(state: IBKRRestAppState = Depends(get_rest_state)) -> dict:
-    """Return the internal IBKR pacing controller snapshot."""
+@router.get(
+    "/rate-limits",
+    summary="Get IBKR pacing controller snapshot",
+    response_model=RateLimitSnapshotResponse | RateLimitsNotConfiguredResponse,
+)
+async def ibkr_rate_limits(
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> RateLimitSnapshotResponse | RateLimitsNotConfiguredResponse:
+    """Return the internal IBKR pacing controller snapshot.
+
+    Reports the configured message-per-second budget, market-data line
+    usage, per-operation call counts and waits, and Redis coordination
+    health. Returns {enabled: false, reason: 'not_configured'} when the
+    connection has no pacing controller attached.
+    """
     feed = getattr(state, "feed", None)
     connection = getattr(feed, "_connection", None)
     snapshot = getattr(connection, "rate_limit_snapshot", None) if connection is not None else None
     if callable(snapshot):
         return await snapshot()
-    return {"enabled": False, "reason": "not_configured"}
+    return RateLimitsNotConfiguredResponse(enabled=False, reason="not_configured")
 
 
-@router.get("/scheduler/health", summary="Get scheduler job health status")
-async def scheduler_health(state: IBKRRestAppState = Depends(get_rest_state)) -> dict:
+@router.get(
+    "/scheduler/health",
+    summary="Get scheduler job health status",
+    response_model=SchedulerHealthReport,
+)
+async def scheduler_health(state: IBKRRestAppState = Depends(get_rest_state)) -> SchedulerHealthReport:
     """Return scheduler health status for all tracked jobs.
 
     Shows each job's last status, consecutive failures, last success time,
     and last error. Requires a health monitor to be configured on the
-    scheduler.
+    scheduler; otherwise returns status 'not_configured' with an empty
+    jobs map.
     """
     scheduler = getattr(state, "scheduler", None)
     if scheduler is None or getattr(scheduler, "_health_monitor", None) is None:
-        return {"status": "not_configured", "jobs": {}}
+        return SchedulerHealthReport(status="not_configured", jobs={})
     report = scheduler._health_monitor.get_health_status()
-    return report.model_dump(mode="json")
+    return report
 
 
 # ------------------------------------------------------------------

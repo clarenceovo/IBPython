@@ -34,11 +34,19 @@ def _fx_pair_parts(symbol: str, currency: str | None = None) -> tuple[str, str, 
 
 
 class FXOHLCVLoadRequest(MinimalOHLCVLoadControls):
-    symbol: str = Field(min_length=1, examples=["EURUSD"])
-    exchange: str = Field(default="IDEALPRO", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
-    what_to_show: str = Field(default="MIDPOINT", min_length=1)
-    use_rth: bool = False
+    symbol: str = Field(
+        min_length=1,
+        examples=["EURUSD"],
+        description="FX pair as a six-letter code, e.g. EURUSD (or EUR.USD / EURUSD-style slash forms).",
+    )
+    exchange: str = Field(default="IDEALPRO", min_length=1, description="IBKR FX venue; IDEALPRO is the default spot venue.")
+    currency: str = Field(default="USD", min_length=1, description="Quote currency of the pair.")
+    what_to_show: str = Field(
+        default="MIDPOINT",
+        min_length=1,
+        description="IBKR data type for FX bars; MIDPOINT is the default, BID_ASK is the alternative.",
+    )
+    use_rth: bool = Field(default=False, description="Restrict bars to regular trading hours; FX trades nearly 24/5 so this defaults to false.")
 
     def to_request(self) -> OHLCVRequest:
         return self.to_ohlcv_request(
@@ -50,17 +58,32 @@ class FXOHLCVLoadRequest(MinimalOHLCVLoadControls):
 
 
 class FXOptionOHLCVLoadRequest(MinimalOHLCVLoadControls):
-    symbol: str = Field(min_length=6, examples=["EURUSD"])
-    expiry: str = Field(min_length=6, examples=["20260619"])
-    strike: float = Field(gt=0, examples=[1.10])
-    right: str = Field(min_length=1, examples=["C"])
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str | None = Field(default=None, min_length=1)
-    multiplier: str | None = Field(default=None, examples=["100000"])
-    trading_class: str | None = None
-    local_symbol: str | None = None
-    con_id: int | None = Field(default=None, gt=0)
-    use_rth: bool = False
+    symbol: str = Field(
+        min_length=6,
+        examples=["EURUSD"],
+        description="FX pair of the option, e.g. EURUSD; maps to underlying=EUR, quote=USD.",
+    )
+    expiry: str = Field(
+        min_length=6,
+        examples=["20260619"],
+        description="Option expiry as YYYYMMDD, e.g. 20260619.",
+    )
+    strike: float = Field(gt=0, examples=[1.10], description="Strike in quote-currency terms, e.g. 1.10.")
+    right: str = Field(min_length=1, examples=["C"], description="Option right: C/CALL or P/PUT.")
+    exchange: str = Field(default="SMART", min_length=1, description="IBKR exchange; SMART routes FX option quotes.")
+    currency: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Optional quote-currency override. Defaults to the pair's right-hand currency.",
+    )
+    multiplier: str | None = Field(default=None, examples=["100000"], description="Optional IBKR contract multiplier as a string.")
+    trading_class: str | None = Field(default=None, description="Optional IBKR trading class for disambiguation.")
+    local_symbol: str | None = Field(
+        default=None,
+        description="Optional IBKR local symbol (OCC-style) for exact contract disambiguation.",
+    )
+    con_id: int | None = Field(default=None, gt=0, description="Optional IBKR contract id for exact disambiguation.")
+    use_rth: bool = Field(default=False, description="Restrict bars to regular trading hours; defaults to false for FX options.")
 
     @field_validator("right", mode="before")
     @classmethod
@@ -133,6 +156,13 @@ async def load_fx_ohlcv(
     payload: Annotated[FXOHLCVLoadRequest, Body(openapi_examples=FX_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> FXOHLCVResponseEnvelope:
+    """Load FX OHLCV bars with the asset class and venue preset.
+
+    Presets asset_class=fx, exchange=IDEALPRO, what_to_show=MIDPOINT, and
+    use_rth=false; only symbol is required. Returns the FX OHLCV envelope
+    with quality metrics and latency. Oversized ranges are auto-chunked
+    and rejected with 422 beyond the chunk cap.
+    """
     req = payload.to_request()
     request_meta = OHLCVRequestMeta(
         symbol=req.symbol,
@@ -178,6 +208,12 @@ async def load_fx_option_ohlcv(
     payload: Annotated[FXOptionOHLCVLoadRequest, Body(openapi_examples=FX_OPTION_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> OptionOHLCVResponseEnvelope:
+    """Load FX option OHLCV bars from a pair-style contract description.
+
+    Builds an IBKR OPT contract from the pair, expiry, strike, and right;
+    local_symbol or con_id can pin the exact contract when IBKR needs
+    disambiguation. Returns the option OHLCV envelope.
+    """
     req = payload.to_request()
     request_meta = OHLCVRequestMeta(
         symbol=req.symbol,

@@ -38,6 +38,11 @@ class TIF(StrEnum):
     FOK = "FOK"
     DTC = "DTC"
     GTD = "GTD"
+    # TWS API EARLY session (live from 2026-12-06): NYSE/NASDAQ trade 21:00-20:00 (T+1)
+    # US/Eastern; IBKR's EARLY offering covers 20:00-21:00 via ERL, and EPD adds
+    # the DAY session for the full 24h window.
+    ERL = "ERL"
+    EPD = "EPD"
 
 
 class OrderAction(StrEnum):
@@ -102,47 +107,51 @@ class PlaceOrderRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1)
-    sec_type: str = "STK"
-    exchange: str = "SMART"
-    currency: str = "USD"
-    primary_exchange: str | None = None
-    last_trade_date_or_contract_month: str | None = None
-    multiplier: str | None = None
-    local_symbol: str | None = None
-    sec_id_type: str | None = None
-    sec_id: str | None = None
-    con_id: int | None = Field(default=None, gt=0)
+    symbol: str = Field(min_length=1, description="Instrument symbol, for example 'AAPL', 'ES', 'EUR.USD'.")
+    sec_type: str = Field(default="STK", description="IBKR security type: 'STK', 'FUT', 'OPT', 'CASH', 'IND', 'BOND'.")
+    exchange: str = Field(default="SMART", description="Exchange or routing destination, for example 'SMART', 'NASDAQ', 'CME', 'IDEALPRO'.")
+    currency: str = Field(default="USD", description="IBKR currency code, for example 'USD', 'HKD', 'JPY'.")
+    primary_exchange: str | None = Field(default=None, description="Primary exchange; use to disambiguate 'SMART' routing.")
+    last_trade_date_or_contract_month: str | None = Field(default=None, description="Futures expiry: YYYYMM contract month or YYYYMMDD last trade date.")
+    multiplier: str | None = Field(default=None, description="Contract multiplier, for example 100 for equity options.")
+    local_symbol: str | None = Field(default=None, description="Exchange-local symbol, for example 'ESZ6'.")
+    sec_id_type: str | None = Field(default=None, description="Alternative identifier type: 'CUSIP' or 'ISIN'. Use with sec_id.")
+    sec_id: str | None = Field(default=None, description="Alternative identifier value (CUSIP or ISIN). Takes precedence over symbol/exchange.")
+    con_id: int | None = Field(default=None, gt=0, description="IBKR contract ID. Takes precedence over symbol when set.")
     # Option-specific contract fields
-    strike: float | None = Field(default=None, gt=0)
+    strike: float | None = Field(default=None, gt=0, description="Option strike price.")
     right: str | None = Field(default=None, description="Option right: C/CALL or P/PUT")
     option_expiry: str | None = Field(default=None, description="Option expiry YYYYMMDD for OPT/FOP contracts")
     underlying_symbol: str | None = Field(default=None, description="Underlying symbol for option contracts")
-    action: OrderAction
-    order_type: OrderType
-    quantity: float = Field(gt=0)
-    price: float | None = Field(default=None, gt=0)
-    aux_price: float | None = Field(default=None, gt=0)
-    tif: TIF = TIF.DAY
-    account_id: str | None = Field(default=None, min_length=1)
-    trailing_type: str | None = None
-    trailing_amount: float | None = Field(default=None, gt=0)
-    trail_stop_price: float | None = Field(default=None, gt=0)
-    limit_price_offset: float | None = Field(default=None, gt=0)
-    outside_rth: bool = False
+    action: OrderAction = Field(description="Order direction: 'BUY' or 'SELL'.")
+    order_type: OrderType = Field(description="IBKR order type: 'MKT', 'LMT', 'STP', 'STP LMT', 'TRAIL', 'TRAIL LIMIT', 'MIDPRICE', 'LOC', 'MOC'.")
+    quantity: float = Field(gt=0, description="Order quantity in shares, contracts, or lots.")
+    price: float | None = Field(default=None, gt=0, description="Limit price. Required for limit order types.")
+    aux_price: float | None = Field(default=None, gt=0, description="Auxiliary price: stop trigger for 'STP'/'STP LMT', trail amount for 'TRAIL'.")
+    tif: TIF = Field(default=TIF.DAY, description="Time in force: 'DAY', 'GTC', 'OPG', 'IOC', 'FOK', 'DTC', 'GTD', or 'ERL'/'EPD' (EARLY session, live 2026-12-06).")
+    account_id: str | None = Field(default=None, min_length=1, description="IBKR account ID, for example 'DU1234567'.")
+    trailing_type: str | None = Field(default=None, description="Trailing amount unit for TRAIL orders: 'amt' (absolute) or '%' (percent).")
+    trailing_amount: float | None = Field(default=None, gt=0, description="Trailing distance from the market for TRAIL orders.")
+    trail_stop_price: float | None = Field(default=None, gt=0, description="Trigger price for TRAIL orders. Required instead of price for TRAIL.")
+    limit_price_offset: float | None = Field(default=None, gt=0, description="Limit offset from the trigger price for 'TRAIL LIMIT'.")
+    outside_rth: bool = Field(
+        default=False,
+        description="Include trading outside regular hours. Must be false for ERL/EPD "
+        "(EARLY session) orders per the TWS API place-order spec.",
+    )
     hedge_max_size: int | None = Field(
         default=None,
         gt=0,
-        description="TWS API 10.47 hedgeMaxSize; applied only when the installed "
+        description="TWS API 10.45 hedgeMaxSize; applied only when the installed "
         "ib_async models the field on Order.",
     )
     conditions_include_overnight: bool = Field(
         default=False,
-        description="TWS API 10.47 conditionsIncludeOvernight; let conditional "
+        description="TWS API 10.50 conditionsIncludeOvernight; let conditional "
         "orders evaluate criteria during overnight sessions.",
     )
-    idempotency_key: str | None = Field(default=None, min_length=1)
-    attribution: ExecutionAttribution | None = None
+    idempotency_key: str | None = Field(default=None, min_length=1, description="Caller-supplied key. The server rejects duplicate placements of the same key.")
+    attribution: ExecutionAttribution | None = Field(default=None, description="Execution attribution metadata attached to the order.")
 
     @field_validator("symbol", mode="before")
     @classmethod
@@ -210,6 +219,11 @@ class PlaceOrderRequest(BaseModel):
             self.last_trade_date_or_contract_month or self.local_symbol or self.con_id
         ):
             raise ValueError("future orders require last_trade_date_or_contract_month, local_symbol, or con_id")
+        if self.tif in (TIF.ERL, TIF.EPD) and self.outside_rth:
+            raise ValueError(
+                "outside_rth must be false for ERL/EPD (EARLY session) orders — "
+                "the TWS API rejects Order.outsideRth on the EARLY exchange"
+            )
         return self
 
 
@@ -285,9 +299,9 @@ class ModifyOrderRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    price: float | None = Field(default=None, gt=0)
-    quantity: float | None = Field(default=None, gt=0)
-    tif: TIF | None = None
+    price: float | None = Field(default=None, gt=0, description="Limit price. Required for limit order types.")
+    quantity: float | None = Field(default=None, gt=0, description="Order quantity in shares, contracts, or lots.")
+    tif: TIF | None = Field(default=None, description="Time in force: 'DAY', 'GTC', 'OPG', 'IOC', 'FOK', 'DTC', 'GTD', or 'ERL'/'EPD' (EARLY session, live 2026-12-06).")
 
     @field_validator("price", "quantity")
     @classmethod
@@ -322,19 +336,19 @@ class BracketOrderRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1)
-    action: OrderAction = OrderAction.BUY
-    quantity: float = Field(default=1.0, gt=0)
-    limit_price: float | None = Field(default=None, gt=0)
-    take_profit_price: float = Field(gt=0)
-    stop_loss_price: float = Field(gt=0)
-    order_type: OrderType = OrderType.LIMIT
-    tif: TIF = TIF.GTC
-    asset_class: str = Field(default="EQUITY", min_length=1)
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
-    account: str = ""
-    attribution: ExecutionAttribution | None = None
+    symbol: str = Field(min_length=1, description="Instrument symbol, for example 'AAPL', 'ES', 'EUR.USD'.")
+    action: OrderAction = Field(default=OrderAction.BUY, description="Order direction: 'BUY' or 'SELL'.")
+    quantity: float = Field(default=1.0, gt=0, description="Order quantity in shares, contracts, or lots.")
+    limit_price: float | None = Field(default=None, gt=0, description="Limit price. Required for 'LMT' order types.")
+    take_profit_price: float = Field(gt=0, description="Take-profit limit price for the attached exit order.")
+    stop_loss_price: float = Field(gt=0, description="Stop-loss trigger price for the attached exit order.")
+    order_type: OrderType = Field(default=OrderType.LIMIT, description="IBKR order type: 'MKT', 'LMT', 'STP', 'STP LMT', 'TRAIL', 'TRAIL LIMIT', 'MIDPRICE', 'LOC', 'MOC'.")
+    tif: TIF = Field(default=TIF.GTC, description="Time in force: 'DAY', 'GTC', 'OPG', 'IOC', 'FOK', 'DTC', 'GTD', or 'ERL'/'EPD' (EARLY session, live 2026-12-06).")
+    asset_class: str = Field(default="EQUITY", min_length=1, description="Asset class: 'equity', 'fx', 'future', 'index', 'bond', 'option', 'crypto' (case-insensitive; aliases accepted).")
+    exchange: str = Field(default="SMART", min_length=1, description="Exchange or routing destination, for example 'SMART', 'NASDAQ', 'CME', 'IDEALPRO'.")
+    currency: str = Field(default="USD", min_length=1, description="IBKR currency code, for example 'USD', 'HKD', 'JPY'.")
+    account: str = Field(default="", description="IBKR account ID, for example 'DU1234567'.")
+    attribution: ExecutionAttribution | None = Field(default=None, description="Execution attribution metadata attached to the order.")
 
     @field_validator("symbol", "asset_class", "exchange", "currency", "account", mode="before")
     @classmethod
@@ -407,10 +421,10 @@ class OcaGroupRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    orders: list[OcaOrderItem] = Field(min_length=2)
-    oca_group: str = Field(default="")
-    oca_type: int = Field(default=1, ge=1, le=3)
-    account: str = Field(default="")
+    orders: list[OcaOrderItem] = Field(min_length=2, description="Order legs of the group. See the nested OcaOrderItem schema.")
+    oca_group: str = Field(default="", description="Group name. Auto-generated when empty.")
+    oca_type: int = Field(default=1, ge=1, le=3, description="1=CancelAll, 2=ReduceRemaining, 3=ReducePosition.")
+    account: str = Field(default="", description="IBKR account ID, for example 'DU1234567'.")
 
     @field_validator("oca_group", "account", mode="before")
     @classmethod
@@ -465,12 +479,12 @@ class ExecutionRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    account_id: str | None = None
-    symbol: str | None = None
-    sec_type: str | None = None
-    exchange: str | None = None
-    side: str | None = None
-    since: datetime | None = None
+    account_id: str | None = Field(default=None, description="IBKR account ID, for example 'DU1234567'.")
+    symbol: str | None = Field(default=None, description="Instrument symbol, for example 'AAPL', 'ES', 'EUR.USD'.")
+    sec_type: str | None = Field(default=None, description="IBKR security type: 'STK', 'FUT', 'OPT', 'CASH', 'IND', 'BOND'.")
+    exchange: str | None = Field(default=None, description="Exchange or routing destination, for example 'SMART', 'NASDAQ', 'CME', 'IDEALPRO'.")
+    side: str | None = Field(default=None, description="Order direction: 'BUY' or 'SELL'.")
+    since: datetime | None = Field(default=None, description="Only executions at or after this UTC ISO-8601 time.")
 
 
 class ExecutionDetail(BaseModel):

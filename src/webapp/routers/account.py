@@ -27,45 +27,72 @@ router = APIRouter(prefix="/account", tags=["account"])
 
 
 class AccountPnLSnapshotRequest(BaseModel):
+    """Request body for a single-account PnL snapshot."""
+
     model_config = ConfigDict(extra="forbid")
 
-    account: str = Field(min_length=1)
-    model_code: str = ""
-    wait_seconds: float = Field(default=1.2, ge=0)
+    account: str = Field(min_length=1, description="IBKR account id, e.g. DU1234567.")
+    model_code: str = Field(default="", description="IBKR PnL model code; empty string selects the base model.")
+    wait_seconds: float = Field(default=1.2, ge=0, description="Seconds to wait for the first PnL update before returning nulls.")
 
 
 class PositionPnLSnapshotRequest(AccountPnLSnapshotRequest):
-    con_id: int = Field(gt=0)
+    """Request body for a single-position PnL snapshot."""
+
+    con_id: int = Field(gt=0, description="IBKR contract id of the position to query.")
 
 
 @router.get("/summary", response_model=list[AccountSummaryDTO], summary="Get account summary")
 async def load_account_summary(
-    account: str = Query(default=""),
-    limit: int = Query(default=50, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
+    account: str = Query(default="", description="IBKR account id filter; empty string returns all accounts."),
+    limit: int = Query(default=50, ge=1, le=500, description="Maximum number of account groups to return (applied after offset)."),
+    offset: int = Query(default=0, ge=0, description="Number of account groups to skip for pagination."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[AccountSummaryDTO]:
+    """Return IBKR account summary values grouped by account.
+
+    Use this endpoint for NetLiquidation, TotalCashValue, AvailableFunds,
+    ExcessLiquidity, Cushion, and GrossPositionValue per account. Each group
+    carries a ``values`` map keyed by IBKR tag. Values are strings as IBKR
+    reports them. Results are paginated with limit and offset; the response
+    does not include a total count.
+    """
     results = await state.feed.load_account_summary(account)
     return results[offset : offset + limit]
 
 
 @router.get("/positions", response_model=list[LivePositionDTO], summary="Get live positions")
 async def load_live_positions(
-    limit: int = Query(default=50, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=500, description="Maximum number of positions to return (applied after offset)."),
+    offset: int = Query(default=0, ge=0, description="Number of positions to skip for pagination."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[LivePositionDTO]:
+    """Return the current live positions across all accounts.
+
+    Each position carries account, symbol, security type, signed quantity,
+    and average cost. Option positions include strike (float), expiry
+    (YYYYMMDD or YYYYMM), right (C or P), multiplier, and underlying symbol.
+    Results are paginated with limit and offset; the response does not
+    include a total count.
+    """
     results = await state.feed.load_live_positions()
     return results[offset : offset + limit]
 
 
 @router.get("/portfolio", response_model=list[PortfolioItemDTO], summary="Get portfolio items")
 async def load_portfolio_items(
-    account: str = Query(default=""),
-    limit: int = Query(default=50, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
+    account: str = Query(default="", description="IBKR account id filter; empty string returns all accounts. The sentinel ALL is normalized to all accounts."),
+    limit: int = Query(default=50, ge=1, le=500, description="Maximum number of portfolio items to return (applied after offset)."),
+    offset: int = Query(default=0, ge=0, description="Number of portfolio items to skip for pagination."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[PortfolioItemDTO]:
+    """Return portfolio items from the account's local portfolio cache.
+
+    Each item carries position, mark price, market value, average cost, and
+    unrealized/realized PnL. Mark fields are null when not yet reported.
+    Results are paginated with limit and offset; the response does not
+    include a total count.
+    """
     results = await state.feed.load_portfolio_items(account)
     return results[offset : offset + limit]
 
@@ -75,6 +102,12 @@ async def load_account_pnl_snapshot(
     request: AccountPnLSnapshotRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> AccountPnLDTO:
+    """Return a one-shot daily/unrealized/realized PnL snapshot for one account.
+
+    Starts a PnL subscription, waits up to wait_seconds for the first update,
+    and releases the subscription. PnL fields are null when IBKR reports no
+    value within the wait budget.
+    """
     return await state.feed.load_account_pnl_snapshot(
         account=request.account,
         model_code=request.model_code,
@@ -87,6 +120,13 @@ async def load_position_pnl_snapshot(
     request: PositionPnLSnapshotRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> PositionPnLDTO:
+    """Return a one-shot PnL snapshot for one position of one account.
+
+    Identify the position by con_id. Starts a single-position PnL
+    subscription, waits up to wait_seconds for the first update, and
+    releases the subscription. PnL fields are null when IBKR reports no
+    value within the wait budget.
+    """
     return await state.feed.load_position_pnl_snapshot(
         account=request.account,
         con_id=request.con_id,
@@ -186,7 +226,7 @@ _SSE_HEADERS = {
 )
 async def stream_account_pnl(
     account_id: str = Query(min_length=1, description="IBKR account id, e.g. DU1234567"),
-    model_code: str = Query(default=""),
+    model_code: str = Query(default="", description="IBKR PnL model code; empty string selects the base model."),
     interval: float = Query(default=1.0, ge=0.1, le=60.0, description="Polling interval in seconds"),
     max_updates: int = Query(default=0, ge=0, description="Stop after N updates. 0 = stream until disconnect."),
     state: IBKRRestAppState = Depends(get_rest_state),
@@ -225,7 +265,7 @@ async def stream_account_pnl(
 async def stream_position_pnl(
     account_id: str = Query(min_length=1, description="IBKR account id, e.g. DU1234567"),
     con_id: int = Query(gt=0, description="IBKR contract id of the position"),
-    model_code: str = Query(default=""),
+    model_code: str = Query(default="", description="IBKR PnL model code; empty string selects the base model."),
     interval: float = Query(default=1.0, ge=0.1, le=60.0, description="Polling interval in seconds"),
     max_updates: int = Query(default=0, ge=0, description="Stop after N updates. 0 = stream until disconnect."),
     state: IBKRRestAppState = Depends(get_rest_state),

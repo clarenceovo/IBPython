@@ -275,7 +275,13 @@ class RateLimiterMiddleware:
         send: Callable[[dict[str, Any]], Awaitable[None]],
         decision: _Decision,
     ) -> None:
-        body = json.dumps({"detail": "Rate limit exceeded", "retry_after": decision.retry_after}).encode("utf-8")
+        body = json.dumps({
+            "detail": "Rate limit exceeded",
+            "code": "RATE_LIMITED",
+            "retryable": True,
+            "retry_after": decision.retry_after,
+            "retry_after_seconds": decision.retry_after,
+        }).encode("utf-8")
         await send({
             "type": "http.response.start",
             "status": 429,

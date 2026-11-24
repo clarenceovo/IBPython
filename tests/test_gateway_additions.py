@@ -76,8 +76,6 @@ def test_rest_all_open_orders_requires_existing_auth_and_paginates():
 
 def test_mcp_uses_same_models_and_propagates_errors(monkeypatch):
     import src.mcp_server as server
-    from src.feeds.exceptions import IBKRUnsupportedFeatureError
-    import pytest
 
     async def run():
         _, feed = make_app()
@@ -90,6 +88,43 @@ def test_mcp_uses_same_models_and_propagates_errors(monkeypatch):
         assert dividend['timed_out'] is True
         assert feed.load_equity_dividends.call_args.args[0].exchange == 'NYSE'
         assert (await server.get_gateway_capabilities(None))['connected'] is False
-        with pytest.raises(IBKRUnsupportedFeatureError, match='10.47'):
-            await server.load_fundamentals(None, 'AAPL')
+        result = await server.load_fundamentals(None, 'AAPL')
+        assert result['code'] == 'FEATURE_REMOVED'
+        assert '10.47' in result['error']
+
+        # The stub must not touch the feed state at all.
+        def _no_state(_ctx):
+            raise AssertionError('load_fundamentals must not resolve app state')
+
+        monkeypatch.setattr(server, '_state', _no_state)
+        assert (await server.load_fundamentals(None, 'MSFT'))['code'] == 'FEATURE_REMOVED'
     asyncio.run(run())
+
+
+def test_capabilities_report_tws_105x_surface():
+    """Capabilities expose the 10.45-10.52 feature surface with honest client support flags."""
+
+    class _FakeConnection:
+        ib = None
+        is_connected = False
+
+    caps = gateway_capabilities(_FakeConnection(), orders_enabled=True)
+    features = caps.features
+
+    assert features["early_session_tifs"].implemented is True
+    assert features["early_session_tifs"].client_supported is True
+    assert "ERL" in features["early_session_tifs"].reason
+
+    # Blocked on ib_async decodes — reported, not silently missing.
+    for name, needle in (
+        ("contract_settlement_type", "settlementMethod"),
+        ("order_execution_submitter", "submitter"),
+    ):
+        assert features[name].implemented is False
+        assert features[name].client_supported is False
+        assert needle in features[name].reason
+
+    # Corrected version attributions.
+    assert "10.45" in features["hedge_max_size"].reason
+    assert "10.50" in features["overnight_conditions"].reason
+    assert "10.48" in features["deactivated_orders_in_open_orders"].reason

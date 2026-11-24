@@ -46,9 +46,18 @@ class UnifiedMarketDepthRequest(BaseModel):
         description="Concrete futures contract month or last trade date. Required for futures unless local_symbol or con_id is supplied.",
         examples=["202606"],
     )
-    multiplier: str | None = Field(default=None, min_length=1)
-    local_symbol: str | None = Field(default=None, min_length=1, examples=["ESM6"])
-    con_id: int | None = Field(default=None, gt=0)
+    multiplier: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Optional futures multiplier when IBKR needs it to disambiguate the contract.",
+    )
+    local_symbol: str | None = Field(
+        default=None,
+        min_length=1,
+        examples=["ESM6"],
+        description="Optional IBKR local symbol; for futures this can replace contract_month.",
+    )
+    con_id: int | None = Field(default=None, gt=0, description="Optional IBKR contract id to bypass symbol ambiguity.")
     continuous: bool = Field(
         default=False,
         description="Not supported for live DOM; market depth requires a concrete live contract.",
@@ -69,7 +78,7 @@ class UnifiedMarketDepthRequest(BaseModel):
         le=5,
         description="How long to keep the IBKR depth subscription open before returning the snapshot.",
     )
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Free-form request metadata forwarded with the contract spec.")
 
     @field_validator("symbol", "exchange", "currency", "primary_exchange", "contract_month", "multiplier", "local_symbol", mode="before")
     @classmethod
@@ -167,8 +176,14 @@ async def load_auto_market_depth(
     payload: UnifiedMarketDepthRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> MarketDepthSnapshot:
-    """Return a short-lived IBKR DOM/L2 snapshot for a compact symbol request."""
+    """Return a short-lived IBKR DOM/L2 snapshot for a compact symbol request.
 
+    Auto-resolves equity, FX, index, and dated futures contracts, opens a
+    market-depth subscription for snapshot_wait_seconds, and returns up to
+    num_rows levels per side (five maximum). Continuous futures are
+    rejected because live depth needs a concrete contract. Identical
+    snapshots are served from a short TTL cache when enabled.
+    """
     spec = payload.to_contract_spec()
     is_smart_depth = payload.resolved_smart_depth(spec)
 

@@ -8,8 +8,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from src.feeds.contracts import ContractSpec
 from src.feeds.exchange_resolver import resolve_equity
@@ -211,6 +212,16 @@ async def stream_ticker(
     payload: Annotated[StreamRequest, Body(openapi_examples=STREAM_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> StreamingResponse:
+    """Stream real-time ticker snapshots for one contract over Server-Sent Events.
+
+    Each `data:` event is a JSON StreamingTickerSnapshot (last, bid, ask,
+    sizes, volume, OHLC, vwap, implied volatility). Emits `done` when
+    max_updates is reached or the IBKR session ends, `error` on stream
+    failure, and keepalive comments when no tick arrives for a while. The
+    X-Subscription-Id response header carries the id used by the
+    subscription management endpoints. Subscriptions auto-expire after one
+    hour; the stream ends when the client disconnects.
+    """
     request = payload
     spec = _resolve_stream_contract(request)
     subscription_id = uuid.uuid4().hex[:12]
@@ -349,9 +360,16 @@ async def stream_ticker(
     summary="List active streaming subscriptions",
 )
 async def list_active_subscriptions(
-    limit: int = Query(default=100, ge=1, le=1000),
-    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=1000, description="Maximum number of subscriptions to return."),
+    offset: int = Query(default=0, ge=0, description="Number of subscriptions to skip for paging."),
 ) -> list[StreamSubscription]:
+    """List the SSE streaming subscriptions tracked by this process.
+
+    Expired subscriptions (older than one hour) are stopped and removed as
+    a side effect of the read. Results are paginated with limit/offset.
+    Tracking is in-memory and single-process, so sticky routing is required
+    in multi-worker deployments.
+    """
     async with _sub_lock:
         # Clean up expired subscriptions on read
         expired_ids = [
@@ -366,14 +384,36 @@ async def list_active_subscriptions(
         return all_subs[offset : offset + limit]
 
 
+class SubscriptionStopResponse(BaseModel):
+    """Confirmation returned after stopping one SSE subscription."""
+
+    status: str = Field(description="Always 'stopped'.")
+    subscription_id: str = Field(description="Id of the stopped subscription.")
+
+
+class SubscriptionsCancelledResponse(BaseModel):
+    """Summary returned after cancelling every SSE subscription."""
+
+    cancelled: int = Field(description="Number of subscriptions that were stopped.")
+
+
 @router.delete(
     "/subscriptions/{subscription_id}",
     summary="Stop a streaming subscription",
+    response_model=SubscriptionStopResponse,
     # NOTE: Returns 200 (not 204) because the response body contains the deleted
     # subscription state. REST permits 200 with body for DELETE when the client
     # benefits from seeing the removed resource representation.
 )
-async def stop_subscription(subscription_id: str) -> dict[str, str]:
+async def stop_subscription(
+    subscription_id: str = Path(description="Subscription id from the X-Subscription-Id header or the subscription list."),
+) -> SubscriptionStopResponse:
+    """Stop one SSE streaming subscription by id.
+
+    Signals the SSE generator to end and removes the tracking entry.
+    Unknown ids return 404. Only subscriptions owned by this process can be
+    stopped; other workers' subscriptions need sticky routing to reach.
+    """
     async with _sub_lock:
         sub = _active_subscriptions.get(subscription_id)
         if sub is None:
@@ -381,19 +421,26 @@ async def stop_subscription(subscription_id: str) -> dict[str, str]:
         # Signal the SSE generator to stop, then clean up
         sub.stop()
         _pop_subscription_locked(subscription_id)
-    return {"status": "stopped", "subscription_id": subscription_id}
+    return SubscriptionStopResponse(status="stopped", subscription_id=subscription_id)
 
 
 @router.delete(
     "/subscriptions",
     summary="Cancel all active streaming subscriptions",
+    response_model=SubscriptionsCancelledResponse,
     # NOTE: Returns 200 (not 204) because the response body reports how many
     # subscriptions were cancelled, mirroring stop_subscription's shape.
 )
 async def cancel_all_subscriptions(
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> dict[str, int]:
-    """Stop every tracked SSE subscription and cancel feed-level tick streams."""
+) -> SubscriptionsCancelledResponse:
+    """Stop every tracked SSE subscription and cancel feed-level tick streams.
+
+    Stops all subscriptions owned by this process and makes a best-effort
+    call to release the feed's own tick-by-tick subscriptions. Returns the
+    number of SSE subscriptions cancelled. In-flight clients see their
+    streams end on the next event.
+    """
     async with _sub_lock:
         subscription_ids = list(_active_subscriptions.keys())
         for subscription_id in subscription_ids:
@@ -412,4 +459,4 @@ async def cancel_all_subscriptions(
         except Exception:
             logger.warning("feed-level cancel_all_subscriptions failed", exc_info=True)
 
-    return {"cancelled": len(subscription_ids)}
+    return SubscriptionsCancelledResponse(cancelled=len(subscription_ids))

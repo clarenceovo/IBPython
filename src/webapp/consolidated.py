@@ -27,20 +27,36 @@ class ConsolidatedSection(BaseModel):
 
 async def run_consolidated_sections(
     sections: dict[str, Callable[[], Awaitable[Any]]],
+    *,
+    section_timeout_seconds: float | None = None,
 ) -> tuple[dict[str, Any], dict[str, ConsolidatedSection]]:
     """Run section factories concurrently and isolate failures.
 
     Returns ``(results, meta)``. ``results[key]`` is None when the section
     failed or was skipped. ``meta[key]`` carries status, latency in
     milliseconds, and the error message when a section failed.
+
+    When ``section_timeout_seconds`` is set, a section that exceeds the budget
+    is cancelled and recorded as ``status="error"`` so one stuck provider can
+    no longer gate the whole consolidated response.
     """
 
     async def _run_one(key: str, factory: Callable[[], Awaitable[Any]]) -> tuple[str, Any, ConsolidatedSection]:
         started = time.perf_counter()
         try:
-            value = await factory()
+            if section_timeout_seconds and section_timeout_seconds > 0:
+                value = await asyncio.wait_for(factory(), timeout=section_timeout_seconds)
+            else:
+                value = await factory()
             latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
             return key, value, ConsolidatedSection(status="ok", latency_ms=latency_ms)
+        except asyncio.TimeoutError:
+            latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
+            return key, None, ConsolidatedSection(
+                status="error",
+                latency_ms=latency_ms,
+                error=f"section timed out after {section_timeout_seconds:g}s",
+            )
         except Exception as exc:  # noqa: BLE001 - consolidated payloads isolate section errors
             latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
             return key, None, ConsolidatedSection(status="error", latency_ms=latency_ms, error=str(exc))

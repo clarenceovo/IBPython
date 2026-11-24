@@ -25,24 +25,39 @@ Production-oriented IBKR market data, transport, scheduler, and REST API layer f
 - MySQL, optional when `MARKET_DATA_DB_BACKEND=mysql`
 - Docker Desktop or Docker Engine, if using Compose
 
-## TWS API Alignment (10.4x)
+## TWS API Alignment (10.4x/10.5x)
 
-The gateway tracks the IBKR TWS API 10.4x production line (`TWS_API_BASELINE`
-in `src/config/config_constant.py`):
+The gateway tracks the IBKR TWS API production line (`TWS_API_BASELINE`
+in `src/config/config_constant.py`, currently **10.52** — Stable channel is
+10.50, Latest is 10.52; see IBKR's [TWS API installers] and the
+[2026 production release notes]):
 
-- **Fundamental reports removed upstream.** `reqFundamentalData` and the
+- **Fundamental reports removed upstream (10.47).** `reqFundamentalData` and the
   `FUNDAMENTAL_RATIOS` tick no longer exist on current TWS builds. The REST
   surface keeps the request shape but answers `410 Gone`; corporate event
   data flows through Wall Street Horizon (`WSH`) instead.
-- **`reqOpenOrders` now includes de-activated orders.** `load_open_orders`
+- **`reqOpenOrders` includes de-activated orders (10.48).** `load_open_orders`
   filters them out unless `include_deactivated=true` is passed.
-- **New order fields `hedgeMaxSize` and `conditionsIncludeOvernight`** are
-  accepted on the REST surface. They raise a clear error until the installed
-  `ib_async` release models them on `Order`; `/system/capabilities` reports
-  live support status.
-- **Odd-lot tick types (105-110), generic tick 787, and fractional last
-  sizes** are server-side changes that require an `ib_async` decoder update;
-  capabilities marks them unsupported until then.
+- **Order fields `hedgeMaxSize` (10.45) and `conditionsIncludeOvernight`
+  (10.50)** are accepted on the REST surface. They raise a clear error until
+  the installed `ib_async` release models them on `Order`;
+  `/system/capabilities` reports live support status.
+- **EARLY session (live 2026-12-06).** NYSE/NASDAQ extend to a 23-hour
+  schedule (21:00-20:00 T+1 US/Eastern); IBKR's `EARLY` offering covers
+  20:00-21:00. New TIFs: `ERL` (EARLY only) and `EPD` (EARLY+DAY). Orders
+  with these TIFs must not set `outside_rth` — the API validates it. The
+  `OVERNIGHT` exchange and the `OVT`/`OND` TIFs are deprecated from the same
+  date; resting OVERNIGHT orders will be cancelled.
+- **Contract Details Settlement Type (10.49)** and the **Order/Execution
+  `submitter` username (10.34.01)** are wire-level additions that
+  `ib_async 2.1.0` does not decode/model yet; capabilities marks them
+  unsupported until a client release catches up.
+- **10.49 licensing:** the official TWS API source is now GPL. This gateway
+  speaks the socket protocol via `ib_async` (its own licence), so no GPL
+  obligation is introduced here.
+- **Odd-lot tick types (105-110, 10.46), generic tick 787, and fractional
+  last sizes on ticks 5/71 (10.44)** are server-side changes that require an
+  `ib_async` decoder update; capabilities marks them unsupported until then.
 - **Deployment note (TWS/Gateway 10.45):** upgrades clear "Enable ActiveX
   and Socket Clients" and "Allow connections from localhost only". Re-check
   these settings on gateway hosts after any TWS upgrade, and consider the
@@ -50,8 +65,12 @@ in `src/config/config_constant.py`):
   for order-recovery behaviour.
 - **Per-currency account keys:** TWS now offers the `$LEDGER-` prefix for
   per-currency values (`reqAccountUpdates`/`reqAccountUpdatesMulti`). The
-  account feed passes keys through unchanged, so enable the setting in TWS
-  only if callers are updated to match.
+  account feed passes keys through unchanged (new tags such as
+  `SettledCashByDate` flow to callers unfiltered), so enable the setting in
+  TWS only if callers are updated to match.
+
+[TWS API installers]: https://download2.interactivebrokers.com/installers/tws-api/index.html
+[2026 production release notes]: https://www.ibkrguides.com/releasenotes/prod-2026.htm
 
 ## Quick Start
 
@@ -472,6 +491,34 @@ DELETE endpoints intentionally return **200** with a response body.
 Removed IBKR features return **410 Gone** with an explicit unsupported-feature error:
 
 - `POST /reference-data/fundamentals` → 410 (IBKR removed fundamental report requests in API 10.47)
+
+### Error Envelope
+
+Every 4xx/5xx body shares one machine-readable shape:
+
+```json
+{
+  "detail": "Historical data pacing violated: cooldown required",
+  "code": "IBKR_PACING",
+  "retryable": true,
+  "retry_after_seconds": 60
+}
+```
+
+- `detail` keeps the historical human-readable text (legacy clients keep working).
+- `code` is a stable classification: `RATE_LIMITED`, `IBKR_PACING`,
+  `IBKR_UNAVAILABLE`, `IBKR_DISABLED`, `IBKR_CIRCUIT_OPEN`,
+  `MARKET_DATA_UNAVAILABLE`, `CONTRACT_RESOLUTION_FAILED`,
+  `ORDER_REJECTED`, `ORDERS_DISABLED`, `FEATURE_REMOVED`,
+  `REQUEST_TOO_LARGE`, `UNSUPPORTED_HISTORICAL_REQUEST`,
+  `QUESTDB_UNAVAILABLE`, `REDIS_UNAVAILABLE`, `UNAUTHORIZED`, `FORBIDDEN`,
+  `NOT_FOUND`, `UPSTREAM_ERROR`, `INTERNAL_ERROR`.
+- Retry only when `retryable` is true; wait `retry_after_seconds`
+  (429 responses also send a `Retry-After` header).
+- Request-validation 422 bodies keep FastAPI's
+  `{"detail": [{loc, msg, type}]}` array format.
+- The shape is declared once in the OpenAPI document as
+  `responses.default → #/components/responses/ApiError` on every operation.
 
 ### Pagination
 
@@ -1050,9 +1097,28 @@ CORS is configurable via the `IBKR_REST_CORS_ORIGINS` environment variable (comm
 
 The API does not leak internal details in error responses:
 
-- `RuntimeError` and other unhandled exceptions return a generic `{"detail": "Internal error"}` with HTTP 500 status.
+- `RuntimeError` and other unhandled exceptions return a generic `{"detail": "Internal error", "code": "INTERNAL_ERROR", "retryable": false}` with HTTP 500 status.
 - The full exception trace is still logged server-side for debugging.
 - Validation errors return 422 with standard FastAPI error detail.
+- All error bodies use the shared envelope documented under
+  [Error Envelope](#error-envelope); agents branch on `code`/`retryable`
+  instead of parsing prose.
+
+### For AI Agents
+
+The OpenAPI document (`/api/v1/openapi.json`) is post-processed for agent
+consumption (`src/webapp/openapi_agent.py`):
+
+- Auto-generated `operationId`s are replaced with short stable camelCase ids
+  derived from the route path (`GET /api/v1/account/summary` →
+  `accountSummaryGet`); explicitly set ids are preserved.
+- Every operation declares `responses.default → ApiError` and an
+  `x-agent-side-effect: read | mutate` annotation.
+- `info.description` carries an agent quick start (symbol resolution,
+  consolidated endpoints, parameter conventions, error/retry policy,
+  side-effect map).
+- Swagger UI at `/docs` shows operation ids and extensions
+  (`displayOperationId`, `showExtensions`).
 
 ## IBKR Rate Limits
 
@@ -1210,7 +1276,16 @@ OrderCache::<order_uuid>
 
 ## MCP Server
 
-The MCP (Model Context Protocol) server exposes 64 tools for IBKR market data, order management, and account operations. It connects to TWS/IB Gateway using a separate client ID (`IBKR_MCP_CLIENT_ID`, default `301`) and disconnects after a configurable idle period (`MCP_IBKR_IDLE_DISCONNECT_SECONDS`, default `120`).
+The MCP (Model Context Protocol) server exposes 65 tools for IBKR market data, order management, and account operations. It connects to TWS/IB Gateway using a separate client ID (`IBKR_MCP_CLIENT_ID`, default `301`) and disconnects after a configurable idle period (`MCP_IBKR_IDLE_DISCONNECT_SECONDS`, default `120`).
+
+### Agent Conventions
+
+- Every tool declares MCP `annotations` (`readOnlyHint`, `destructiveHint`, `idempotentHint`), so clients can gate destructive calls without parsing docstrings.
+- Tool errors share one payload: `{"error": <message>, "code": <stable code>, "retryable": <bool>}`. Codes mirror the REST envelope (`IBKR_UNAVAILABLE`, `IBKR_PACING`, `ORDERS_DISABLED`, `FEATURE_REMOVED`, `QUESTDB_UNAVAILABLE`, `REDIS_UNAVAILABLE`, `CONTRACT_RESOLUTION_FAILED`, `ORDER_REJECTED`, `BAD_REQUEST`, `QUERY_REJECTED`, `CONFIRMATION_REQUIRED`, `TOOL_ERROR`). Retry only when `retryable` is true.
+- Payload caps protect the caller's context window: `query_raw_sql` returns at most `max_rows` (default 1000, max 5000), `get_all_open_orders` takes `limit` (default 100), `get_redis_key` and `load_news_article` truncate at 20,000 characters (`truncated: true`), `subscribe_realtime_bars` clamps `duration_seconds` to 300.
+- `cancel_all_orders` is destructive and requires `confirm=true`; without it the tool returns `CONFIRMATION_REQUIRED` and cancels nothing.
+- `place_bracket_order` and `place_oca_group` validate and place through the same guarded order client as the REST endpoints (`BracketOrderRequest` / `OcaGroupRequest`), so the master switch, risk config, and typed responses apply on both front ends.
+- Key parameters carry schema descriptions (`asset_class`, `bar_size`, `what_to_show`, `right`, `market_data_type`, `exercise_action`, `oca_type`, `tif`, `order_type`) with accepted values spelled out.
 
 ### Market Data
 

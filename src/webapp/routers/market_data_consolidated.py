@@ -6,8 +6,8 @@ from collections.abc import Awaitable, Callable
 from datetime import date, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.feeds.models import AssetClass, OHLCVBar, OHLCVRequest
 from src.feeds.snapshotter import EquitySnapshot
@@ -16,7 +16,7 @@ from src.feeds.tick_data import MarketDepthSnapshot, TickByTickData
 from src.webapp.consolidated import ConsolidatedSection, run_consolidated_sections, utc_now
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 from src.webapp.routers.market_data_depth import UnifiedMarketDepthRequest
-from src.webapp.routers.market_data_shared import session_to_dict
+from src.webapp.routers.market_data_shared import load_ohlcv_with_controls, session_to_dict
 
 router = APIRouter(prefix="/market-data/consolidated", tags=["market-data"])
 
@@ -115,6 +115,31 @@ class UniversalMarketDataResponse(BaseModel):
     requested_at: datetime = Field(description="UTC timestamp of the consolidated request.")
 
 
+class ResolvedSymbolResponse(BaseModel):
+    """Normalized IBKR contract fields returned by the universal symbol resolver.
+
+    Field names mirror ``ResolvedSymbol.describe()`` exactly.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    input: str = Field(description="Ticker exactly as submitted.")
+    symbol: str = Field(description="Canonical IBKR symbol, e.g. 0700, ES, EURUSD.")
+    asset_class: str = Field(description="Resolved asset class: equity, fx, future, crypto, index, option, or bond.")
+    exchange: str = Field(description="Resolved IBKR exchange routing, e.g. SEHK, CME, IDEALPRO, SMART.")
+    currency: str = Field(description="Resolved contract currency, e.g. HKD, USD.")
+    primary_exchange: str = Field(description="Primary exchange when relevant; empty string otherwise.")
+    local_symbol: str | None = Field(default=None, description="IBKR local symbol when the rule produced one, e.g. ESZ6.")
+    contract_month: str | None = Field(
+        default=None,
+        description="Futures contract month (YYYYMM) for dated contracts; null otherwise.",
+    )
+    continuous: bool = Field(description="True when the resolution is a continuous future (CONTFUT).")
+    con_id: int | None = Field(default=None, description="IBKR contract id when the rule knows it; null otherwise.")
+    matched_rule: str = Field(description="Resolver rule that matched, e.g. future_pattern, fx_pair, equity_fallback.")
+    notes: list[str] = Field(default_factory=list, description="Resolver notes and disambiguation hints.")
+
+
 def _parse_universal_section_whitelist(raw: str | None) -> frozenset[str] | None:
     """Parse the universal-endpoint section whitelist. None means 'all sections'."""
     if raw is None:
@@ -201,6 +226,7 @@ def _resolve_or_422(
 @router.get(
     "/resolve/{symbol}",
     summary="Resolve any ticker notation to IBKR contract fields",
+    response_model=ResolvedSymbolResponse,
     description=(
         "Runs the universal symbol resolver on one ticker and returns the canonical IBKR symbol, "
         "asset class, exchange, currency, primary exchange, futures contract fields, and the "
@@ -211,17 +237,25 @@ def _resolve_or_422(
     ),
 )
 async def resolve_market_data_symbol(
-    symbol: str,
+    symbol: str = Path(
+        description="Ticker in any supported notation: 0700.HK, EUR.USD, ESZ26, ES1!, ^GSPC, BTC, CONID:12345-style is not needed here.",
+    ),
     asset_class: AssetClass | None = Query(
         default=None,
         description="Optional asset class pin: equity, fx, future, crypto, index, option, or bond.",
     ),
     exchange: str | None = Query(default=None, min_length=1, description="Optional exchange override."),
     currency: str | None = Query(default=None, min_length=1, description="Optional currency override."),
-) -> dict[str, Any]:
-    """Resolve one ticker in any supported notation into normalized IBKR contract fields."""
+) -> ResolvedSymbolResponse:
+    """Resolve one ticker in any supported notation into normalized IBKR contract fields.
+
+    Runs the same universal resolver that the auto and universal endpoints
+    use and returns the canonical symbol, venue, currency, futures fields,
+    matched rule, and notes. Unambiguous input needs no query parameters;
+    unresolvable tickers return 422 with the resolver message.
+    """
     resolved = _resolve_or_422(symbol, asset_class, exchange, currency)
-    return resolved.describe()
+    return ResolvedSymbolResponse.model_validate(resolved.describe())
 
 
 @router.get(
@@ -238,7 +272,9 @@ async def resolve_market_data_symbol(
     ),
 )
 async def get_universal_market_data(
-    symbol: str,
+    symbol: str = Path(
+        description="Ticker in any supported notation: e.g. TSLA, 0700.HK, EURUSD, ESZ26, ^GSPC, BTC.",
+    ),
     asset_class: AssetClass | None = Query(
         default=None,
         description="Optional asset class pin: equity, fx, future, crypto, index, option, or bond.",
@@ -254,7 +290,14 @@ async def get_universal_market_data(
     ),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> UniversalMarketDataResponse:
-    """Resolve any ticker, then gather every applicable market-data section concurrently."""
+    """Resolve any ticker, then gather every applicable market-data section concurrently.
+
+    Each section (ohlcv, ticks, depth, trading_schedule, snapshot) runs
+    with its own timeout and its status is reported separately, so one
+    failing section never fails the call. Inapplicable sections are
+    reported as skipped with a note. Use the sections query parameter to
+    request a subset. Unresolvable tickers return 422.
+    """
     resolved = _resolve_or_422(symbol, asset_class, exchange, currency)
     whitelist = _parse_universal_section_whitelist(sections)
 
@@ -265,7 +308,17 @@ async def get_universal_market_data(
 
         async def load_universal_ohlcv() -> list[OHLCVBar]:
             request = _universal_ohlcv_request(resolved)
-            return await state.feed.load_historical_ohlcv(request)
+            # Route through the shared cached loader so repeated universal
+            # calls reuse the TTL cache and single-flight like /market-data/ohlcv.
+            return await load_ohlcv_with_controls(
+                request=request,
+                persist=False,
+                cache_latest=False,
+                use_ttl_cache=True,
+                cache_ttl_seconds=state.settings.ibkr_rest_market_data_ttl_seconds,
+                cache_namespace="universal_ohlcv",
+                state=state,
+            )
 
         factories[OHLCV_SECTION] = load_universal_ohlcv
 
@@ -325,7 +378,10 @@ async def get_universal_market_data(
                 f"cached snapshots are equity-only; skipped for {resolved.asset_class.value}"
             )
 
-    results, meta = await run_consolidated_sections(factories)
+    results, meta = await run_consolidated_sections(
+        factories,
+        section_timeout_seconds=state.settings.ibkr_rest_consolidated_section_timeout_seconds,
+    )
     for name in UNIVERSAL_SECTION_NAMES:
         if name not in meta:
             meta[name] = ConsolidatedSection(status="skipped", latency_ms=0.0, error=skip_notes.get(name))

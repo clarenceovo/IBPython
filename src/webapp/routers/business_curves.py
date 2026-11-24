@@ -19,9 +19,9 @@ router = APIRouter()
     summary="Get a standard-tenor sovereign bond curve",
 )
 async def get_bond_curve(
-    market: Annotated[str, Query(min_length=1)],
-    valuation_date: date | None = Query(default=None),
-    coupon_frequency: int | None = Query(default=None, ge=1),
+    market: Annotated[str, Query(min_length=1, description="Sovereign market alias: UST, JGB, UK, UK_GILT, BUND, GERMAN_BUND, or KTB.")],
+    valuation_date: date | None = Query(default=None, description="Curve valuation date (UTC); defaults to today."),
+    coupon_frequency: int | None = Query(default=None, ge=1, description="Coupon payments per year used for bootstrapping; default follows market convention."),
 ) -> BondCurveResponse:
     try:
         request = BondCurveRequest(

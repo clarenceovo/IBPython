@@ -51,15 +51,19 @@ class HistoricalTickRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1)
-    sec_type: str = Field(default="STK", min_length=1)
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
-    start_date: datetime
-    end_date: datetime
-    what_to_show: str = Field(default="TRADES", min_length=1)  # Bar-data style; auto-converted to tick format for reqHistoricalTicksAsync
-    use_rth: bool = True
-    max_ticks: int = Field(default=10_000, ge=1, le=100_000)
+    symbol: str = Field(min_length=1, description="Instrument symbol, for example 'AAPL', 'ES', 'EUR.USD'.")
+    sec_type: str = Field(default="STK", min_length=1, description="IBKR security type: 'STK', 'FUT', 'OPT', 'CASH', 'IND', 'BOND'.")
+    exchange: str = Field(default="SMART", min_length=1, description="Exchange or routing destination, for example 'SMART', 'NASDAQ', 'CME', 'IDEALPRO'.")
+    currency: str = Field(default="USD", min_length=1, description="IBKR currency code, for example 'USD', 'HKD', 'JPY'.")
+    start_date: datetime = Field(description="Window start, UTC ISO-8601.")
+    end_date: datetime = Field(description="Window end, UTC ISO-8601.")
+    what_to_show: str = Field(
+        default="TRADES",
+        min_length=1,
+        description="IBKR whatToShow value, for example 'TRADES', 'MIDPOINT', 'BID', 'ASK', 'BID_ASK'. Auto-converted to tick format.",
+    )  # Bar-data style; auto-converted to tick format for reqHistoricalTicksAsync
+    use_rth: bool = Field(default=True, description="True: regular trading hours only. False: include extended hours.")
+    max_ticks: int = Field(default=10_000, ge=1, le=100_000, description="Stop after this many ticks. 0 means unlimited.")
 
     @field_validator("start_date", "end_date", mode="before")
     @classmethod
@@ -98,12 +102,12 @@ class HistogramDataRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1)
-    sec_type: str = Field(default="STK", min_length=1)
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
-    use_rth: bool = True
-    period: str = Field(default="1 week", min_length=1)
+    symbol: str = Field(min_length=1, description="Instrument symbol, for example 'AAPL', 'ES', 'EUR.USD'.")
+    sec_type: str = Field(default="STK", min_length=1, description="IBKR security type: 'STK', 'FUT', 'OPT', 'CASH', 'IND', 'BOND'.")
+    exchange: str = Field(default="SMART", min_length=1, description="Exchange or routing destination, for example 'SMART', 'NASDAQ', 'CME', 'IDEALPRO'.")
+    currency: str = Field(default="USD", min_length=1, description="IBKR currency code, for example 'USD', 'HKD', 'JPY'.")
+    use_rth: bool = Field(default=True, description="True: regular trading hours only. False: include extended hours.")
+    period: str = Field(default="1 week", min_length=1, description="Lookback period, for example '1 D'.")
 
 
 class HistogramDataResponse(BaseModel):
@@ -240,16 +244,16 @@ class IVCalcRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1)
-    sec_type: str = Field(default="OPT", min_length=1)
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
-    expiry: str = Field(min_length=1)
-    strike: float = Field(gt=0)
-    right: str = Field(min_length=1)  # "C" or "P"
-    multiplier: str = Field(default="100")
-    option_price: float = Field(gt=0)
-    under_price: float = Field(gt=0)
+    symbol: str = Field(min_length=1, description="Instrument symbol, for example 'AAPL', 'ES', 'EUR.USD'.")
+    sec_type: str = Field(default="OPT", min_length=1, description="IBKR security type: 'STK', 'FUT', 'OPT', 'CASH', 'IND', 'BOND'.")
+    exchange: str = Field(default="SMART", min_length=1, description="Exchange or routing destination, for example 'SMART', 'NASDAQ', 'CME', 'IDEALPRO'.")
+    currency: str = Field(default="USD", min_length=1, description="IBKR currency code, for example 'USD', 'HKD', 'JPY'.")
+    expiry: str = Field(min_length=1, description="Option or future expiry date, format YYYYMMDD.")
+    strike: float = Field(gt=0, description="Option strike price.")
+    right: str = Field(min_length=1, description="Option right: 'C'/'CALL' or 'P'/'PUT' (case-insensitive).")  # "C" or "P"
+    multiplier: str = Field(default="100", description="Contract multiplier, for example 100 for equity options.")
+    option_price: float = Field(gt=0, description="Option market price used to solve implied volatility.")
+    under_price: float = Field(gt=0, description="Underlying price used in the calculation.")
 
 
 class OptionPriceCalcRequest(BaseModel):
@@ -257,16 +261,16 @@ class OptionPriceCalcRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1)
-    sec_type: str = Field(default="OPT", min_length=1)
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
-    expiry: str = Field(min_length=1)
-    strike: float = Field(gt=0)
-    right: str = Field(min_length=1)  # "C" or "P"
-    multiplier: str = Field(default="100")
-    volatility: float = Field(gt=0)
-    under_price: float = Field(gt=0)
+    symbol: str = Field(min_length=1, description="Instrument symbol, for example 'AAPL', 'ES', 'EUR.USD'.")
+    sec_type: str = Field(default="OPT", min_length=1, description="IBKR security type: 'STK', 'FUT', 'OPT', 'CASH', 'IND', 'BOND'.")
+    exchange: str = Field(default="SMART", min_length=1, description="Exchange or routing destination, for example 'SMART', 'NASDAQ', 'CME', 'IDEALPRO'.")
+    currency: str = Field(default="USD", min_length=1, description="IBKR currency code, for example 'USD', 'HKD', 'JPY'.")
+    expiry: str = Field(min_length=1, description="Option or future expiry date, format YYYYMMDD.")
+    strike: float = Field(gt=0, description="Option strike price.")
+    right: str = Field(min_length=1, description="Option right: 'C'/'CALL' or 'P'/'PUT' (case-insensitive).")  # "C" or "P"
+    multiplier: str = Field(default="100", description="Contract multiplier, for example 100 for equity options.")
+    volatility: float = Field(gt=0, description="Volatility as a decimal (0.20 = 20%) used to solve the option price.")
+    under_price: float = Field(gt=0, description="Underlying price used in the calculation.")
 
 
 class HeadTimestampRequest(BaseModel):
@@ -278,7 +282,7 @@ class HeadTimestampRequest(BaseModel):
     sec_type: str = Field(default="STK", min_length=1)
     exchange: str = Field(default="SMART", min_length=1)
     currency: str = Field(default="USD", min_length=1)
-    what_to_show: str = Field(default="TRADES", min_length=1)
+    what_to_show: str = Field(default="TRADES", min_length=1, description="IBKR whatToShow value, for example 'TRADES', 'MIDPOINT', 'BID', 'ASK', 'BID_ASK'.")
     use_rth: bool = True
 
 
@@ -287,12 +291,12 @@ class TickSubscribeRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1)
-    sec_type: str = Field(default="STK", min_length=1)
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
-    tick_type: TickType = Field(default=TickType.ALL_LAST)
-    max_ticks: int = Field(default=10_000, ge=100, le=1_000_000)
+    symbol: str = Field(min_length=1, description="Instrument symbol, for example 'AAPL', 'ES', 'EUR.USD'.")
+    sec_type: str = Field(default="STK", min_length=1, description="IBKR security type: 'STK', 'FUT', 'OPT', 'CASH', 'IND', 'BOND'.")
+    exchange: str = Field(default="SMART", min_length=1, description="Exchange or routing destination, for example 'SMART', 'NASDAQ', 'CME', 'IDEALPRO'.")
+    currency: str = Field(default="USD", min_length=1, description="IBKR currency code, for example 'USD', 'HKD', 'JPY'.")
+    tick_type: TickType = Field(default=TickType.ALL_LAST, description="Tick stream type: 'Last', 'BidAsk', 'MidPoint', or 'AllLast'.")
+    max_ticks: int = Field(default=10_000, ge=100, le=1_000_000, description="Stop after this many ticks. 0 means unlimited.")
 
 
 class TickUnsubscribeRequest(BaseModel):
@@ -300,7 +304,7 @@ class TickUnsubscribeRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1)
-    sec_type: str = Field(default="STK", min_length=1)
-    exchange: str = Field(default="SMART", min_length=1)
+    symbol: str = Field(min_length=1, description="Instrument symbol, for example 'AAPL', 'ES', 'EUR.USD'.")
+    sec_type: str = Field(default="STK", min_length=1, description="IBKR security type: 'STK', 'FUT', 'OPT', 'CASH', 'IND', 'BOND'.")
+    exchange: str = Field(default="SMART", min_length=1, description="Exchange or routing destination, for example 'SMART', 'NASDAQ', 'CME', 'IDEALPRO'.")
 

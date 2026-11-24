@@ -29,12 +29,12 @@ _IBKR_WARNING_CODES = {110, 165, 202, 399, 404, 434, 492, 10090, 10167}
 class EquityReferenceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    symbol: str = Field(min_length=1)
-    exchange: str | None = None
-    currency: str | None = None
-    primary_exchange: str | None = None
-    con_id: int | None = Field(default=None, gt=0)
-    timeout_seconds: float = Field(default=10, gt=0, le=20)
+    symbol: str = Field(min_length=1, description="Instrument symbol, for example 'AAPL', 'ES', 'EUR.USD'.")
+    exchange: str | None = Field(default=None, description="Exchange or routing destination, for example 'SMART', 'NASDAQ', 'CME', 'IDEALPRO'.")
+    currency: str | None = Field(default=None, description="IBKR currency code, for example 'USD', 'HKD', 'JPY'.")
+    primary_exchange: str | None = Field(default=None, description="Primary exchange; use to disambiguate 'SMART' routing.")
+    con_id: int | None = Field(default=None, gt=0, description="IBKR contract ID. Takes precedence over symbol when set.")
+    timeout_seconds: float = Field(default=10, gt=0, le=20, description="Seconds before the lookup gives up.")
 
     @field_validator("symbol", "exchange", "currency", "primary_exchange", mode="before")
     @classmethod

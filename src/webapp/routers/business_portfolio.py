@@ -28,66 +28,74 @@ _GROSS_POSITION_VALUE_TAG = "GrossPositionValue"
 
 
 class BusinessPortfolioRiskRequest(BusinessCacheControls):
+    """Request body for the portfolio risk snapshot."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    account: str = ""
-    model_code: str = ""
-    include_account_pnl: bool = True
-    include_positions: bool = True
-    wait_seconds: float = Field(default=1.2, ge=0)
-    cache_ttl_seconds: float | None = Field(default=5, ge=0)
+    account: str = Field(default="", description="IBKR account id to scope the snapshot; empty string uses the single linked account or ALL when several are linked.")
+    model_code: str = Field(default="", description="IBKR PnL model code for the account PnL section; empty selects the base model.")
+    include_account_pnl: bool = Field(default=True, description="Include daily/unrealized/realized account PnL; skipped with a warning when no single account is selected.")
+    include_positions: bool = Field(default=True, description="Include per-position rows and the exposure groupings built from them.")
+    wait_seconds: float = Field(default=1.2, ge=0, description="Seconds to wait for the first PnL update.")
+    cache_ttl_seconds: float | None = Field(default=5, ge=0, description="Cache entry lifetime in seconds; the default is short because risk goes stale fast.")
 
 
 class BusinessPortfolioPosition(BaseModel):
+    """One position row in the portfolio risk snapshot."""
+
     model_config = ConfigDict(extra="forbid")
 
-    account: str
-    con_id: int | None = None
-    symbol: str
-    sec_type: str
-    currency: str
-    position: float
-    average_cost: float | None = None
-    market_price: float | None = None
-    market_value: float | None = None
-    unrealized_pnl: float | None = None
-    realized_pnl: float | None = None
-    gross_exposure: float
-    net_exposure: float
-    weight_of_net_liquidation: float | None = None
+    account: str = Field(description="IBKR account id holding the position.")
+    con_id: int | None = Field(default=None, description="IBKR contract id; null when not reported.")
+    symbol: str = Field(description="Contract symbol.")
+    sec_type: str = Field(description="IBKR security type, e.g. STK, OPT, FUT.")
+    currency: str = Field(description="ISO 4217 position currency.")
+    position: float = Field(description="Signed quantity; negative for short positions.")
+    average_cost: float | None = Field(default=None, description="Average open cost per contract; null when unknown.")
+    market_price: float | None = Field(default=None, description="Mark price per contract; null when unknown.")
+    market_value: float | None = Field(default=None, description="Mark-to-market value; null when unknown. Falls back to position times market_price.")
+    unrealized_pnl: float | None = Field(default=None, description="Unrealized PnL; null when unknown.")
+    realized_pnl: float | None = Field(default=None, description="Realized PnL; null when unknown.")
+    gross_exposure: float = Field(description="Absolute market value used as exposure.")
+    net_exposure: float = Field(description="Signed market value used as exposure.")
+    weight_of_net_liquidation: float | None = Field(default=None, description="Gross exposure divided by net liquidation; null when net liquidation is missing or zero.")
 
 
 class BusinessPortfolioExposure(BaseModel):
+    """Exposure aggregated over one group key (asset class or currency)."""
+
     model_config = ConfigDict(extra="forbid")
 
-    key: str
-    gross_exposure: float
-    net_exposure: float
-    market_value: float
-    weight_of_net_liquidation: float | None = None
+    key: str = Field(description="Group key: security type for exposures_by_asset_class, currency code for exposures_by_currency.")
+    gross_exposure: float = Field(description="Sum of absolute market values in the group.")
+    net_exposure: float = Field(description="Sum of signed market values in the group.")
+    market_value: float = Field(description="Sum of market values in the group (treats nulls as zero).")
+    weight_of_net_liquidation: float | None = Field(default=None, description="Gross exposure divided by net liquidation; null when unavailable.")
 
 
 class BusinessPortfolioRiskResponse(BaseModel):
+    """Response envelope for the portfolio risk snapshot."""
+
     model_config = ConfigDict(extra="forbid")
 
-    generated_at: datetime
-    account: str
-    base_currency: str | None = None
-    net_liquidation: float | None = None
-    total_cash_value: float | None = None
-    available_funds: float | None = None
-    excess_liquidity: float | None = None
-    cushion: float | None = None
-    gross_position_value: float | None = None
-    leverage: float | None = None
-    daily_pnl: float | None = None
-    unrealized_pnl: float | None = None
-    realized_pnl: float | None = None
-    positions: list[BusinessPortfolioPosition] = Field(default_factory=list)
-    exposures_by_asset_class: list[BusinessPortfolioExposure] = Field(default_factory=list)
-    exposures_by_currency: list[BusinessPortfolioExposure] = Field(default_factory=list)
-    top_concentrations: list[BusinessPortfolioPosition] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
+    generated_at: datetime = Field(description="UTC time the snapshot was assembled.")
+    account: str = Field(description="Account the metrics describe: the requested id, the single linked account, or ALL.")
+    base_currency: str | None = Field(default=None, description="Currency of the monetary aggregates; null when it cannot be determined.")
+    net_liquidation: float | None = Field(default=None, description="NetLiquidation from the account summary; null when missing.")
+    total_cash_value: float | None = Field(default=None, description="TotalCashValue from the account summary; null when missing.")
+    available_funds: float | None = Field(default=None, description="AvailableFunds from the account summary; null when missing.")
+    excess_liquidity: float | None = Field(default=None, description="ExcessLiquidity from the account summary; null when missing.")
+    cushion: float | None = Field(default=None, description="ExcessLiquidity / NetLiquidation; null when unavailable.")
+    gross_position_value: float | None = Field(default=None, description="GrossPositionValue from the summary, or the sum of position gross exposures; null when both are unavailable.")
+    leverage: float | None = Field(default=None, description="GrossPositionValue / NetLiquidation; null when unavailable.")
+    daily_pnl: float | None = Field(default=None, description="Day PnL; null when not requested or unavailable.")
+    unrealized_pnl: float | None = Field(default=None, description="Unrealized PnL; null when not requested or unavailable.")
+    realized_pnl: float | None = Field(default=None, description="Realized PnL; null when not requested or unavailable.")
+    positions: list[BusinessPortfolioPosition] = Field(default_factory=list, description="Position rows sorted by account, symbol, conId; empty when include_positions is false.")
+    exposures_by_asset_class: list[BusinessPortfolioExposure] = Field(default_factory=list, description="Exposure grouped by security type.")
+    exposures_by_currency: list[BusinessPortfolioExposure] = Field(default_factory=list, description="Exposure grouped by currency.")
+    top_concentrations: list[BusinessPortfolioPosition] = Field(default_factory=list, description="Top ten positions by gross exposure.")
+    warnings: list[str] = Field(default_factory=list, description="Data-quality notes, for example multi-account summaries or PnL skips.")
 
 
 @router.post(
@@ -102,6 +110,16 @@ async def get_portfolio_risk_snapshot(
     ],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> BusinessPortfolioRiskResponse:
+    """Return a business-ready risk snapshot for one account.
+
+    Combines the account summary (net liquidation, cash, funds, liquidity,
+    cushion, gross position value, leverage), optional account PnL, and
+    position rows into one payload. Positions are grouped into exposures by
+    security type and currency, plus the top-ten concentrations by gross
+    exposure. With several linked accounts and no explicit account, only
+    position-level data is aggregated and a warning explains the skip.
+    Cached for cache_ttl_seconds (default 5 s).
+    """
     async def load() -> BusinessPortfolioRiskResponse:
         return await _load_portfolio_risk_snapshot(payload, state)
 

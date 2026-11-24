@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.feeds.contracts import OptionChain, OptionChainRequest
@@ -77,22 +77,24 @@ OPTION_CHAIN_REQUEST_EXAMPLES = {
 
 
 class CachedOptionChainRequest(BaseModel):
+    """Cached option-chain request envelope."""
+
     model_config = ConfigDict(extra="forbid")
 
-    request: OptionChainRequest
-    use_ttl_cache: bool = True
-    cache_ttl_seconds: float | None = Field(default=300, ge=0)
+    request: OptionChainRequest = Field(description="The option chain request: symbol, asset_class (equity or index), exchange, currency, optional primary_exchange and underlying_con_id.")
+    use_ttl_cache: bool = Field(default=True, description="Serve the response from the shared TTL cache when possible.")
+    cache_ttl_seconds: float | None = Field(default=300, ge=0, description="Cache entry lifetime in seconds; null uses the cache default.")
 
 
 class EconomicCalendarRequest(WSHEventDataRequest):
     """Convenience request for IBKR Wall Street Horizon calendar/event data."""
 
-    limit_region: int = Field(default=50, gt=0, le=500)
-    limit: int = Field(default=50, gt=0, le=500)
-    total_limit: int | None = Field(default=100, gt=0, le=100)
-    ensure_metadata: bool = True
-    use_ttl_cache: bool = True
-    cache_ttl_seconds: float | None = Field(default=300, ge=0)
+    limit_region: int = Field(default=50, gt=0, le=500, description="Per-region event limit for JSON filter mode.")
+    limit: int = Field(default=50, gt=0, le=500, description="Per-contract event limit.")
+    total_limit: int | None = Field(default=100, gt=0, le=100, description="Overall response cap; IBKR allows at most 100.")
+    ensure_metadata: bool = Field(default=True, description="Refresh the available event-type tags into the response metadata.")
+    use_ttl_cache: bool = Field(default=True, description="Serve the response from the shared TTL cache when possible.")
+    cache_ttl_seconds: float | None = Field(default=300, ge=0, description="Cache entry lifetime in seconds; null uses the cache default.")
 
     def to_wsh_request(self) -> WSHEventDataRequest:
         if not self.uses_filter_json:
@@ -130,21 +132,24 @@ class EconomicCalendarResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    received_at: datetime
-    source: str = "ibkr_wsh"
-    calendar_type: str = "wall_street_horizon_event_calendar"
-    dedicated_macro_calendar_endpoint_available: bool = False
-    subscription_required: str = "Wall Street Horizon Corporate Event Data"
-    caveats: tuple[str, ...] = (
-        "IBKR exposes this through Wall Street Horizon event calendar data, not a dedicated macroeconomic-release calendar endpoint.",
-        "Available filters and event-type tags are entitlement/session dependent; call /reference-data/wsh/metadata to inspect them.",
-        "IBKR WSH accepts one event-type tag per request; issue separate requests for multiple event categories.",
-        "A Wall Street Horizon Corporate Event Data research subscription must be enabled for the account.",
+    received_at: datetime = Field(description="UTC time the underlying WSH response was received.")
+    source: str = Field(default="ibkr_wsh", description="Data source identifier.")
+    calendar_type: str = Field(default="wall_street_horizon_event_calendar", description="Calendar flavor; IBKR has no dedicated macro-release calendar.")
+    dedicated_macro_calendar_endpoint_available: bool = Field(default=False, description="Always false: this is WSH event data, not a macro calendar feed.")
+    subscription_required: str = Field(default="Wall Street Horizon Corporate Event Data", description="Research subscription the account needs for this data.")
+    caveats: tuple[str, ...] = Field(
+        default=(
+            "IBKR exposes this through Wall Street Horizon event calendar data, not a dedicated macroeconomic-release calendar endpoint.",
+            "Available filters and event-type tags are entitlement/session dependent; call /reference-data/wsh/metadata to inspect them.",
+            "IBKR WSH accepts one event-type tag per request; issue separate requests for multiple event categories.",
+            "A Wall Street Horizon Corporate Event Data research subscription must be enabled for the account.",
+        ),
+        description="Source caveats every consumer of this calendar should read.",
     )
-    request_filter_json: str
-    raw_json: str
-    payload: dict[str, Any] | list[Any]
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    request_filter_json: str = Field(description="The JSON filter IBKR applied for this request.")
+    raw_json: str = Field(description="Raw WSH JSON document exactly as IBKR returned it.")
+    payload: dict[str, Any] | list[Any] = Field(description="Parsed WSH event payload; passthrough of IBKR JSON (contents depend on entitlement).")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Passthrough metadata; includes available event-type tags when ensure_metadata was set.")
 
     @classmethod
     def from_wsh_report(cls, report: WSHEventDataReport) -> "EconomicCalendarResponse":
@@ -208,15 +213,26 @@ ECONOMIC_CALENDAR_EXAMPLES = {
 @router.post("/options/chains", response_model=list[OptionChain])
 async def load_option_chains(
     payload: Annotated[CachedOptionChainRequest, Body(openapi_examples=OPTION_CHAIN_REQUEST_EXAMPLES)],
+    limit: int | None = Query(default=None, ge=1, le=1000, description="Return at most the first N chains (one per exchange); omit for all."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[OptionChain]:
+    """Return option chain metadata for one underlying across exchanges.
+
+    Each chain lists the exchange, trading class, multiplier, expiries
+    (YYYYMMDD, sorted), and strikes (sorted). Underlying qualification
+    skips when underlying_con_id is supplied. Responses are cached for
+    cache_ttl_seconds (default 300 s).
+    """
     async def load() -> list[OptionChain]:
         return await state.feed.load_option_chains(payload.request)
 
     if payload.use_ttl_cache:
-        key = stable_cache_key("option_chains", payload.request)
-        return await state.market_data_cache.get_or_set(key, load, ttl_seconds=payload.cache_ttl_seconds)
-    return await load()
+        chains = await state.market_data_cache.get_or_set(
+            stable_cache_key("option_chains", payload.request), load, ttl_seconds=payload.cache_ttl_seconds
+        )
+    else:
+        chains = await load()
+    return chains[:limit] if isinstance(limit, int) else chains
 
 
 @router.post("/fundamentals", response_model=FundamentalDataReport, deprecated=True,
@@ -225,11 +241,24 @@ async def load_fundamental_data(
     request: FundamentalDataRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> FundamentalDataReport:
+    """Deprecated: IBKR removed fundamental reports in TWS 10.32+.
+
+    The endpoint is retained for contract discovery and always fails with
+    410 in practice. Prefer /business/getEquityOverview for equity research
+    context.
+    """
     return await state.feed.load_fundamental_data(request)
 
 
 @router.get("/wsh/metadata", response_model=WSHMetadataReport)
 async def load_wsh_metadata(state: IBKRRestAppState = Depends(get_rest_state)) -> WSHMetadataReport:
+    """Return Wall Street Horizon metadata: filters, tags, and countries.
+
+    Call this before /wsh/events or /economic-calendar to discover the
+    event-type tags and filter keys the current entitlement accepts. The
+    payload is a passthrough of IBKR's JSON; raw_json carries the untouched
+    document.
+    """
     return await state.feed.load_wsh_metadata()
 
 
@@ -238,6 +267,14 @@ async def load_wsh_event_data(
     request: WSHEventDataRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> WSHEventDataReport:
+    """Query Wall Street Horizon corporate event data directly.
+
+    Two modes: JSON filter mode (country, con_ids, event_types, limits) or
+    object mode (con_id or fill_watchlist/portfolio/competitors with
+    start_date/end_date as YYYYMMDD). One event-type tag per request. The
+    response echoes the applied filter and carries the raw IBKR JSON.
+    Requires a WSH research subscription.
+    """
     return await state.feed.load_wsh_event_data(request)
 
 
@@ -246,6 +283,14 @@ async def load_economic_calendar(
     payload: Annotated[EconomicCalendarRequest, Body(openapi_examples=ECONOMIC_CALENDAR_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> EconomicCalendarResponse:
+    """Return an event calendar built on IBKR Wall Street Horizon data.
+
+    Convenience wrapper around /wsh/events with wider default limits,
+    refreshed event-type metadata, and explicit caveats: IBKR serves
+    corporate/event calendars, not a dedicated macroeconomic-release feed,
+    and the payload shape depends on entitlement. Cached for
+    cache_ttl_seconds (default 300 s).
+    """
     request = payload.to_wsh_request()
 
     async def load() -> EconomicCalendarResponse:
@@ -253,23 +298,43 @@ async def load_economic_calendar(
         return EconomicCalendarResponse.from_wsh_report(report)
 
     if payload.use_ttl_cache:
-        key = stable_cache_key("economic_calendar", payload)
-        return await state.market_data_cache.get_or_set(key, load, ttl_seconds=payload.cache_ttl_seconds)
+        return await state.market_data_cache.get_or_set(
+            stable_cache_key("economic_calendar", payload), load, ttl_seconds=payload.cache_ttl_seconds
+        )
     return await load()
 
 
 @router.get("/news/providers", response_model=list[NewsProvider])
-async def load_news_providers(state: IBKRRestAppState = Depends(get_rest_state)) -> list[NewsProvider]:
-    return await state.feed.load_news_providers()
+async def load_news_providers(
+    limit: int | None = Query(default=None, ge=1, le=1000, description="Return at most the first N providers; omit for all."),
+    state: IBKRRestAppState = Depends(get_rest_state),
+) -> list[NewsProvider]:
+    """Return the news providers this account is entitled to query.
+
+    Each entry carries a provider_code and a display name. Use the codes in
+    /reference-data/news/historical provider_codes. An empty list means no
+    news entitlement.
+    """
+    providers = await state.feed.load_news_providers()
+    return providers[:limit] if isinstance(limit, int) else providers
 
 
 @router.post("/news/historical", response_model=list[HistoricalNewsHeadline])
 async def load_historical_news(
     request: HistoricalNewsRequest,
+    limit: int | None = Query(default=None, ge=1, le=1000, description="Return at most the first N headlines (already bounded by total_results); omit for all."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[HistoricalNewsHeadline]:
+    """Return historical news headlines for one contract.
+
+    Query by con_id with one or more entitled provider codes, an optional
+    UTC time window, and total_results as the IBKR-side bound. Provider
+    codes that are not entitled fail with 422; no entitlement at all fails
+    with 503.
+    """
     await _ensure_entitled_news_provider_codes(request.provider_codes, state)
-    return await state.feed.load_historical_news(request)
+    headlines = await state.feed.load_historical_news(request)
+    return headlines[:limit] if isinstance(limit, int) else headlines
 
 
 @router.post("/news/article", response_model=NewsArticle)
@@ -277,6 +342,12 @@ async def load_news_article(
     request: NewsArticleRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> NewsArticle:
+    """Return the full body of one IBKR news article.
+
+    Identify the article by provider_code plus article_id exactly as a
+    headline reports them. The response carries the article text, type, and
+    UTC receive time.
+    """
     return await state.feed.load_news_article(request)
 
 

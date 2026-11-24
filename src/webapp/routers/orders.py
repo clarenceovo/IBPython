@@ -6,7 +6,7 @@ import logging
 import secrets
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Security, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.feeds.orders import (
@@ -101,11 +101,23 @@ async def require_order_bearer_token(
 
 @router.get("/tca", response_model=TCAReport)
 async def transaction_cost_analysis(
-    account_id: str = Query(..., min_length=1), strategy_id: str | None = None,
-    start: datetime | None = None, end: datetime | None = None,
+    account_id: str = Query(..., min_length=1, description="IBKR account id whose archived executions to analyze."),
+    strategy_id: str | None = Query(
+        default=None,
+        description="Optional strategy tag to filter executions before aggregation.",
+    ),
+    start: datetime | None = Query(default=None, description="Optional inclusive start of the analysis window (UTC)."),
+    end: datetime | None = Query(default=None, description="Optional exclusive end of the analysis window (UTC); must follow start."),
     state: IBKRRestAppState = Depends(require_order_bearer_token),
 ) -> TCAReport:
-    """Analyze archived executions; sync /orders/executions after reconnects."""
+    """Analyze archived executions; sync /orders/executions after reconnects.
+
+    Builds a transaction-cost report (fills, slippage vs arrival and VWAP,
+    and implementation shortfall) from the execution analytics archive.
+    The archive is populated when executions are loaded, so run
+    POST /orders/executions first after reconnecting. Window inversions
+    return 422; a missing archive returns 503.
+    """
     if state.analytics_store is None:
         raise HTTPException(503, "execution analytics archive is not configured")
     try:
@@ -121,7 +133,11 @@ async def transaction_cost_analysis(
 @router.post("/place", response_model=OrderResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_orders_enabled)])
 async def place_order(
     request: PlaceOrderRequest,
-    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        description="Client-supplied key; reusing it within 24h returns the cached response instead of placing again.",
+    ),
     state: IBKRRestAppState = Depends(require_order_bearer_token),
 ) -> OrderResponse:
     """Place a new order — supports market, limit, stop, trailing, and more.
@@ -139,8 +155,8 @@ async def place_order(
 
 @router.post("/{order_id}/cancel", response_model=CancelOrderResponse, dependencies=[Depends(require_orders_enabled)])
 async def cancel_order(
-    order_id: int,
-    account_id: str = Query(..., min_length=1, alias="account_id"),
+    order_id: int = Path(description="IBKR order id (permId-based orderId) to cancel."),
+    account_id: str = Query(..., min_length=1, alias="account_id", description="IBKR account id the order lives in."),
     state: IBKRRestAppState = Depends(require_order_bearer_token),
 ) -> CancelOrderResponse:
     """Cancel an existing order by order ID and account ID.
@@ -152,9 +168,12 @@ async def cancel_order(
 
 @router.post("/{order_id}/modify", response_model=OrderResponse, dependencies=[Depends(require_orders_enabled)])
 async def modify_order(
-    order_id: int,
-    modifications: ModifyOrderRequest,
-    account_id: str = Query(..., min_length=1, alias="account_id"),
+    order_id: int = Path(description="IBKR order id (permId-based orderId) to modify."),
+    modifications: ModifyOrderRequest = Body(
+        ...,
+        description="Fields to change: limited to price, quantity, and time-in-force.",
+    ),
+    account_id: str = Query(..., min_length=1, alias="account_id", description="IBKR account id the order lives in."),
     state: IBKRRestAppState = Depends(require_order_bearer_token),
 ) -> OrderResponse:
     """Modify an existing order — limited to price, quantity, and TIF.
@@ -166,11 +185,16 @@ async def modify_order(
 
 @router.get("/open", response_model=list[OpenOrder], summary="Get all open (working) orders")
 async def load_open_orders(
-    limit: int = Query(default=100, ge=1, le=1000),
-    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=1000, description="Maximum number of open orders to return."),
+    offset: int = Query(default=0, ge=0, description="Number of open orders to skip for paging."),
     state: IBKRRestAppState = Depends(require_order_bearer_token),
 ) -> list[OpenOrder]:
-    """Get all currently open (working) orders."""
+    """Get all currently open (working) orders.
+
+    Returns bound open orders for this API client's session. Results are
+    paginated with limit/offset; ordering follows IBKR. Use
+    GET /orders/open/all for a one-time cross-client snapshot.
+    """
     results = await state.feed.load_open_orders()
     return results[offset : offset + limit]
 
@@ -180,7 +204,12 @@ async def load_executions(
     request: ExecutionRequest,
     state: IBKRRestAppState = Depends(require_order_bearer_token),
 ) -> ExecutionResponse:
-    """Get execution/fill details with optional filtering."""
+    """Get execution/fill details with optional filtering.
+
+    Fetches executions known to this session and mirrors them into the
+    analytics archive used by GET /orders/tca. Run it after reconnects so
+    TCA sees the fills.
+    """
     return await state.feed.load_executions(request)
 
 
@@ -195,11 +224,15 @@ async def preview_order(
 
 @router.get("/completed", response_model=list[CompletedOrder], summary="Get completed order history")
 async def load_completed_orders(
-    limit: int = Query(default=100, ge=1, le=1000),
-    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=1000, description="Maximum number of completed orders to return."),
+    offset: int = Query(default=0, ge=0, description="Number of completed orders to skip for paging."),
     state: IBKRRestAppState = Depends(require_order_bearer_token),
 ) -> list[CompletedOrder]:
-    """Get completed (filled/cancelled) order history."""
+    """Get completed (filled/cancelled) order history.
+
+    Returns completed order reports for the session. Results are paginated
+    with limit/offset; IBKR caps how far back reports are available.
+    """
     results = await state.feed.load_completed_orders()
     return results[offset : offset + limit]
 
@@ -210,7 +243,7 @@ async def load_completed_orders(
 
 @router.get("/cache/{order_uuid}", response_model=CachedOrderLookup)
 async def get_cached_order(
-    order_uuid: str,
+    order_uuid: str = Path(description="Order UUID returned by place/cancel/modify/preview responses."),
     state: IBKRRestAppState = Depends(require_order_bearer_token),
 ) -> CachedOrderLookup:
     """Look up a cached order envelope by UUID.
@@ -224,8 +257,8 @@ async def get_cached_order(
 
 @router.get("/cache", response_model=list[OrderEnvelope], summary="List cached order envelopes")
 async def list_cached_orders(
-    limit: int = Query(default=100, ge=1, le=1000),
-    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=1000, description="Maximum number of envelopes to return."),
+    offset: int = Query(default=0, ge=0, description="Number of envelopes to skip for paging."),
     state: IBKRRestAppState = Depends(require_order_bearer_token),
 ) -> list[OrderEnvelope]:
     """List all cached order envelopes from Redis.
@@ -304,10 +337,16 @@ async def place_oca_group(
 
 @router.get("/open/all", response_model=list[OpenOrder], summary="Snapshot open orders across API clients")
 async def load_all_open_orders(
-    limit: int = Query(default=100, ge=1, le=1000),
-    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=1000, description="Maximum number of open orders to return."),
+    offset: int = Query(default=0, ge=0, description="Number of open orders to skip for paging."),
     state: IBKRRestAppState = Depends(require_order_bearer_token),
 ) -> list[OpenOrder]:
-    """One-time snapshot in associated accounts; does not bind orders for modification."""
+    """One-time snapshot in associated accounts; does not bind orders for modification.
+
+    Fetches all open orders across associated clients and accounts in a
+    single request. The returned orders are not bound to this session, so
+    cancel/modify may not act on them; use GET /orders/open for bound
+    orders. Results are paginated with limit/offset.
+    """
     results = await state.feed.get_all_open_orders()
     return results[offset : offset + limit]

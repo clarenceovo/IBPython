@@ -374,51 +374,73 @@ class IBKROptionsFeedClient:
         generic_ticks: tuple[str, ...] = DEFAULT_OPTION_ANALYTICS_GENERIC_TICKS,
         snapshot_wait_seconds: float = 2.0,
     ) -> list[FXOptionSnapshot]:
-        """Capture short-lived FX option market-data snapshots and cancel subscriptions."""
+        """Capture short-lived FX option market-data snapshots and cancel subscriptions.
+
+        All contracts are qualified in one batch, subscribed, waited for once,
+        and cleaned up together: the batch costs one ``snapshot_wait_seconds``
+        instead of one per contract. Market-data-line leases bound how many
+        subscriptions run at once.
+        """
         await self._connection.ensure_connected()
-        snapshots: list[FXOptionSnapshot] = []
+        if not contracts:
+            return []
         generic_tick_list = ",".join(generic_ticks)
-        for contract_spec, pair_symbol in zip(contracts, symbols, strict=True):
-            logger.info("capture_fx_option_snapshot: symbol=%s expiry=%s", pair_symbol, contract_spec.expiry)
-            contract = build_ibkr_option_contract(contract_spec)
-            qualified = await self._connection.with_retry(
-                lambda: self._ib.qualifyContractsAsync(contract),
-                operation=f"qualify_fx_option:{pair_symbol}:{contract_spec.expiry}",
-            )
-            if qualified:
-                contract = qualified[0]
-                if getattr(contract, "conId", None):
+
+        built = [build_ibkr_option_contract(spec) for spec in contracts]
+        qualified = await self._connection.with_retry(
+            lambda: self._ib.qualifyContractsAsync(*built),
+            operation="qualify_fx_options:batch",
+        )
+        # ib_async mutates and returns the same instances; map by position.
+        qualified_by_position = {
+            position: contract for position, contract in enumerate(qualified or [])
+        }
+
+        active: list[tuple[Any, OptionContractSpec, str, Any, Any]] = []
+        try:
+            for position, (contract, contract_spec, pair_symbol) in enumerate(zip(built, contracts, symbols, strict=True)):
+                resolved_contract = qualified_by_position.get(position)
+                if resolved_contract is not None and getattr(resolved_contract, "conId", None):
+                    contract = resolved_contract
                     contract_spec = contract_spec.model_copy(update={"con_id": int(getattr(contract, "conId"))})
-            operation = f"fx_option_snapshot:{pair_symbol}:{contract_spec.expiry}"
-            lease = await acquire_market_data_line(
-                self._connection,
-                contract_key=_rate_limit_contract_key(contract, operation),
-                operation=operation,
-                ttl_seconds=max(30.0, snapshot_wait_seconds + 10.0),
-            )
-            await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
-            try:
-                ticker = self._ib.reqMktData(
-                    contract,
-                    genericTickList=generic_tick_list,
-                    snapshot=False,
-                    regulatorySnapshot=False,
-                    mktDataOptions=[],
+                operation = f"fx_option_snapshot:{pair_symbol}:{contract_spec.expiry}"
+                lease = await acquire_market_data_line(
+                    self._connection,
+                    contract_key=_rate_limit_contract_key(contract, operation),
+                    operation=operation,
+                    ttl_seconds=max(30.0, snapshot_wait_seconds + 10.0),
                 )
-            except Exception:
-                await lease.release()
-                raise
-            try:
-                await asyncio.sleep(snapshot_wait_seconds)
-                snapshots.append(ticker_to_fx_option_snapshot(ticker, contract_spec, symbol=pair_symbol))
-            finally:
                 try:
-                    await wait_for_ibkr_request(self._connection, operation=f"{operation}:cancelMktData")
+                    await wait_for_ibkr_request(self._connection, operation=f"{operation}:reqMktData")
+                    ticker = self._ib.reqMktData(
+                        contract,
+                        genericTickList=generic_tick_list,
+                        snapshot=False,
+                        regulatorySnapshot=False,
+                        mktDataOptions=[],
+                    )
+                except Exception:
+                    await lease.release()
+                    raise
+                active.append((contract, contract_spec, pair_symbol, ticker, lease))
+
+            if not active:
+                return []
+
+            # One shared wait for the whole batch instead of one per contract.
+            await asyncio.sleep(snapshot_wait_seconds)
+            return [
+                ticker_to_fx_option_snapshot(ticker, contract_spec, symbol=pair_symbol)
+                for _contract, contract_spec, pair_symbol, ticker, _lease in active
+            ]
+        finally:
+            for contract, _contract_spec, pair_symbol, _ticker, lease in active:
+                try:
+                    await wait_for_ibkr_request(self._connection, operation=f"fx_option_snapshot:{pair_symbol}:cancelMktData")
                     self._ib.cancelMktData(contract)
                 except Exception:
                     logger.debug("Failed to cancel FX option market data for %s", pair_symbol, exc_info=True)
                 await lease.release()
-        return snapshots
 
     async def load_option_skew_surface(self, request: OptionSkewSurfaceRequest) -> OptionSkewSurfaceResponse:
         """Load bounded per-maturity option skew and open-interest summaries."""

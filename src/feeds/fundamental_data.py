@@ -26,14 +26,14 @@ class FundamentalDataRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1)
-    asset_class: AssetClass = AssetClass.EQUITY
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
-    primary_exchange: str | None = None
-    report_type: FundamentalReportType = FundamentalReportType.REPORT_SNAPSHOT
-    source: str = Field(default="ibkr", min_length=1)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    symbol: str = Field(min_length=1, description="Underlying symbol, e.g. AAPL or 0700.HK notation per asset class.")
+    asset_class: AssetClass = Field(default=AssetClass.EQUITY, description="Underlying asset class; only equity is accepted by this legacy endpoint.")
+    exchange: str = Field(default="SMART", min_length=1, description="Exchange or SMART for routing.")
+    currency: str = Field(default="USD", min_length=1, description="ISO 4217 currency, e.g. USD.")
+    primary_exchange: str | None = Field(default=None, description="Primary listing exchange for SMART-routed equities, e.g. NASDAQ.")
+    report_type: FundamentalReportType = Field(default=FundamentalReportType.REPORT_SNAPSHOT, description="IBKR fundamental report type.")
+    source: str = Field(default="ibkr", min_length=1, description="Data source identifier.")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Passthrough request metadata; preserved on the outgoing contract spec.")
 
     @field_validator("symbol", "exchange", "currency", mode="before")
     @classmethod
@@ -64,14 +64,14 @@ class FundamentalDataReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str = Field(min_length=1)
-    asset_class: AssetClass = AssetClass.EQUITY
-    con_id: int | None = Field(default=None, gt=0)
-    report_type: FundamentalReportType
-    received_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    source: str = Field(default="ibkr", min_length=1)
-    raw_xml: str
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    symbol: str = Field(min_length=1, description="Underlying symbol the report covers.")
+    asset_class: AssetClass = Field(default=AssetClass.EQUITY, description="Underlying asset class (equity only).")
+    con_id: int | None = Field(default=None, gt=0, description="IBKR contract id of the underlying; null when not qualified.")
+    report_type: FundamentalReportType = Field(description="IBKR fundamental report type.")
+    received_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="UTC time the report was received.")
+    source: str = Field(default="ibkr", min_length=1, description="Data source identifier.")
+    raw_xml: str = Field(description="Raw IBKR fundamental report document (usually XML).")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Passthrough metadata about the request/session.")
 
     @field_validator("symbol", mode="before")
     @classmethod
@@ -97,11 +97,11 @@ class WSHMetadataReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    received_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    source: str = Field(default="ibkr_wsh", min_length=1)
-    raw_json: str
-    payload: dict[str, Any] | list[Any]
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    received_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="UTC time the report was received.")
+    source: str = Field(default="ibkr_wsh", min_length=1, description="Data source identifier.")
+    raw_json: str = Field(description="Raw WSH metadata JSON document exactly as IBKR returned it.")
+    payload: dict[str, Any] | list[Any] = Field(description="Parsed WSH metadata payload (event-type tags, filters, countries); passthrough of IBKR JSON.")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Passthrough metadata about the request/session.")
 
     @classmethod
     def from_raw_json(cls, raw_json: str, **kwargs: Any) -> "WSHMetadataReport":
@@ -116,20 +116,20 @@ class WSHEventDataRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    con_id: int | None = Field(default=None, gt=0)
-    con_ids: tuple[int, ...] = Field(default_factory=tuple)
-    country: str = "All"
-    limit_region: int = Field(default=10, gt=0)
-    limit: int = Field(default=10, gt=0)
-    event_types: tuple[str, ...] = Field(default_factory=tuple)
-    extra_filters: dict[str, Any] = Field(default_factory=dict)
-    raw_filter_json: str | None = None
-    fill_watchlist: bool = False
-    fill_portfolio: bool = False
-    fill_competitors: bool = False
-    start_date: date | None = None
-    end_date: date | None = None
-    total_limit: int | None = Field(default=None, gt=0, le=100)
+    con_id: int | None = Field(default=None, gt=0, description="Single IBKR contract id for one-contract event lookups; uses WshEventData object mode with date bounds.")
+    con_ids: tuple[int, ...] = Field(default_factory=tuple, description="IBKR contract ids for JSON filter mode; ignored when empty.")
+    country: str = Field(default="All", description="Country filter for JSON filter mode, e.g. US, HK, or All.")
+    limit_region: int = Field(default=10, gt=0, description="Per-region event limit for JSON filter mode.")
+    limit: int = Field(default=10, gt=0, description="Per-contract event limit for JSON filter mode.")
+    event_types: tuple[str, ...] = Field(default_factory=tuple, description="WSH event-type tags (e.g. wshe_ed for earnings); discover tags via /reference-data/wsh/metadata. IBKR accepts one tag per request.")
+    extra_filters: dict[str, Any] = Field(default_factory=dict, description="Additional WSH JSON filter keys; passthrough to IBKR.")
+    raw_filter_json: str | None = Field(default=None, description="Raw WSH filter JSON string; overrides the composed filter fields when set.")
+    fill_watchlist: bool = Field(default=False, description="Include events for the account watchlist (object mode).")
+    fill_portfolio: bool = Field(default=False, description="Include events for portfolio underlyings (object mode).")
+    fill_competitors: bool = Field(default=False, description="Include events for portfolio competitors (object mode).")
+    start_date: date | None = Field(default=None, description="Window start as YYYYMMDD (object mode; do not combine with JSON filter fields).")
+    end_date: date | None = Field(default=None, description="Window end as YYYYMMDD (object mode; do not combine with JSON filter fields).")
+    total_limit: int | None = Field(default=None, gt=0, le=100, description="Overall response cap across regions/contracts; IBKR allows at most 100.")
 
     @field_validator("con_ids", mode="before")
     @classmethod
@@ -245,12 +245,12 @@ class WSHEventDataReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    received_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    source: str = Field(default="ibkr_wsh", min_length=1)
-    request_filter_json: str
-    raw_json: str
-    payload: dict[str, Any] | list[Any]
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    received_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="UTC time the report was received.")
+    source: str = Field(default="ibkr_wsh", min_length=1, description="Data source identifier.")
+    request_filter_json: str = Field(description="The JSON filter IBKR applied for this request.")
+    raw_json: str = Field(description="Raw WSH event JSON document exactly as IBKR returned it.")
+    payload: dict[str, Any] | list[Any] = Field(description="Parsed WSH event payload; passthrough of IBKR JSON (contents depend on entitlement).")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Passthrough metadata; includes available event-type tags when ensure_metadata was set.")
 
     @classmethod
     def from_raw_json(cls, *, raw_json: str, request_filter_json: str, **kwargs: Any) -> "WSHEventDataReport":

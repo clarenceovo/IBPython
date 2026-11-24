@@ -341,6 +341,16 @@ async def load_ohlcv(
     payload: Annotated[HistoricalOHLCVLoadRequest, Body(openapi_examples=GENERIC_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> OHLCVResponseEnvelope:
+    """Load historical OHLCV bars with the full OHLCVRequest payload.
+
+    Generic endpoint for any asset class: the request carries symbol,
+    asset_class, exchange, currency, duration, bar_size, what_to_show, and
+    optional start/end datetimes (UTC). Returns an envelope with bars,
+    request echo, data-quality metrics, and latency. Oversized ranges are
+    auto-chunked and rejected with 422 beyond the chunk cap; identical
+    requests are served from a TTL cache. Prefer the asset-specific
+    wrappers when you want contract resolution done for you.
+    """
     req = payload.request
     request_meta = OHLCVRequestMeta(
         symbol=req.symbol,
@@ -388,6 +398,15 @@ async def load_auto_ohlcv(
     payload: Annotated[UnifiedOHLCVLoadRequest, Body(openapi_examples=UNIFIED_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> OHLCVResponseEnvelope:
+    """Resolve the asset class from compact inputs, then load OHLCV bars.
+
+    Auto-detects equity, FX, index, or future from the symbol and contract
+    fields, normalizes compact intervals like 1m and 1h, and forwards to
+    the same cached loader as the asset-specific endpoints. Returns the
+    OHLCV envelope with resolved contract details in the request echo.
+    Validation problems (missing futures identifiers, bounded continuous
+    windows, options) return 422.
+    """
     request = payload.to_request()
     request_meta = OHLCVRequestMeta(
         symbol=request.symbol,
@@ -425,6 +444,12 @@ async def load_equity_ohlcv(
     payload: Annotated[EquityOHLCVLoadRequest, Body(openapi_examples=EQUITY_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> OHLCVResponseEnvelope:
+    """Load equity OHLCV bars with exchange resolution from symbol suffixes.
+
+    Presets asset_class=equity; .HK/.T/.L-style suffixes resolve exchange,
+    currency, and primary exchange automatically, and overrides win when
+    provided. Returns the OHLCV envelope; only symbol is required.
+    """
     req = payload.to_request()
     request_meta = OHLCVRequestMeta(
         symbol=req.symbol,
@@ -462,6 +487,12 @@ async def load_index_ohlcv(
     payload: Annotated[IndexOHLCVLoadRequest, Body(openapi_examples=INDEX_OHLCV_REQUEST_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> OHLCVResponseEnvelope:
+    """Load index OHLCV bars with auto-resolved exchange and currency.
+
+    Presets asset_class=index; known index symbols (SPX, NDX, HSI, DAX,
+    ...) resolve their venue automatically and con_id can pin an exact
+    contract. Returns the OHLCV envelope.
+    """
     req = payload.to_request()
     request_meta = OHLCVRequestMeta(
         symbol=req.symbol,
@@ -526,6 +557,11 @@ async def get_latest_bar(
     ] = None,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> OHLCVBar | None:
+    """Read the latest cached OHLCV bar from Redis without touching IBKR.
+
+    Serves the bar stored by earlier loads with cache_latest=true or by
+    scheduler snapshot jobs. Returns null when the key has no cached bar.
+    """
     return await state.redis.get_latest_bar(asset_class, bar_size, symbol=symbol)
 
 
@@ -537,7 +573,13 @@ async def load_equity_shortability(
     ],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> ShortabilityResponse:
-    """Indicative short availability; a bounded subscription, not a share reservation."""
+    """Report indicative short availability for one equity.
+
+    Reads IBKR's shortable-shares and fee data. This is a bounded
+    subscription snapshot, not a share reservation: values change
+    intraday and do not guarantee borrow at order time. Unavailable
+    fields remain null when the request deadline expires.
+    """
     return await state.feed.load_equity_shortability(request)
 
 
@@ -549,5 +591,10 @@ async def load_equity_dividends(
     ],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> DividendsResponse:
-    """Dividend estimates; unavailable fields remain null when the deadline expires."""
+    """Report dividend estimates for one equity.
+
+    Reads IBKR's dividend ticker fields (past twelve months, next
+    estimate, ex-date). Fields that do not arrive before the request
+    deadline stay null rather than blocking the response.
+    """
     return await state.feed.load_equity_dividends(request)

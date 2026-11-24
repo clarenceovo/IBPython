@@ -8,6 +8,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.feeds.ibkr_historical import HistoricalRequestTooLargeError, HistoricalRequestUnsupportedError
 from src.webapp.dependencies import IBKRRestAppState, get_rest_state
 
 router = APIRouter(prefix="/market-data", tags=["market-data"])
@@ -22,15 +23,47 @@ class HistoricalVolatilityRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str = Field(min_length=1, examples=["AAPL", "SPY"])
-    asset_class: str = Field(default="EQUITY", examples=["EQUITY", "FUTURE", "INDEX"])
-    exchange: str = Field(default="SMART")
-    currency: str = Field(default="USD")
-    bar_size: str = Field(default="1 day", examples=["1 min", "5 mins", "1 hour", "1 day"])
-    duration: str = Field(default="1 Y", examples=["1 M", "6 M", "1 Y"])
-    use_rth: bool = True
-    use_ttl_cache: bool = True
-    cache_ttl_seconds: float | None = Field(default=300, ge=0)
+    symbol: str = Field(
+        min_length=1,
+        examples=["AAPL", "SPY"],
+        description="Underlying ticker in IBKR notation, e.g. AAPL, SPY, ES, or 0700.HK.",
+    )
+    asset_class: str = Field(
+        default="EQUITY",
+        examples=["EQUITY", "FUTURE", "INDEX"],
+        description="Underlying asset class: equity, fx, future, bond, index, crypto, or option (aliases like stocks/futures are accepted).",
+    )
+    exchange: str = Field(default="SMART", description="IBKR exchange or SMART for smart routing.")
+    currency: str = Field(default="USD", description="IBKR currency of the contract.")
+    bar_size: str = Field(
+        default="1 day",
+        examples=["1 min", "5 mins", "1 hour", "1 day"],
+        description="IBKR bar size spelling, e.g. '1 min', '5 mins', '1 hour', '1 day'.",
+    )
+    duration: str = Field(
+        default="1 Y",
+        examples=["1 M", "6 M", "1 Y"],
+        description="IBKR lookback window, e.g. '1 D', '1 W', '1 M', '6 M', '1 Y'.",
+    )
+    use_rth: bool = Field(default=True, description="Restrict bars to regular trading hours.")
+    use_ttl_cache: bool = Field(default=True, description="Serve identical repeated requests from the TTL cache.")
+    cache_ttl_seconds: float | None = Field(
+        default=300, ge=0, description="TTL override in seconds for the response cache."
+    )
+
+
+class HistoricalVolatilityRow(BaseModel):
+    """One historical-volatility bar; the volatility value rides the bar's average price field."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    timestamp: str = Field(description="Bar timestamp as an ISO-8601 UTC string.")
+    open: float = Field(description="Bar open.")
+    high: float = Field(description="Bar high.")
+    low: float = Field(description="Bar low.")
+    close: float = Field(description="Bar close.")
+    volume: float = Field(description="Bar volume.")
+    volatility: float | None = Field(description="Historical volatility for the bar (IBKR HISTORICAL_VOLATILITY value).")
 
 
 HISTORICAL_VOLATILITY_EXAMPLES = {
@@ -48,6 +81,7 @@ HISTORICAL_VOLATILITY_EXAMPLES = {
 @router.post(
     "/historical-volatility",
     summary="Get historical volatility time series",
+    response_model=list[HistoricalVolatilityRow],
 )
 async def get_historical_volatility(
     payload: Annotated[
@@ -55,10 +89,15 @@ async def get_historical_volatility(
         Body(openapi_examples=HISTORICAL_VOLATILITY_EXAMPLES),
     ],
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[dict[str, Any]]:
-    """Get historical volatility time series from IBKR.
+) -> list[HistoricalVolatilityRow]:
+    """Load a historical volatility time series for one underlying.
 
-    Uses IBKR's built-in HISTORICAL_VOLATILITY whatToShow — no manual computation needed.
+    Uses IBKR's built-in HISTORICAL_VOLATILITY whatToShow, so no local
+    computation runs and the values match TWS. Each row carries the bar's
+    OHLCV fields plus `volatility`; timestamps are ISO-8601 UTC strings.
+    Oversized ranges are auto-chunked and rejected with 422 when they would
+    exceed the configured chunk limit. Pacing and connection problems
+    surface as 429/503 through the shared error envelope.
     """
     from src.feeds.ibkr_historical import ensure_historical_chunk_limit, plan_historical_auto_chunk
     from src.feeds.models import AssetClass, OHLCVRequest, normalize_bar_size
@@ -93,19 +132,21 @@ async def get_historical_volatility(
                 max_chunks=state.settings.ibkr_historical_max_chunks,
             )
         return [
-            {
-                "timestamp": bar.timestamp.isoformat(),
-                "open": bar.open,
-                "high": bar.high,
-                "low": bar.low,
-                "close": bar.close,
-                "volume": bar.volume,
-                "volatility": bar.vwap,
-            }
+            HistoricalVolatilityRow(
+                timestamp=bar.timestamp.isoformat(),
+                open=bar.open,
+                high=bar.high,
+                low=bar.low,
+                close=bar.close,
+                volume=bar.volume,
+                volatility=bar.vwap,
+            )
             for bar in bars
         ]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except (HistoricalRequestTooLargeError, HistoricalRequestUnsupportedError):
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
 
 # ------------------------------------------------------------------
@@ -117,15 +158,49 @@ class OptionIVSeriesRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str = Field(min_length=1, examples=["AAPL", "SPY"])
-    asset_class: str = Field(default="EQUITY", examples=["EQUITY", "FUTURE", "INDEX"])
-    exchange: str = Field(default="SMART")
-    currency: str = Field(default="USD")
-    bar_size: str = Field(default="1 day", examples=["1 min", "5 mins", "1 hour", "1 day"])
-    duration: str = Field(default="6 M", examples=["1 M", "6 M", "1 Y"])
-    use_rth: bool = True
-    use_ttl_cache: bool = True
-    cache_ttl_seconds: float | None = Field(default=300, ge=0)
+    symbol: str = Field(
+        min_length=1,
+        examples=["AAPL", "SPY"],
+        description="Underlying ticker in IBKR notation, e.g. AAPL, SPY, ES, or 0700.HK.",
+    )
+    asset_class: str = Field(
+        default="EQUITY",
+        examples=["EQUITY", "FUTURE", "INDEX"],
+        description="Underlying asset class: equity, fx, future, bond, index, crypto, or option (aliases like stocks/futures are accepted).",
+    )
+    exchange: str = Field(default="SMART", description="IBKR exchange or SMART for smart routing.")
+    currency: str = Field(default="USD", description="IBKR currency of the underlying contract.")
+    bar_size: str = Field(
+        default="1 day",
+        examples=["1 min", "5 mins", "1 hour", "1 day"],
+        description="IBKR bar size spelling, e.g. '1 min', '5 mins', '1 hour', '1 day'.",
+    )
+    duration: str = Field(
+        default="6 M",
+        examples=["1 M", "6 M", "1 Y"],
+        description="IBKR lookback window, e.g. '1 D', '1 W', '1 M', '6 M', '1 Y'.",
+    )
+    use_rth: bool = Field(default=True, description="Restrict bars to regular trading hours.")
+    use_ttl_cache: bool = Field(default=True, description="Serve identical repeated requests from the TTL cache.")
+    cache_ttl_seconds: float | None = Field(
+        default=300, ge=0, description="TTL override in seconds for the response cache."
+    )
+
+
+class OptionIVSeriesRow(BaseModel):
+    """One implied-volatility bar; the IV value rides the bar's average price field."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    timestamp: str = Field(description="Bar timestamp as an ISO-8601 UTC string.")
+    open: float = Field(description="Bar open.")
+    high: float = Field(description="Bar high.")
+    low: float = Field(description="Bar low.")
+    close: float = Field(description="Bar close.")
+    volume: float = Field(description="Bar volume.")
+    implied_volatility: float | None = Field(
+        description="Underlying implied volatility for the bar (IBKR OPTION_IMPLIED_VOLATILITY value)."
+    )
 
 
 OPTION_IV_SERIES_EXAMPLES = {
@@ -139,6 +214,7 @@ OPTION_IV_SERIES_EXAMPLES = {
 @router.post(
     "/options/iv-series",
     summary="Get option implied volatility time series",
+    response_model=list[OptionIVSeriesRow],
 )
 async def get_option_iv_series(
     payload: Annotated[
@@ -146,10 +222,15 @@ async def get_option_iv_series(
         Body(openapi_examples=OPTION_IV_SERIES_EXAMPLES),
     ],
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[dict[str, Any]]:
-    """Get option implied volatility time series from IBKR.
+) -> list[OptionIVSeriesRow]:
+    """Load an option implied volatility time series for one underlying.
 
-    Uses IBKR's built-in OPTION_IMPLIED_VOLATILITY whatToShow for the underlying.
+    Uses IBKR's built-in OPTION_IMPLIED_VOLATILITY whatToShow, which reports
+    the underlying's ATM implied volatility; no option chain is loaded. Each
+    row carries the bar's OHLCV fields plus `implied_volatility`; timestamps
+    are ISO-8601 UTC strings. Oversized ranges are auto-chunked and rejected
+    with 422 when they would exceed the configured chunk limit. Pacing and
+    connection problems surface as 429/503 through the shared error envelope.
     """
     from src.feeds.ibkr_historical import ensure_historical_chunk_limit, plan_historical_auto_chunk
     from src.feeds.models import AssetClass, OHLCVRequest, normalize_bar_size
@@ -184,19 +265,21 @@ async def get_option_iv_series(
                 max_chunks=state.settings.ibkr_historical_max_chunks,
             )
         return [
-            {
-                "timestamp": bar.timestamp.isoformat(),
-                "open": bar.open,
-                "high": bar.high,
-                "low": bar.low,
-                "close": bar.close,
-                "volume": bar.volume,
-                "implied_volatility": bar.vwap,
-            }
+            OptionIVSeriesRow(
+                timestamp=bar.timestamp.isoformat(),
+                open=bar.open,
+                high=bar.high,
+                low=bar.low,
+                close=bar.close,
+                volume=bar.volume,
+                implied_volatility=bar.vwap,
+            )
             for bar in bars
         ]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except (HistoricalRequestTooLargeError, HistoricalRequestUnsupportedError):
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
 
 # ------------------------------------------------------------------
@@ -208,12 +291,34 @@ class TradingScheduleRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str = Field(min_length=1, examples=["AAPL", "ES", "EURUSD"])
-    asset_class: str = Field(default="EQUITY", examples=["EQUITY", "FUTURE", "FX", "INDEX"])
-    exchange: str = Field(default="SMART")
-    currency: str = Field(default="USD")
-    end_date: str = Field(default="", examples=["20260101", ""])
-    num_days: int = Field(default=7, ge=1, le=30)
+    symbol: str = Field(
+        min_length=1,
+        examples=["AAPL", "ES", "EURUSD"],
+        description="Ticker in IBKR notation, e.g. AAPL, ES, EURUSD, or 0700.HK.",
+    )
+    asset_class: str = Field(
+        default="EQUITY",
+        examples=["EQUITY", "FUTURE", "FX", "INDEX"],
+        description="Asset class: equity, fx, future, bond, index, crypto, or option (aliases like stocks/futures are accepted).",
+    )
+    exchange: str = Field(default="SMART", description="IBKR exchange or SMART for smart routing.")
+    currency: str = Field(default="USD", description="IBKR currency of the contract.")
+    end_date: str = Field(
+        default="",
+        examples=["20260101", ""],
+        description="Reference date (ISO YYYYMMDD) whose schedule window ends the lookup. Empty means today.",
+    )
+    num_days: int = Field(default=7, ge=1, le=30, description="Number of schedule days to return starting at the reference date.")
+
+
+class TradingScheduleSessionRow(BaseModel):
+    """One IBKR trading schedule session (SCHEDULE whatToShow row)."""
+
+    model_config = ConfigDict(extra="ignore", from_attributes=True)
+
+    startDateTime: str | None = Field(default=None, description="Session open time as reported by IBKR.")
+    endDateTime: str | None = Field(default=None, description="Session close time as reported by IBKR.")
+    refDate: str | None = Field(default=None, description="Reference date of the session row.")
 
 
 TRADING_SCHEDULE_EXAMPLES = {
@@ -231,6 +336,7 @@ TRADING_SCHEDULE_EXAMPLES = {
 @router.post(
     "/trading-schedule",
     summary="Get trading schedule for any instrument",
+    response_model=list[TradingScheduleSessionRow],
 )
 async def get_trading_schedule(
     payload: Annotated[
@@ -238,10 +344,15 @@ async def get_trading_schedule(
         Body(openapi_examples=TRADING_SCHEDULE_EXAMPLES),
     ],
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[dict[str, Any]]:
-    """Get trading schedule for any instrument from IBKR.
+) -> list[TradingScheduleSessionRow]:
+    """Load IBKR trading schedule sessions for one contract.
 
-    Returns session open/close times, overnight flags, and trading status.
+    Runs a SCHEDULE historical-data request starting at the reference date
+    and returns one row per session with `startDateTime`, `endDateTime`, and
+    `refDate` exactly as IBKR reports them. Use it to check opening hours,
+    overnight sessions, and trading halts before scheduling data pulls.
+    Invalid reference dates or asset classes return 422; connection and
+    pacing problems surface as 503/429 through the shared error envelope.
     """
     from src.feeds.models import OHLCVRequest
 
@@ -268,8 +379,8 @@ async def get_trading_schedule(
                 for item in schedule
             ]
         return [schedule.model_dump(mode="json")] if hasattr(schedule, "model_dump") else [schedule]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
 
 # ------------------------------------------------------------------

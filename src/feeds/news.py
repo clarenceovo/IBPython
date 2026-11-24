@@ -27,12 +27,12 @@ class HistoricalNewsRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    con_id: int = Field(gt=0)
-    provider_codes: tuple[str, ...] = Field(min_length=1)
-    start_datetime: datetime | None = None
-    end_datetime: datetime | None = None
-    total_results: int = Field(default=10, ge=1, le=300)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    con_id: int = Field(gt=0, description="IBKR contract ID. Takes precedence over symbol when set.")
+    provider_codes: tuple[str, ...] = Field(min_length=1, description="News provider codes, for example ['BRFG', 'BRFUPDN']. Default: entitled providers.")
+    start_datetime: datetime | None = Field(default=None, description="Request window start, UTC ISO-8601.")
+    end_datetime: datetime | None = Field(default=None, description="Request window end, UTC ISO-8601. Omit for 'now'.")
+    total_results: int = Field(default=10, ge=1, le=300, description="Max headlines to return.")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Free-form caller metadata; echoed in diagnostics only.")
 
     @field_validator("provider_codes", mode="before")
     @classmethod
@@ -92,8 +92,8 @@ class NewsArticleRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    provider_code: str = Field(min_length=1)
-    article_id: str = Field(min_length=1)
+    provider_code: str = Field(min_length=1, description="News provider code, for example 'BRFG'.")
+    article_id: str = Field(min_length=1, description="Article ID from a headline.")
 
     @field_validator("provider_code", mode="before")
     @classmethod

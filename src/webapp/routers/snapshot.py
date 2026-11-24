@@ -6,7 +6,7 @@ import time as monotonic_time
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Annotated
 
@@ -57,11 +57,20 @@ class WatchlistCreateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(min_length=1, examples=["us_tech", "hk_large_cap"])
-    symbols: list[str] = Field(min_length=1)
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
-    snapshot_interval_seconds: float = Field(default=60, gt=0)
+    name: str = Field(
+        min_length=1,
+        examples=["us_tech", "hk_large_cap"],
+        description="Watchlist name. Stored lower-cased; creating an existing name replaces it.",
+    )
+    symbols: list[str] = Field(
+        min_length=1,
+        description="Equity symbols to track, e.g. ['AAPL', 'MSFT'] or ['0700.HK', '9988.HK'].",
+    )
+    exchange: str = Field(default="SMART", min_length=1, description="Default IBKR exchange for the watchlist symbols.")
+    currency: str = Field(default="USD", min_length=1, description="Default IBKR currency for the watchlist symbols.")
+    snapshot_interval_seconds: float = Field(
+        default=60, gt=0, description="Suggested capture cadence in seconds used by scheduler-driven captures."
+    )
 
 
 class WatchlistCaptureRequest(BaseModel):
@@ -69,9 +78,12 @@ class WatchlistCaptureRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(min_length=1)
-    persist: bool = False
-    cache_latest: bool = True
+    name: str = Field(min_length=1, description="Watchlist name to capture.")
+    persist: bool = Field(
+        default=False,
+        description="Deprecated: API snapshot persistence is disabled (501 when true); use the scheduler snapshotter.",
+    )
+    cache_latest: bool = Field(default=True, description="Cache captured snapshots in Redis as the latest values.")
 
 
 class FXOptionContractRequest(BaseModel):
@@ -79,16 +91,31 @@ class FXOptionContractRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=6, examples=["EURUSD"])
-    expiry: str = Field(min_length=6, examples=["20260619"])
-    strike: float = Field(gt=0, examples=[1.10])
-    right: str = Field(min_length=1, examples=["C"])
-    exchange: str = Field(default="SMART", min_length=1)
-    currency: str | None = Field(default=None, min_length=1)
-    multiplier: str = Field(default="100", min_length=1)
-    trading_class: str | None = None
-    local_symbol: str | None = None
-    con_id: int | None = Field(default=None, gt=0)
+    symbol: str = Field(min_length=6, examples=["EURUSD"], description="FX pair, e.g. EURUSD or GBPUSD.")
+    expiry: str = Field(
+        min_length=6,
+        examples=["20260619"],
+        description="Option expiry as YYYYMMDD (6+ characters), e.g. 20260619.",
+    )
+    strike: float = Field(gt=0, examples=[1.10], description="Strike price in quote-currency terms, e.g. 1.10.")
+    right: str = Field(
+        min_length=1,
+        examples=["C"],
+        description="Option right: C/CALL or P/PUT.",
+    )
+    exchange: str = Field(default="SMART", min_length=1, description="IBKR exchange; SMART routes FX option quotes.")
+    currency: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Optional quote-currency override. Defaults to the pair's right-hand currency.",
+    )
+    multiplier: str = Field(default="100", min_length=1, description="IBKR contract multiplier as a string, e.g. '100'.")
+    trading_class: str | None = Field(default=None, description="Optional IBKR trading class for disambiguation.")
+    local_symbol: str | None = Field(
+        default=None,
+        description="Optional IBKR local symbol (OCC-style) for exact contract disambiguation.",
+    )
+    con_id: int | None = Field(default=None, gt=0, description="Optional IBKR contract id for exact disambiguation.")
 
     @classmethod
     def _normalize_right_value(cls, value: object) -> str:
@@ -128,21 +155,44 @@ class FXOptionContractRequest(BaseModel):
 class FXOptionCaptureRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contracts: list[FXOptionContractRequest] = Field(min_length=1)
-    snapshot_wait_seconds: float = Field(default=2.0, gt=0, le=30)
-    generic_ticks: tuple[str, ...] = DEFAULT_OPTION_ANALYTICS_GENERIC_TICKS
-    persist: bool = Field(default=False, description="Deprecated: API snapshot persistence is disabled; use the scheduler snapshotter")
-    cache_latest: bool = True
+    contracts: list[FXOptionContractRequest] = Field(
+        min_length=1,
+        description="FX option contracts to capture; each needs symbol, expiry, strike, and right.",
+    )
+    snapshot_wait_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        le=30,
+        description="How long to hold the short-lived IBKR market-data subscription while values arrive.",
+    )
+    generic_ticks: tuple[str, ...] = Field(
+        default=DEFAULT_OPTION_ANALYTICS_GENERIC_TICKS,
+        description="IBKR generic tick ids requested for Greeks and OI fields.",
+    )
+    persist: bool = Field(
+        default=False,
+        description="Deprecated: API snapshot persistence is disabled (501 when true); use the scheduler snapshotter.",
+    )
+    cache_latest: bool = Field(default=True, description="Cache captured snapshots in Redis as the latest values.")
 
 
 class FXOptionCaptureResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    requested: int
-    captured: int
-    persisted: int = 0
-    cached: int = 0
-    snapshots: list[FXOptionSnapshot]
+    requested: int = Field(description="Number of contracts requested.")
+    captured: int = Field(description="Number of snapshots successfully captured.")
+    persisted: int = Field(default=0, description="Always 0: API persistence is disabled.")
+    cached: int = Field(description="Number of snapshots written to the Redis latest cache.")
+    snapshots: list[FXOptionSnapshot] = Field(description="Captured FX option snapshots.")
+
+
+class WatchlistDeleteResponse(BaseModel):
+    """Confirmation returned after deleting a watchlist."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str = Field(description="Always 'deleted'.")
+    name: str = Field(description="Name of the deleted watchlist.")
 
 
 CAPTURE_SNAPSHOTS_EXAMPLES = {
@@ -220,6 +270,15 @@ async def capture_snapshots(
     payload: Annotated[CaptureSnapshotsRequest, Body(openapi_examples=CAPTURE_SNAPSHOTS_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> SnapshotResult:
+    """Capture point-in-time market data snapshots for a list of equities.
+
+    Opens one-shot IBKR snapshot subscriptions for every symbol at once,
+    resolves exchange/currency from symbol suffixes (.HK, .T, .L, etc.),
+    and caches the latest values in Redis. Symbols whose snapshot fails
+    validation or arrives empty are listed in failed_symbols. Durable
+    persistence is owned by the scheduler snapshotter (persist=true
+    returns 501).
+    """
     if payload.persist:
         raise HTTPException(
             status_code=501,
@@ -325,6 +384,14 @@ async def capture_fx_option_snapshots(
     payload: Annotated[FXOptionCaptureRequest, Body(openapi_examples=FX_OPTION_CAPTURE_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> FXOptionCaptureResult:
+    """Capture point-in-time FX option quotes, Greeks, and OI fields.
+
+    Uses short-lived IBKR market-data subscriptions held for
+    snapshot_wait_seconds while generic ticks arrive. Live Greeks require
+    IBKR market-data subscriptions for both the option and the underlying.
+    Captured snapshots are cached in Redis as the latest values when
+    cache_latest is true; persist=true returns 501.
+    """
     if payload.persist:
         raise HTTPException(
             status_code=501,
@@ -366,15 +433,28 @@ async def capture_fx_option_snapshots(
     summary="Get latest cached FX option snapshot",
 )
 async def get_latest_fx_option_snapshot(
-    symbol: str = Query(min_length=6, examples=["EURUSD"]),
-    expiry: str = Query(min_length=6, examples=["20260619"]),
-    strike: float = Query(gt=0, examples=[1.10]),
-    right: str = Query(min_length=1, examples=["C"]),
-    exchange: str = Query(default="SMART", min_length=1),
-    local_symbol: str | None = Query(default=None),
-    con_id: int | None = Query(default=None, gt=0),
+    symbol: str = Query(min_length=6, examples=["EURUSD"], description="FX pair of the option, e.g. EURUSD."),
+    expiry: str = Query(
+        min_length=6,
+        examples=["20260619"],
+        description="Option expiry as YYYYMMDD matching the captured contract, e.g. 20260619.",
+    ),
+    strike: float = Query(gt=0, examples=[1.10], description="Strike price matching the captured contract."),
+    right: str = Query(min_length=1, examples=["C"], description="Option right: C/CALL or P/PUT."),
+    exchange: str = Query(default="SMART", min_length=1, description="Exchange the snapshot was captured on."),
+    local_symbol: str | None = Query(
+        default=None,
+        description="Optional IBKR local symbol used instead of the strike/right/expiry key.",
+    ),
+    con_id: int | None = Query(default=None, gt=0, description="Optional IBKR contract id used as the lookup key."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> FXOptionSnapshot | None:
+    """Read the most recently captured FX option snapshot from Redis.
+
+    Reads the Redis latest-value cache only; it does not contact IBKR.
+    Returns null when no snapshot matches the key combination. Populate
+    the cache with POST /snapshot/fx-options/capture first.
+    """
     return await state.redis.get_latest_fx_option_snapshot(
         symbol=symbol,
         expiry=expiry,
@@ -388,13 +468,20 @@ async def get_latest_fx_option_snapshot(
 
 @router.post(
     "/fx-options/query",
-    response_model=list[dict[str, Any]],
     summary="Query historical FX option snapshots",
+    description=(
+        "Removed: historical FX option snapshot queries moved to the scheduler/snapshotter layer. "
+        "This endpoint always responds 410 Gone."
+    ),
+    deprecated=True,
+    status_code=410,
+    responses={410: {"description": "Gone — QuestDB historical snapshot queries are owned by the scheduler/snapshotter layer."}},
 )
 async def query_fx_option_snapshots(
     query: FXOptionSnapshotQuery,
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[dict[str, Any]]:
+):
+    """Historical FX option snapshot queries are gone (410)."""
     _ = (query, state)
     raise HTTPException(status_code=410, detail="QuestDB historical snapshot queries are owned by the scheduler/snapshotter layer")
 
@@ -413,6 +500,12 @@ async def get_latest_snapshots(
     ),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[EquitySnapshot]:
+    """Read the latest cached equity snapshots from Redis.
+
+    Reads the Redis latest-value cache only; it does not contact IBKR.
+    Snapshots return in requested order and missing symbols are skipped
+    silently. Populate the cache with POST /snapshot/capture first.
+    """
     symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     if not symbol_list:
         raise HTTPException(status_code=400, detail="No valid symbols provided")
@@ -424,28 +517,40 @@ async def get_latest_snapshots(
 
 @router.post(
     "/query",
-    response_model=list[dict[str, Any]],
     summary="Query historical snapshots from QuestDB",
-    description="Query historical equity snapshots stored in QuestDB with time range filters.",
+    description=(
+        "Removed: historical equity snapshot queries moved to the scheduler/snapshotter layer. "
+        "This endpoint always responds 410 Gone."
+    ),
+    deprecated=True,
+    status_code=410,
+    responses={410: {"description": "Gone — QuestDB historical snapshot queries are owned by the scheduler/snapshotter layer."}},
 )
 async def query_historical_snapshots(
     query: SnapshotQuery,
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[dict[str, Any]]:
+):
+    """Historical equity snapshot queries are gone (410)."""
     _ = (query, state)
     raise HTTPException(status_code=410, detail="QuestDB historical snapshot queries are owned by the scheduler/snapshotter layer")
 
 
 @router.get(
     "/latest-all",
-    response_model=list[dict[str, Any]],
     summary="Get latest snapshots for all tracked symbols",
-    description="Queries QuestDB LATEST ON to get the most recent snapshot per symbol.",
+    description=(
+        "Removed: latest-all snapshot queries moved to the scheduler/snapshotter layer (QuestDB LATEST ON). "
+        "This endpoint always responds 410 Gone."
+    ),
+    deprecated=True,
+    status_code=410,
+    responses={410: {"description": "Gone — QuestDB latest-all snapshot queries are owned by the scheduler/snapshotter layer."}},
 )
 async def get_all_latest_snapshots(
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(default=100, ge=1, le=1000, description="Unused: the endpoint always returns 410."),
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> list[dict[str, Any]]:
+):
+    """Latest-all snapshot queries are gone (410)."""
     _ = (limit, state)
     raise HTTPException(status_code=410, detail="QuestDB latest-all snapshot queries are owned by the scheduler/snapshotter layer")
 
@@ -464,6 +569,12 @@ async def create_watchlist(
     payload: Annotated[WatchlistCreateRequest, Body(openapi_examples=WATCHLIST_CREATE_EXAMPLES)],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> SnapshotWatchlist:
+    """Create or replace a named equity watchlist in Redis.
+
+    The name is stored lower-cased and posting an existing name replaces
+    the symbol list. Returns the stored watchlist; symbols keep their
+    input order. Capture it with POST /snapshot/watchlists/{name}/capture.
+    """
     watchlist = SnapshotWatchlist(
         name=payload.name.strip().lower(),
         symbols=tuple(payload.symbols),
@@ -481,9 +592,16 @@ async def create_watchlist(
     summary="List all watchlist names",
 )
 async def list_watchlists(
+    limit: int | None = Query(default=None, ge=1, le=1000, description="Optional cap on the number of names returned."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[str]:
-    return await state.redis.scan_snapshot_watchlists()
+    """List every watchlist name stored in Redis.
+
+    Scans the Redis watchlist keyspace and returns the lower-cased names
+    only. Fetch a single definition with GET /snapshot/watchlists/{name}.
+    """
+    names = await state.redis.scan_snapshot_watchlists()
+    return names[:limit] if limit is not None else names
 
 
 @router.get(
@@ -492,9 +610,14 @@ async def list_watchlists(
     summary="Get a watchlist by name",
 )
 async def get_watchlist(
-    name: str,
+    name: str = Path(description="Watchlist name (matched case-insensitively), e.g. us_tech."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> SnapshotWatchlist:
+    """Read one watchlist definition from Redis.
+
+    Returns the stored symbol list, exchange/currency defaults, and capture
+    interval. Unknown names return 404.
+    """
     key = constants.REDIS_SNAPSHOT_WATCHLIST_KEY_TEMPLATE.format(name=name.strip().lower())
     payload = await state.redis.get_raw(key)
     if payload is None:
@@ -510,9 +633,16 @@ async def get_watchlist(
     summary="Capture snapshots for a watchlist",
 )
 async def capture_watchlist(
-    name: str,
+    name: str = Path(description="Watchlist name (matched case-insensitively), e.g. us_tech."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> SnapshotResult:
+    """Capture equity snapshots for every symbol in a stored watchlist.
+
+    Loads the watchlist from Redis and runs the same capture path as
+    POST /snapshot/capture, so exchange/currency resolution, Redis
+    latest-caching, and failed-symbol reporting behave identically.
+    Unknown names return 404.
+    """
     key = constants.REDIS_SNAPSHOT_WATCHLIST_KEY_TEMPLATE.format(name=name.strip().lower())
     payload = await state.redis.get_raw(key)
     if payload is None:
@@ -533,15 +663,21 @@ async def capture_watchlist(
 @router.delete(
     "/watchlists/{name}",
     summary="Delete a watchlist",
+    response_model=WatchlistDeleteResponse,
 )
 async def delete_watchlist(
-    name: str,
+    name: str = Path(description="Watchlist name (matched case-insensitively), e.g. us_tech."),
     state: IBKRRestAppState = Depends(get_rest_state),
-) -> dict[str, str]:
+) -> WatchlistDeleteResponse:
+    """Delete one watchlist from Redis.
+
+    Removes the stored definition permanently. Unknown names return 404;
+    deleted watchlists are confirmed with {status, name}.
+    """
     key = constants.REDIS_SNAPSHOT_WATCHLIST_KEY_TEMPLATE.format(name=name.strip().lower())
     payload = await state.redis.get_raw(key)
     if payload is None:
         raise HTTPException(status_code=404, detail=f"Watchlist '{name}' not found")
     raw = await state.redis.raw_client()
     await raw.delete(key)
-    return {"status": "deleted", "name": name}
+    return WatchlistDeleteResponse(status="deleted", name=name)

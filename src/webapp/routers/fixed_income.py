@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 from enum import StrEnum
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.feeds.bond_curve import BondCurveRequest, BondCurveResponse, resolve_bond_curve_market
@@ -42,17 +42,21 @@ class BondYieldCurveSourceMode(StrEnum):
 
 
 class FixedIncomeCacheControls(BaseModel):
+    """Shared TTL-cache controls for fixed-income endpoints."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    use_ttl_cache: bool = True
-    cache_ttl_seconds: float | None = Field(default=30, ge=0)
+    use_ttl_cache: bool = Field(default=True, description="Serve the response from the shared TTL cache when possible.")
+    cache_ttl_seconds: float | None = Field(default=30, ge=0, description="Cache entry lifetime in seconds; null uses the cache default.")
 
 
 class FixedIncomeMarketRequest(FixedIncomeCacheControls):
+    """Base request for market-scoped fixed-income queries."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    market: str = Field(min_length=1, examples=["UST"])
-    valuation_date: date = Field(default_factory=lambda: datetime.now(timezone.utc).date())
+    market: str = Field(min_length=1, examples=["UST"], description="Sovereign market name or alias: UST/US_TREASURY, JGB, KTB, BUND/GERMAN_BUND, GILT/UK_GILT. Uppercased.")
+    valuation_date: date = Field(default_factory=lambda: datetime.now(timezone.utc).date(), description="Valuation date for curve construction; defaults to today (UTC).")
 
     @field_validator("market", mode="before")
     @classmethod
@@ -66,16 +70,18 @@ class FixedIncomeMarketRequest(FixedIncomeCacheControls):
 
 
 class BondFutureQuotesRequest(FixedIncomeMarketRequest):
+    """Request body for bond future quotes."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    contract_month: str | None = Field(default=None, min_length=1, examples=["202606"])
-    futures: tuple[BondFutureContractSpec, ...] | None = None
-    duration: str = Field(default="1 D", min_length=1)
-    bar_size: str = Field(default="1 min", min_length=1)
-    what_to_show: str = Field(default="TRADES", min_length=1)
-    use_rth: bool = True
-    cache_latest: bool = False
-    max_concurrent_requests: int = Field(default=4, ge=1, le=20)
+    contract_month: str | None = Field(default=None, min_length=1, examples=["202606"], description="Contract month as YYYYMM; expands to the market's standard futures strip. Required when futures is omitted.")
+    futures: tuple[BondFutureContractSpec, ...] | None = Field(default=None, description="Explicit futures list; overrides the contract_month strip.")
+    duration: str = Field(default="1 D", min_length=1, description="IBKR duration string for the quote lookback, e.g. '1 D', '1 W'.")
+    bar_size: str = Field(default="1 min", min_length=1, description="IBKR bar size with its exact spacing, e.g. '1 min', '5 mins', '1 hour', '1 day'.")
+    what_to_show: str = Field(default="TRADES", min_length=1, description="IBKR whatToShow value, e.g. TRADES, BID, ASK, MIDPOINT, SETTLE.")
+    use_rth: bool = Field(default=True, description="Restrict bars to regular trading hours.")
+    cache_latest: bool = Field(default=False, description="Store the newest bar of each future in the latest-bar cache.")
+    max_concurrent_requests: int = Field(default=4, ge=1, le=20, description="Upper bound on concurrent IBKR history requests.")
 
     @field_validator("contract_month", mode="before")
     @classmethod
@@ -108,31 +114,39 @@ class BondFutureQuotesRequest(FixedIncomeMarketRequest):
 
 
 class CTDRequest(FixedIncomeCacheControls):
+    """Request body for cheapest-to-deliver analytics on one bond future."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    future: BondFutureContractSpec
-    valuation_date: date = Field(default_factory=lambda: datetime.now(timezone.utc).date())
-    duration: str = Field(default="1 D", min_length=1)
-    bar_size: str = Field(default="1 min", min_length=1)
-    what_to_show: str = Field(default="TRADES", min_length=1)
-    use_rth: bool = True
-    cache_latest: bool = False
+    future: BondFutureContractSpec = Field(description="The bond future to analyse; requires contract_month, local_symbol, or con_id.")
+    valuation_date: date = Field(default_factory=lambda: datetime.now(timezone.utc).date(), description="Valuation date for the analytics; defaults to today (UTC).")
+    duration: str = Field(default="1 D", min_length=1, description="IBKR duration string for the futures quote lookback, e.g. '1 D'.")
+    bar_size: str = Field(default="1 min", min_length=1, description="IBKR bar size with its exact spacing, e.g. '1 min', '5 mins', '1 hour', '1 day'.")
+    what_to_show: str = Field(default="TRADES", min_length=1, description="IBKR whatToShow value, e.g. TRADES, BID, ASK, SETTLE.")
+    use_rth: bool = Field(default=True, description="Restrict bars to regular trading hours.")
+    cache_latest: bool = Field(default=False, description="Store the newest futures bar in the latest-bar cache.")
 
 
 class FuturesImpliedCurveRequest(BondFutureQuotesRequest):
+    """Request body for the futures-implied CTD yield curve."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
 
 class CashBondCurveBusinessRequest(FixedIncomeMarketRequest):
+    """Request body for the indicative cash-bond sovereign curve."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    coupon_frequency: int | None = Field(default=None, ge=1)
+    coupon_frequency: int | None = Field(default=None, ge=1, description="Coupons per year for bond math; defaults per market (2 for UST).")
 
 
 class CurveComparisonRequest(FuturesImpliedCurveRequest):
+    """Request body for the cash versus futures-implied curve comparison."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    coupon_frequency: int | None = Field(default=None, ge=1)
+    coupon_frequency: int | None = Field(default=None, ge=1, description="Coupons per year for the cash leg; defaults per market (2 for UST).")
 
 
 class BondYieldCurveRequest(FixedIncomeMarketRequest):
@@ -146,16 +160,16 @@ class BondYieldCurveRequest(FixedIncomeMarketRequest):
             "a provider are available, otherwise falls back only when allow_indicative_fallback is true."
         ),
     )
-    allow_indicative_fallback: bool = False
-    contract_month: str | None = Field(default=None, min_length=1, examples=["202606"])
-    futures: tuple[BondFutureContractSpec, ...] | None = None
-    duration: str = Field(default="1 D", min_length=1)
-    bar_size: str = Field(default="1 min", min_length=1)
-    what_to_show: str = Field(default="TRADES", min_length=1)
-    use_rth: bool = True
-    cache_latest: bool = False
-    max_concurrent_requests: int = Field(default=4, ge=1, le=20)
-    coupon_frequency: int | None = Field(default=None, ge=1)
+    allow_indicative_fallback: bool = Field(default=False, description="In auto mode, fall back to the indicative static curve when futures inputs or the provider are unavailable.")
+    contract_month: str | None = Field(default=None, min_length=1, examples=["202606"], description="Contract month as YYYYMM; expands to the standard futures strip. Required for futures_implied mode when futures is omitted.")
+    futures: tuple[BondFutureContractSpec, ...] | None = Field(default=None, description="Explicit futures list; overrides the contract_month strip.")
+    duration: str = Field(default="1 D", min_length=1, description="IBKR duration string for the quote lookback, e.g. '1 D', '1 W'.")
+    bar_size: str = Field(default="1 min", min_length=1, description="IBKR bar size with its exact spacing, e.g. '1 min', '5 mins', '1 hour', '1 day'.")
+    what_to_show: str = Field(default="TRADES", min_length=1, description="IBKR whatToShow value, e.g. TRADES, BID, ASK, SETTLE.")
+    use_rth: bool = Field(default=True, description="Restrict bars to regular trading hours.")
+    cache_latest: bool = Field(default=False, description="Store the newest bar of each future in the latest-bar cache.")
+    max_concurrent_requests: int = Field(default=4, ge=1, le=20, description="Upper bound on concurrent IBKR history requests.")
+    coupon_frequency: int | None = Field(default=None, ge=1, description="Coupons per year for bond math; defaults per market (2 for UST).")
 
     @field_validator("contract_month", mode="before")
     @classmethod
@@ -205,49 +219,53 @@ class BondYieldCurveRequest(FixedIncomeMarketRequest):
 
 
 class BondYieldCurvePoint(BaseModel):
+    """One point on the sovereign yield curve."""
+
     model_config = ConfigDict(extra="forbid")
 
-    tenor: str | None = None
-    tenor_years: float = Field(gt=0)
-    maturity_date: date
-    par_yield: float
-    zero_rate: float
-    discount_factor: float
-    bond_symbol: str
-    futures_symbol: str | None = None
-    source: str
+    tenor: str | None = Field(default=None, description="Standard tenor label, e.g. 2Y or 10Y; null for futures-implied points.")
+    tenor_years: float = Field(gt=0, description="Maturity in years.")
+    maturity_date: date = Field(description="Maturity date of the curve instrument.")
+    par_yield: float = Field(description="Par yield in decimals (0.04 = 4 percent).")
+    zero_rate: float = Field(description="Bootstrapped zero rate in decimals.")
+    discount_factor: float = Field(description="Bootstrapped discount factor.")
+    bond_symbol: str = Field(description="Deliverable bond symbol behind the point.")
+    futures_symbol: str | None = Field(default=None, description="Futures symbol backing the point; null for indicative points.")
+    source: str = Field(description="Point source, e.g. indicative_static_standard_tenor_provider or ibkr_futures_implied_ctd.")
 
 
 class BondYieldCurveResponse(BaseModel):
+    """Response envelope for the sovereign yield curve."""
+
     model_config = ConfigDict(extra="forbid")
 
-    market: SovereignBondMarket
-    currency: str
-    valuation_date: date
-    source_mode: BondYieldCurveSourceMode
-    source: str
-    curve: YieldCurveDTO
-    points: tuple[BondYieldCurvePoint, ...]
-    caveats: tuple[str, ...] = ()
-    indicative_curve: BondCurveResponse | None = None
-    futures_implied_curve: FuturesImpliedCurveResponse | None = None
+    market: SovereignBondMarket = Field(description="Sovereign market of the curve (US_TREASURY, JGB, or GERMAN_BUND).")
+    currency: str = Field(description="ISO 4217 curve currency.")
+    valuation_date: date = Field(description="Valuation date of the curve.")
+    source_mode: BondYieldCurveSourceMode = Field(description="Mode that produced the response: auto, futures_implied, or indicative_placeholder.")
+    source: str = Field(description="Concrete source identifier for the returned curve.")
+    curve: YieldCurveDTO = Field(description="Bootstrapped zero curve (dates, zero rates, discount factors).")
+    points: tuple[BondYieldCurvePoint, ...] = Field(description="Render points with par yield, zero rate, and discount factor per maturity.")
+    caveats: tuple[str, ...] = Field(default=(), description="Caveats, for example the indicative-placeholder provenance or AUTO-mode fallback.")
+    indicative_curve: BondCurveResponse | None = Field(default=None, description="Full indicative curve payload when that mode produced the response; null otherwise.")
+    futures_implied_curve: FuturesImpliedCurveResponse | None = Field(default=None, description="Full futures-implied payload when that mode produced the response; null otherwise.")
 
 
 class FedFundsFuturesRateRequest(FixedIncomeCacheControls):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     symbol: str = Field(default="ZQ", min_length=1, description="30-Day Fed Funds futures root.")
-    exchange: str = Field(default="CBOT", min_length=1)
-    currency: str = Field(default="USD", min_length=1)
-    contract_month: str | None = Field(default=None, min_length=1, examples=["202606"])
-    local_symbol: str | None = Field(default=None, min_length=1)
-    con_id: int | None = Field(default=None, gt=0)
-    multiplier: str | None = Field(default=None, min_length=1)
-    duration: str = Field(default="1 D", min_length=1)
-    bar_size: str = Field(default="1 min", min_length=1)
-    what_to_show: str = Field(default="TRADES", min_length=1)
-    use_rth: bool = True
-    cache_latest: bool = False
+    exchange: str = Field(default="CBOT", min_length=1, description="Futures exchange; CBOT lists ZQ.")
+    currency: str = Field(default="USD", min_length=1, description="ISO 4217 quote currency.")
+    contract_month: str | None = Field(default=None, min_length=1, examples=["202606"], description="Contract month as YYYYMM; one of contract_month, local_symbol, or con_id is required.")
+    local_symbol: str | None = Field(default=None, min_length=1, description="IBKR local symbol for the exact contract, e.g. ZQM6.")
+    con_id: int | None = Field(default=None, gt=0, description="IBKR contract id for the exact contract.")
+    multiplier: str | None = Field(default=None, min_length=1, description="Contract multiplier override.")
+    duration: str = Field(default="1 D", min_length=1, description="IBKR duration string for the quote lookback, e.g. '1 D'.")
+    bar_size: str = Field(default="1 min", min_length=1, description="IBKR bar size with its exact spacing, e.g. '1 min', '5 mins', '1 hour', '1 day'.")
+    what_to_show: str = Field(default="TRADES", min_length=1, description="IBKR whatToShow value, e.g. TRADES, BID, ASK, SETTLE.")
+    use_rth: bool = Field(default=True, description="Restrict bars to regular trading hours.")
+    cache_latest: bool = Field(default=False, description="Store the newest bar in the latest-bar cache.")
 
     @field_validator("symbol", "exchange", "currency", "contract_month", "local_symbol", "multiplier", mode="before")
     @classmethod
@@ -292,22 +310,27 @@ class FedFundsFuturesRateRequest(FixedIncomeCacheControls):
 
 
 class FedFundsFuturesRateResponse(BaseModel):
+    """Response envelope for the Fed Funds futures implied rate."""
+
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str
-    exchange: str
-    currency: str
-    contract_month: str | None
-    timestamp: datetime
-    futures_price: float
-    implied_average_rate_percent: float
-    rate_formula: str = "100 - futures_price"
-    source: str = "ibkr_30_day_fed_funds_futures"
-    actual_overnight_fixing_available_from_ibkr: bool = False
-    bar: OHLCVBar
-    caveats: tuple[str, ...] = (
-        "This is an implied average rate from 30-Day Fed Funds futures, not the official overnight effective Fed Funds fixing.",
-        "For the official overnight EFFR time series, use a rates source such as the Federal Reserve/FRED rather than IBKR market data.",
+    symbol: str = Field(description="Futures root symbol, e.g. ZQ.")
+    exchange: str = Field(description="Exchange, e.g. CBOT.")
+    currency: str = Field(description="ISO 4217 quote currency.")
+    contract_month: str | None = Field(description="Contract month as YYYYMM; null when the quote is keyed by conId or local symbol.")
+    timestamp: datetime = Field(description="UTC timestamp of the latest bar behind the rate.")
+    futures_price: float = Field(description="Latest futures settlement/last price.")
+    implied_average_rate_percent: float = Field(description="Implied average Fed Funds rate in percent (100 minus the futures price).")
+    rate_formula: str = Field(default="100 - futures_price", description="Formula used to derive the rate.")
+    source: str = Field(default="ibkr_30_day_fed_funds_futures", description="Source identifier.")
+    actual_overnight_fixing_available_from_ibkr: bool = Field(default=False, description="Always false: IBKR does not serve the official overnight EFFR fixing through this endpoint.")
+    bar: OHLCVBar = Field(description="The latest OHLCV bar behind the quote.")
+    caveats: tuple[str, ...] = Field(
+        default=(
+            "This is an implied average rate from 30-Day Fed Funds futures, not the official overnight effective Fed Funds fixing.",
+            "For the official overnight EFFR time series, use a rates source such as the Federal Reserve/FRED rather than IBKR market data.",
+        ),
+        description="Caveats about what the implied rate does and does not represent.",
     )
 
 
@@ -321,18 +344,30 @@ async def get_bond_future_quotes(
         BondFutureQuotesRequest,
         Body(openapi_examples=markdown_openapi_examples("business.fixedIncome.getBondFutureQuotes")),
     ],
+    limit: int | None = Query(default=None, ge=1, le=1000, description="Return at most the first N quotes; omit for the full strip."),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> list[BondFutureQuote]:
+    """Return the latest IBKR price for each future in a sovereign strip.
+
+    Give contract_month to load the market's standard strip (for example
+    ZT/ZF/ZN/ZB for UST), or list explicit futures. Quotes come from the
+    newest bar of each contract (default '1 D' of '1 min' TRADES). A future
+    that fails to load is skipped, and a ValueError from IBKR fails the
+    request with 422. Responses are cached for cache_ttl_seconds (default
+    30 s).
+    """
     async def load() -> list[BondFutureQuote]:
         return await _load_bond_future_quotes(payload, state)
 
     if payload.use_ttl_cache:
-        return await state.market_data_cache.get_or_set(
+        quotes = await state.market_data_cache.get_or_set(
             stable_cache_key("business_fixed_income_bond_future_quotes", payload),
             load,
             ttl_seconds=payload.cache_ttl_seconds,
         )
-    return await load()
+    else:
+        quotes = await load()
+    return quotes[:limit] if isinstance(limit, int) else quotes
 
 
 @router.post(
@@ -347,6 +382,15 @@ async def get_ctd(
     ],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> CTDAnalyticsResponse:
+    """Return cheapest-to-deliver analytics for one bond future.
+
+    Fetches the futures quote from IBKR, pulls the deliverable basket from
+    the configured reference provider, and selects the cheapest to deliver.
+    The response carries the CTD snapshot (prices, net basis, implied repo),
+    the selected bond, and diagnostics. Requires the fixed-income reference
+    provider: without it the endpoint returns 503. An empty basket also
+    returns 503; provider math errors surface as 422.
+    """
     provider = _fixed_income_provider(state)
 
     async def load() -> CTDAnalyticsResponse:
@@ -373,6 +417,14 @@ async def get_futures_implied_curve(
     ],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> FuturesImpliedCurveResponse:
+    """Return a yield curve bootstrapped from bond futures and their CTD bonds.
+
+    Resolves the futures strip (contract_month or explicit futures), runs CTD
+    analytics per expiry, and bootstraps zero rates from the futures-implied
+    CTD prices. Requires the fixed-income reference provider (503 without
+    it). The response carries the curve, one point per expiry with the
+    implied yield, the full CTD snapshots, and diagnostics.
+    """
     provider = _fixed_income_provider(state)
 
     async def load() -> FuturesImpliedCurveResponse:
@@ -396,6 +448,16 @@ async def get_bond_yield_curve(
     payload: BondYieldCurveRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> BondYieldCurveResponse:
+    """Return a sovereign yield curve for UST, JGB, or German Bunds.
+
+    source_mode selects the construction: indicative_placeholder returns the
+    static standard-tenor curve; futures_implied requires contract_month or
+    explicit futures plus the reference provider; auto prefers futures and
+    falls back to indicative only when allow_indicative_fallback is true.
+    Every response reports which mode produced it (source_mode, source) and
+    carries caveats. Errors: 422 for unsupported markets or invalid
+    parameters, 503 when no live curve is available and fallback is off.
+    """
     async def load() -> BondYieldCurveResponse:
         return await _build_bond_yield_curve(payload, state)
 
@@ -419,6 +481,13 @@ async def get_cash_bond_curve(
         Body(openapi_examples=markdown_openapi_examples("business.fixedIncome.getCashBondCurve")),
     ],
 ) -> BondCurveResponse:
+    """Return the indicative cash-bond sovereign curve for a valuation date.
+
+    Builds the curve from the static standard-tenor provider; no IBKR
+    market data is requested. Yields are indicative, not tradable quotes —
+    the response caveats say so. Errors: 422 for an unsupported market or
+    valuation date.
+    """
     try:
         return build_cash_bond_curve(
             BondCurveRequest(
@@ -443,6 +512,14 @@ async def get_curve_comparison(
     ],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> CurveComparisonResponse:
+    """Compare the indicative cash curve with the futures-implied curve.
+
+    Builds both curves for the same market and valuation date, then reports
+    point-by-point zero-rate spreads (futures zero minus cash zero, in
+    decimals). Requires the fixed-income reference provider for the futures
+    leg (503 without it). The response embeds both full curve payloads plus
+    the typed zero_rate_spreads list.
+    """
     provider = _fixed_income_provider(state)
 
     async def load() -> CurveComparisonResponse:
@@ -474,6 +551,14 @@ async def get_fed_funds_futures_rate(
     payload: FedFundsFuturesRateRequest,
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> FedFundsFuturesRateResponse:
+    """Return the implied average Fed Funds rate from 30-Day Fed Funds futures.
+
+    Loads the latest bar of the ZQ contract (identified by contract_month,
+    local_symbol, or con_id) and reports 100 minus the futures price as the
+    implied average rate in percent. This is a market-implied average, not
+    the official overnight EFFR fixing — see the caveats field. Returns 503
+    when IBKR returns no bars for the contract.
+    """
     async def load() -> FedFundsFuturesRateResponse:
         return await _load_fed_funds_futures_rate(payload, state)
 

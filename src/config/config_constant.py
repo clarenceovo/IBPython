@@ -62,7 +62,7 @@ IBKR_EVENT_CONTRACTS_LIVE_ORDERS_ENABLED_ENV = "IBKR_EVENT_CONTRACTS_LIVE_ORDERS
 IBKR_ORDERS_ENABLED_ENV = "IBKR_ORDERS_ENABLED"
 MCP_HTTP_HOST_ENV = "MCP_HTTP_HOST"
 MCP_HTTP_PORT_ENV = "MCP_HTTP_PORT"
-MCP_API_KEY_ENV="***"
+MCP_API_KEY_ENV = "MCP_API_KEY"
 MCP_IBKR_IDLE_DISCONNECT_SECONDS_ENV = "MCP_IBKR_IDLE_DISCONNECT_SECONDS"
 
 APP_VERSION = "0.1.0"
@@ -103,6 +103,10 @@ DEFAULT_FIXED_INCOME_REFERENCE_PROVIDER = ""
 DEFAULT_IBKR_REST_APP_NAME = "IBKRRestApp"
 DEFAULT_IBKR_REST_CONNECT_ON_STARTUP = False
 DEFAULT_IBKR_REST_MARKET_DATA_TTL_SECONDS = 5.0
+IBKR_REST_CONSOLIDATED_SECTION_TIMEOUT_SECONDS_ENV = "IBKR_REST_CONSOLIDATED_SECTION_TIMEOUT_SECONDS"
+DEFAULT_IBKR_REST_CONSOLIDATED_SECTION_TIMEOUT_SECONDS = 20.0
+DEFAULT_IBKR_QUALIFICATION_CACHE_TTL_SECONDS = 600.0
+DEFAULT_IBKR_QUALIFICATION_CACHE_MAX_SIZE = 512
 DEFAULT_IBKR_REST_MARKET_DATA_CACHE_MAXSIZE = 512
 DEFAULT_IBKR_MARKET_DEPTH_REQUEST_TIMEOUT_SECONDS = 5.0
 DEFAULT_IBKR_MARKET_DEPTH_LEASE_WAIT_SECONDS = 2.0
@@ -197,14 +201,23 @@ REDIS_ORDER_ENVELOPE_SCAN_PATTERN = "OrderCache::*"
 
 # ---------------------------------------------------------------------------
 # TWS API alignment baseline (IBKR production release notes, November 2026).
-# The gateway targets the 10.4x production line:
-#   - Fundamental report requests were removed upstream; this gateway serves
-#     410 responses and routes event data through WSH.
-#   - reqOpenOrders responses now include de-activated orders; the order
-#     client filters them unless include_deactivated is requested.
-#   - Order fields hedgeMaxSize and conditionsIncludeOvernight wait on an
-#     ib_async release that models them; capabilities reports their status.
+# The gateway targets the 10.4x/10.5x production line (Stable 10.50, Latest 10.52):
+#   - Fundamental report requests were removed upstream in 10.47; this gateway
+#     serves 410 responses and routes event data through WSH.
+#   - Order field hedgeMaxSize shipped in 10.45; conditionsIncludeOvernight in
+#     10.50. Both wait on an ib_async release that models them; capabilities
+#     reports their status.
+#   - reqOpenOrders responses include de-activated orders since 10.48; the
+#     order client filters them unless include_deactivated is requested.
+#   - 10.49: TWS API became GPL-licensed (affects IBKR's source distributions,
+#     not this socket client) and Contract Details gained Settlement Type —
+#     unreadable until ib_async decodes settlementMethod.
+#   - 10.51: reqPositions exchange-field accuracy fix (server side, free win).
+#   - 10.52: protobuf version updates and Warning 2189 (algo start/end time
+#     adjusted to the next trading date).
+#   - EARLY session goes live 2026-12-06: new TIFs ERL/EPD; the OVERNIGHT
+#     exchange and OVT/OND TIFs are deprecated the same day.
 #   - TWS/Gateway 10.45 clears "Enable ActiveX and Socket Clients" and
 #     "Allow connections from localhost only" between upgrades; re-check
 #     gateway hosts after upgrading.
-TWS_API_BASELINE = "10.47"
+TWS_API_BASELINE = "10.52"

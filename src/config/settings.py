@@ -123,6 +123,11 @@ class Settings(BaseSettings):
         alias="IBKR_REST_REQUEST_TIMEOUT_SECONDS",
         gt=0,
     )
+    ibkr_rest_consolidated_section_timeout_seconds: float = Field(
+        default=constants.DEFAULT_IBKR_REST_CONSOLIDATED_SECTION_TIMEOUT_SECONDS,
+        alias=constants.IBKR_REST_CONSOLIDATED_SECTION_TIMEOUT_SECONDS_ENV,
+        gt=0,
+    )
     ibkr_market_depth_request_timeout_seconds: float = Field(
         default=constants.DEFAULT_IBKR_MARKET_DEPTH_REQUEST_TIMEOUT_SECONDS,
         alias=constants.IBKR_MARKET_DEPTH_REQUEST_TIMEOUT_SECONDS_ENV,

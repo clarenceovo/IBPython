@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from fastapi.testclient import TestClient
 
@@ -1642,3 +1643,29 @@ class TestOrderResponseUUID:
     def test_order_response_uuid_defaults_none(self) -> None:
         resp = OrderResponse(order_id=1, status=OrderStatus.SUBMITTED)
         assert resp.order_uuid is None
+
+
+class TestEarlySessionTifs:
+    """TWS API EARLY session (10.5x line, live 2026-12-06): ERL/EPD + outside_rth guard."""
+
+    def _request_kwargs(self) -> dict:
+        return {
+            "symbol": "AAPL",
+            "action": "BUY",
+            "order_type": "MKT",
+            "quantity": 10,
+        }
+
+    def test_erl_and_epd_are_valid_tifs(self) -> None:
+        for tif in ("ERL", "EPD"):
+            req = PlaceOrderRequest(**self._request_kwargs(), tif=tif)
+            assert req.tif == TIF(tif)
+
+    def test_early_tif_rejects_outside_rth(self) -> None:
+        for tif in ("ERL", "EPD"):
+            with pytest.raises(ValidationError, match="outside_rth must be false"):
+                PlaceOrderRequest(**self._request_kwargs(), tif=tif, outside_rth=True)
+
+    def test_day_tif_still_allows_outside_rth(self) -> None:
+        req = PlaceOrderRequest(**self._request_kwargs(), tif="DAY", outside_rth=True)
+        assert req.outside_rth is True

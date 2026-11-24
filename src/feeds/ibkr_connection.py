@@ -7,15 +7,17 @@ used by all domain-specific sub-clients (historical, options, account, reference
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import json
 import logging
 import time as monotonic_time
+from collections import OrderedDict as OrderedDictType
 from datetime import datetime, timezone
 from uuid import uuid4
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from src.config import config_constant as constants
 from src.transport.metrics import metrics
@@ -30,10 +32,63 @@ logger = logging.getLogger(__name__)
 DETECTION_TIMEOUT = 180  # seconds before IBKR reports idle timeout
 
 
+class QualificationCache:
+    """TTL memo for qualified contracts, cleared when the IBKR session ends.
+
+    conIds are stable for one gateway session, so re-qualifying the same
+    ``ContractSpec`` within a session is a redundant round trip (chunked
+    backfills re-qualified per chunk, consolidated endpoints per section).
+    Hits return a deep copy because callers mutate qualified contracts.
+    """
+
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float = constants.DEFAULT_IBKR_QUALIFICATION_CACHE_TTL_SECONDS,
+        max_size: int = constants.DEFAULT_IBKR_QUALIFICATION_CACHE_MAX_SIZE,
+    ) -> None:
+        self._ttl_seconds = ttl_seconds
+        self._max_size = max_size
+        self._entries: OrderedDictType[str, tuple[Any, float]] = OrderedDictType()
+        self.hits = 0
+        self.misses = 0
+
+    def _key(self, spec: "ContractSpec") -> str:
+        return spec.model_dump_json()
+
+    def get(self, spec: "ContractSpec") -> Any | None:
+        key = self._key(spec)
+        entry = self._entries.get(key)
+        if entry is None:
+            self.misses += 1
+            return None
+        value, expires_at = entry
+        if expires_at <= monotonic_time.monotonic():
+            self._entries.pop(key, None)
+            self.misses += 1
+            return None
+        self._entries.move_to_end(key)
+        self.hits += 1
+        return copy.deepcopy(value)
+
+    def set(self, spec: "ContractSpec", value: Any) -> None:
+        key = self._key(spec)
+        if len(self._entries) >= self._max_size and key not in self._entries:
+            self._entries.popitem(last=False)
+        self._entries[key] = (value, monotonic_time.monotonic() + self._ttl_seconds)
+        self._entries.move_to_end(key)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+    def stats(self) -> dict[str, int]:
+        return {"size": len(self._entries), "max_size": self._max_size, "hits": self.hits, "misses": self.misses}
+
+
 class IBKRConnectionSwitch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    enabled: StrictBool
+    enabled: StrictBool = Field(description="True connects the IBKR session. False disconnects it.")
 
 
 def _ib_async_compatible_loop() -> asyncio.AbstractEventLoop:
@@ -252,6 +307,7 @@ class IBKRConnectionManager:
         self._session_end_callbacks: list[Any] = []
         self._session_start_callbacks: list[Any] = []
         self.generation = 0
+        self.qualification_cache = QualificationCache()
         self.session_ended = asyncio.Event()
         self._closed = False
         self.connection_enabled = redis is None
@@ -321,6 +377,8 @@ class IBKRConnectionManager:
 
     def _end_session(self) -> None:
         self.generation += 1
+        # conIds belong to the ended session; never serve stale qualifications.
+        self.qualification_cache.clear()
         self.session_ended.set()
         self.session_ended = asyncio.Event()
         for callback in self._session_end_callbacks:
@@ -605,7 +663,7 @@ class IBKRConnectionManager:
     # ------------------------------------------------------------------
 
     _DATA_FARM_CODES: ClassVar[frozenset[int]] = frozenset({
-        2103, 2104, 2105, 2106, 2107, 2108, 2158,
+        2103, 2104, 2105, 2106, 2107, 2108, 2119, 2120, 2158,
     })
 
     def _on_ibkr_error(self, req_id: int, error_code: int, error_string: str, contract: Any = None) -> None:
@@ -621,7 +679,8 @@ class IBKRConnectionManager:
                 error_string,
                 req_id,
             )
-        elif error_code in (404,):
+        elif error_code in (404, 100):
+            # 100: official pacing notification — three violations disconnect the session.
             logger.warning("IBKR pacing violation [%s]: %s (reqId=%s)", error_code, error_string, req_id)
         elif error_code in (1100, 1101, 1102):
             logger.warning("IBKR connectivity event [%s]: %s (reqId=%s)", error_code, error_string, req_id)

@@ -24,20 +24,22 @@ router = APIRouter()
 
 
 class CommodityFuturesRequest(BusinessDateRangeControls):
+    """Request body for front and forward commodity futures bars."""
+
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    symbol: str = Field(min_length=1, examples=["CL", "GC", "NG"])
-    as_of_date: date = Field(default_factory=date.today)
-    forward_count: int = Field(default=1, ge=0, le=12)
-    exchange: str | None = Field(default=None, min_length=1)
-    currency: str | None = Field(default=None, min_length=1)
-    multiplier: str | None = Field(default=None, min_length=1)
-    duration: str = Field(default="1 D", min_length=1)
-    bar_size: str = Field(default="1 min", min_length=1)
-    what_to_show: str = Field(default="TRADES", min_length=1)
-    use_rth: bool = False
-    cache_latest: bool = False
-    max_concurrent_requests: int = Field(default=4, ge=1, le=20)
+    symbol: str = Field(min_length=1, examples=["CL", "GC", "NG"], description="Commodity futures root symbol, e.g. CL, NG, GC, SI, HG, ZC, ZS, ZW, ZL, ZM. Uppercased.")
+    as_of_date: date = Field(default_factory=date.today, description="Date the forward chain rolls from; defaults to today.")
+    forward_count: int = Field(default=1, ge=0, le=12, description="Number of forward contracts after the front month (0 returns only the front).")
+    exchange: str | None = Field(default=None, min_length=1, description="Exchange override; defaults per root (CL/NG on NYMEX, GC/SI/HG on COMEX, grains on CBOT).")
+    currency: str | None = Field(default=None, min_length=1, description="ISO 4217 currency override; defaults to USD.")
+    multiplier: str | None = Field(default=None, min_length=1, description="Contract multiplier, e.g. 1000 for CL.")
+    duration: str = Field(default="1 D", min_length=1, description="IBKR duration string for the lookback, e.g. '1 D', '1 W', '1 M', '1 Y'.")
+    bar_size: str = Field(default="1 min", min_length=1, description="IBKR bar size with its exact spacing, e.g. '1 min', '5 mins', '1 hour', '1 day'.")
+    what_to_show: str = Field(default="TRADES", min_length=1, description="IBKR whatToShow value, e.g. TRADES, MIDPOINT, BID, ASK.")
+    use_rth: bool = Field(default=False, description="Restrict bars to regular trading hours; defaults to false because commodity sessions span RTH.")
+    cache_latest: bool = Field(default=False, description="Store the newest bar of each contract in the latest-bar cache.")
+    max_concurrent_requests: int = Field(default=4, ge=1, le=20, description="Upper bound on concurrent IBKR history requests.")
 
     @field_validator("symbol", mode="before")
     @classmethod
@@ -51,23 +53,27 @@ class CommodityFuturesRequest(BusinessDateRangeControls):
 
 
 class CommodityFuturePoint(BaseModel):
+    """One contract in the commodity futures chain with its latest bar."""
+
     model_config = ConfigDict(extra="forbid")
 
-    role: str
-    symbol: str
-    contract_month: str
-    exchange: str
-    currency: str
-    bar: OHLCVBar | None = None
+    role: str = Field(description="Position in the chain: front or forward_N (1-based).")
+    symbol: str = Field(description="Futures root symbol, e.g. CL.")
+    contract_month: str = Field(description="Contract month as YYYYMM, e.g. 202606.")
+    exchange: str = Field(description="Exchange the contract trades on, e.g. NYMEX.")
+    currency: str = Field(description="ISO 4217 quote currency.")
+    bar: OHLCVBar | None = Field(default=None, description="Latest bar for the contract; null when the load failed or returned nothing.")
 
 
 class CommodityFuturesResponse(BaseModel):
+    """Response envelope for the commodity futures chain."""
+
     model_config = ConfigDict(extra="forbid")
 
-    symbol: str
-    as_of_date: date
-    contracts: tuple[CommodityFuturePoint, ...]
-    source: str = "ibkr"
+    symbol: str = Field(description="Uppercase futures root symbol.")
+    as_of_date: date = Field(description="Date the chain was rolled from.")
+    contracts: tuple[CommodityFuturePoint, ...] = Field(description="Front and forward contracts in chain order; contracts that failed to load are omitted.")
+    source: str = Field(default="ibkr", description="Data source identifier.")
 
 
 @router.post(
@@ -82,6 +88,15 @@ async def get_commodity_futures(
     ],
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> CommodityFuturesResponse:
+    """Return the front contract and forward chain for one commodity root.
+
+    Builds the contract-month chain from as_of_date plus forward_count,
+    honoring each root's listed months (for example GC lists even months;
+    CL expiry follows the NYMEX business-day rule). Loads the latest bar of
+    each contract concurrently; a contract that fails to load is omitted,
+    not failed. The response lists the resolved exchange and currency per
+    contract. Cached for cache_ttl_seconds by default.
+    """
     async def load() -> CommodityFuturesResponse:
         root = payload.symbol
         exchange, currency = resolve_commodity_market(root, payload.exchange, payload.currency)
