@@ -4,7 +4,7 @@ Applied once on top of the standard FastAPI document:
 
 * replaces FastAPI's auto-generated ``operationId`` values
   (``load_account_summary_api_v1_account_summary_get``) with short, stable,
-  camelCase ids derived from the route path — the names agent frameworks use
+  camelCase ids derived from the route path, the names agent frameworks use
   as tool names. Explicitly set operation ids are left untouched.
 * declares the shared error envelope: an ``ApiError`` schema, a reusable
   ``responses.default`` reference on every operation, and code documentation.
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 _HTTP_METHODS = ("get", "post", "put", "delete", "patch")
 
-#: Path segments that already carry an action verb — no method suffix needed.
+#: Path segments that already carry an action verb. No method suffix needed.
 _VERB_PREFIXES = (
     "get",
     "load",
@@ -96,7 +96,7 @@ TAG_DESCRIPTIONS: dict[str, str] = {
         "bond yields, and latest bar queries"
     ),
     "orders": (
-        "Order management — live place/cancel/modify, execution details, and explicit "
+        "Order management: live place/cancel/modify, execution details, and explicit "
         "what-if preview. Side effects: only this tag (plus event-contract orders) trades."
     ),
     "portfolio-risk": "Portfolio-level risk cockpit snapshots",
@@ -112,7 +112,7 @@ _AGENT_GUIDE = """
 ## For AI agents
 
 - Start with `GET /system/capabilities` (feature and version matrix) and `GET /system/health`.
-- Resolve any symbol once with `GET /market-data/consolidated/resolve/{symbol}` — it accepts
+- Resolve any symbol once with `GET /market-data/consolidated/resolve/{symbol}`. It accepts
   `0700.HK`, `EUR.USD`, `ESZ26`, `CONID:12345` and returns the canonical contract fields
   (`symbol`, `asset_class`, `exchange`, `currency`, `con_id`) reused by every other endpoint.
 - For a multi-view overview in one call use the consolidated endpoints

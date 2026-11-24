@@ -210,7 +210,7 @@ REDIS_ORDER_ENVELOPE_SCAN_PATTERN = "OrderCache::*"
 #   - reqOpenOrders responses include de-activated orders since 10.48; the
 #     order client filters them unless include_deactivated is requested.
 #   - 10.49: TWS API became GPL-licensed (affects IBKR's source distributions,
-#     not this socket client) and Contract Details gained Settlement Type —
+#     not this socket client) and Contract Details gained Settlement Type.
 #     unreadable until ib_async decodes settlementMethod.
 #   - 10.51: reqPositions exchange-field accuracy fix (server side, free win).
 #   - 10.52: protobuf version updates and Warning 2189 (algo start/end time

@@ -680,7 +680,7 @@ class IBKRConnectionManager:
                 req_id,
             )
         elif error_code in (404, 100):
-            # 100: official pacing notification — three violations disconnect the session.
+            # 100: official pacing notification. Three violations disconnect the session.
             logger.warning("IBKR pacing violation [%s]: %s (reqId=%s)", error_code, error_string, req_id)
         elif error_code in (1100, 1101, 1102):
             logger.warning("IBKR connectivity event [%s]: %s (reqId=%s)", error_code, error_string, req_id)

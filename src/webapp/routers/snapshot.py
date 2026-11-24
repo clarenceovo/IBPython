@@ -262,7 +262,7 @@ FX_OPTION_CAPTURE_EXAMPLES = {
     summary="Capture equity snapshots",
     description=(
         "Captures point-in-time market data snapshots for a list of equity symbols. "
-        "Resolves exchange/currency automatically from symbol suffixes (.HK, .T, .L, etc.). "
+        "Resolves exchange/currency automatically from symbol suffixes (.HK, .T, .L, and similar). "
         "Caches latest snapshots in Redis. Durable persistence is owned by the scheduler snapshotter."
     ),
 )
@@ -273,7 +273,7 @@ async def capture_snapshots(
     """Capture point-in-time market data snapshots for a list of equities.
 
     Opens one-shot IBKR snapshot subscriptions for every symbol at once,
-    resolves exchange/currency from symbol suffixes (.HK, .T, .L, etc.),
+    resolves exchange/currency from symbol suffixes (.HK, .T, .L, and similar),
     and caches the latest values in Redis. Symbols whose snapshot fails
     validation or arrives empty are listed in failed_symbols. Durable
     persistence is owned by the scheduler snapshotter (persist=true
@@ -475,7 +475,7 @@ async def get_latest_fx_option_snapshot(
     ),
     deprecated=True,
     status_code=410,
-    responses={410: {"description": "Gone — QuestDB historical snapshot queries are owned by the scheduler/snapshotter layer."}},
+    responses={410: {"description": "Gone: QuestDB historical snapshot queries are owned by the scheduler/snapshotter layer."}},
 )
 async def query_fx_option_snapshots(
     query: FXOptionSnapshotQuery,
@@ -524,7 +524,7 @@ async def get_latest_snapshots(
     ),
     deprecated=True,
     status_code=410,
-    responses={410: {"description": "Gone — QuestDB historical snapshot queries are owned by the scheduler/snapshotter layer."}},
+    responses={410: {"description": "Gone: QuestDB historical snapshot queries are owned by the scheduler/snapshotter layer."}},
 )
 async def query_historical_snapshots(
     query: SnapshotQuery,
@@ -544,7 +544,7 @@ async def query_historical_snapshots(
     ),
     deprecated=True,
     status_code=410,
-    responses={410: {"description": "Gone — QuestDB latest-all snapshot queries are owned by the scheduler/snapshotter layer."}},
+    responses={410: {"description": "Gone: QuestDB latest-all snapshot queries are owned by the scheduler/snapshotter layer."}},
 )
 async def get_all_latest_snapshots(
     limit: int = Query(default=100, ge=1, le=1000, description="Unused: the endpoint always returns 410."),

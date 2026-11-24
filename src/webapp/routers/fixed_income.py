@@ -484,7 +484,7 @@ async def get_cash_bond_curve(
     """Return the indicative cash-bond sovereign curve for a valuation date.
 
     Builds the curve from the static standard-tenor provider; no IBKR
-    market data is requested. Yields are indicative, not tradable quotes —
+    market data is requested. Yields are indicative, not tradable quotes.
     the response caveats say so. Errors: 422 for an unsupported market or
     valuation date.
     """
@@ -556,7 +556,7 @@ async def get_fed_funds_futures_rate(
     Loads the latest bar of the ZQ contract (identified by contract_month,
     local_symbol, or con_id) and reports 100 minus the futures price as the
     implied average rate in percent. This is a market-implied average, not
-    the official overnight EFFR fixing — see the caveats field. Returns 503
+    the official overnight EFFR fixing. See the caveats field. Returns 503
     when IBKR returns no bars for the contract.
     """
     async def load() -> FedFundsFuturesRateResponse:

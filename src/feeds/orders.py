@@ -221,7 +221,7 @@ class PlaceOrderRequest(BaseModel):
             raise ValueError("future orders require last_trade_date_or_contract_month, local_symbol, or con_id")
         if self.tif in (TIF.ERL, TIF.EPD) and self.outside_rth:
             raise ValueError(
-                "outside_rth must be false for ERL/EPD (EARLY session) orders — "
+                "outside_rth must be false for ERL/EPD (EARLY session) orders. "
                 "the TWS API rejects Order.outsideRth on the EARLY exchange"
             )
         return self

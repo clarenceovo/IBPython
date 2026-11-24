@@ -115,7 +115,7 @@ def test_capabilities_report_tws_105x_surface():
     assert features["early_session_tifs"].client_supported is True
     assert "ERL" in features["early_session_tifs"].reason
 
-    # Blocked on ib_async decodes — reported, not silently missing.
+    # Blocked on ib_async decodes: reported, not silently missing.
     for name, needle in (
         ("contract_settlement_type", "settlementMethod"),
         ("order_execution_submitter", "submitter"),

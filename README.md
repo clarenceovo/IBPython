@@ -28,7 +28,7 @@ Production-oriented IBKR market data, transport, scheduler, and REST API layer f
 ## TWS API Alignment (10.4x/10.5x)
 
 The gateway tracks the IBKR TWS API production line (`TWS_API_BASELINE`
-in `src/config/config_constant.py`, currently **10.52** — Stable channel is
+in `src/config/config_constant.py`, currently **10.52**. Stable channel is
 10.50, Latest is 10.52; see IBKR's [TWS API installers] and the
 [2026 production release notes]):
 
@@ -45,7 +45,7 @@ in `src/config/config_constant.py`, currently **10.52** — Stable channel is
 - **EARLY session (live 2026-12-06).** NYSE/NASDAQ extend to a 23-hour
   schedule (21:00-20:00 T+1 US/Eastern); IBKR's `EARLY` offering covers
   20:00-21:00. New TIFs: `ERL` (EARLY only) and `EPD` (EARLY+DAY). Orders
-  with these TIFs must not set `outside_rth` — the API validates it. The
+  with these TIFs must not set `outside_rth`. The API validates it. The
   `OVERNIGHT` exchange and the `OVT`/`OND` TIFs are deprecated from the same
   date; resting OVERNIGHT orders will be cancelled.
 - **Contract Details Settlement Type (10.49)** and the **Order/Execution
