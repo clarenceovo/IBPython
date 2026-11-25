@@ -44,35 +44,63 @@ ORDERS_DISABLED_DETAIL = (
 async def require_orders_enabled(state: IBKRRestAppState = Depends(get_rest_state)) -> IBKRRestAppState:
     """Reject order-writing endpoints when the IBKR_ORDERS_ENABLED master switch is off."""
     if not state.settings.ibkr_orders_enabled:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=ORDERS_DISABLED_DETAIL)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ORDERS_DISABLED_DETAIL)
     return state
 
 
 order_bearer_scheme = HTTPBearer(
     auto_error=False,
     scheme_name="OrderBearerAuth",
-    description="Bearer token payload stored in Redis under IBKR_ORDER_AUTH_REDIS_KEY.",
+    description=(
+        "Bearer token payload stored in Redis under IBKR_ORDER_AUTH_REDIS_KEY. "
+        "When IBKR_API_BEARER_TOKEN is also set, send the order token via X-Order-Authorization."
+    ),
 )
 
 
 async def require_order_bearer_token(
     credentials: HTTPAuthorizationCredentials | None = Security(order_bearer_scheme),
+    order_authorization: str | None = Header(
+        default=None,
+        alias="X-Order-Authorization",
+        description="Order-level bearer token (used alongside Authorization when IBKR_API_BEARER_TOKEN is set).",
+    ),
     state: IBKRRestAppState = Depends(get_rest_state),
 ) -> IBKRRestAppState:
-    """Authorize order endpoints with a bearer token payload stored in Redis."""
-    if credentials is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="missing bearer token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    token = credentials.credentials.strip()
-    if credentials.scheme.lower() != "bearer" or not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="invalid bearer token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    """Authorize order endpoints with a bearer token payload stored in Redis.
+
+    Accepts ``X-Order-Authorization`` (``Bearer <token>`` or raw ``<token>``) so
+    callers can pass both an API-wide bearer token in ``Authorization`` and a
+    distinct order token without header collision. Falls back to
+    ``Authorization: Bearer <token>`` when ``X-Order-Authorization`` is absent.
+    """
+    token = ""
+    if order_authorization is not None:
+        raw = order_authorization.strip()
+        if raw.lower().startswith("bearer "):
+            token = raw[7:].strip()
+        else:
+            token = raw
+        if not token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid bearer token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    else:
+        if credentials is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="missing bearer token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        token = credentials.credentials.strip()
+        if credentials.scheme.lower() != "bearer" or not token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid bearer token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
     try:
         raw_expected = await state.redis.get_raw(state.settings.ibkr_order_auth_redis_key)
     except Exception as exc:

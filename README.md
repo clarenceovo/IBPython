@@ -221,36 +221,27 @@ python scripts/validate_scheduler_jobs.py --schedule-dir schedulejob --include-r
 
 ## Docker
 
-The API and scheduler run as separate containers:
+Compose runs IB Gateway, the REST API on port 8000, and the MCP server on port 9685.
+The default Gateway session uses paper trading with a read-only API. The Gateway socket is accessible on the Compose network.
 
-- `ibkr-rest-app`: FastAPI bridge on port `8000`.
-- `ibkr-scheduler`: Redis-defined OHLCV/index scheduler worker with no public port.
-
-Build and run both app containers with Redis, QuestDB, and MySQL:
+On first setup, create the environment files and fill in your paper account credentials in `.env.ibgateway`. Only the Gateway service receives this file.
 
 ```bash
-cp .env.example .env
-docker compose up -d --build ibkr-rest-app ibkr-scheduler
+cp -n .env.example .env
+(umask 077 && cp -n .env.ibgateway.example .env.ibgateway)
 ```
 
-Useful commands:
+Set `IBKR_DOCKER_HOST=ib-gateway` and `IBKR_DOCKER_PORT=4004` in existing deployments that will use the bundled Gateway.
+Start the stack, complete any IBKR authentication prompt, then request broker time to verify the connection.
 
 ```bash
-make docker-build
-make docker-up
-make docker-up-api
-make docker-up-scheduler
-make docker-logs-api
-make docker-logs-scheduler
-docker compose down
+docker compose up -d --build
+docker compose logs --tail=50 ib-gateway
+curl -fsS http://localhost:8000/api/v1/system/server-time
 ```
 
-Compose uses separate Dockerfiles:
-
-- `Dockerfile.api`
-- `Dockerfile.scheduler`
-
-`Dockerfile` remains an API-compatible default for tools that expect the conventional filename.
+For a read-only live session, use live credentials, set `IBKR_GATEWAY_MODE=live` and `IBKR_DOCKER_PORT=4003` in `.env`, and rerun Compose.
+To use an external Gateway, set its host and socket port in `.env` and start only `ibkr-rest-app` and `mcp-server`.
 
 Images stay lean:
 
@@ -264,8 +255,6 @@ Tracing is opt-in and off by default. Enable it with `OTEL_ENABLED=true` and poi
 When enabled, the API exports spans for the ASGI request path, outbound `httpx` calls (IBKR REST), and `redis` commands. The exporter is OTLP/HTTP only — no gRPC dependency, so images stay slim. When disabled, no OpenTelemetry module is imported at all.
 
 Compose passes `OTEL_ENABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT`, and `OTEL_SERVICE_NAME` through to the app container.
-
-The Compose app services set `IBKR_HOST` from `IBKR_DOCKER_HOST`, defaulting to `host.docker.internal`, which lets containers reach TWS or IB Gateway running on the host machine through Docker Desktop. Override `IBKR_DOCKER_HOST` and `IBKR_DOCKER_PORT` if IB Gateway runs elsewhere.
 
 The scheduler uses `IBKR_DOCKER_REST_BASE_URL` inside Compose, defaulting to `http://ibkr-rest-app:8000`, so it calls the FastAPI service over the Docker network instead of container-local `localhost`.
 

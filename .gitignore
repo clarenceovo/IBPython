@@ -5,6 +5,7 @@ __pycache__/
 dist/
 build/
 .env
+.env.ibgateway
 .venv/
 venv/
 *.egg

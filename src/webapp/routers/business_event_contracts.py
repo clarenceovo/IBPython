@@ -147,7 +147,7 @@ async def place_event_contract_order(
 ) -> EventContractOrderResponse:
     if not state.settings.ibkr_orders_enabled:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            status_code=status.HTTP_403_FORBIDDEN,
             detail="order pathways are disabled; set IBKR_ORDERS_ENABLED=true to enable all order operations",
         )
     if not state.settings.ibkr_event_contracts_live_orders_enabled:

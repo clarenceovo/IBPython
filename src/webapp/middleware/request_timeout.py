@@ -21,8 +21,16 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 
-# Paths that should never be timed out (health probes).
-_EXEMPT_PREFIXES = ("/api/v1/system/live", "/api/v1/system/health", "/api/v1/system/readiness", "/metrics")
+# Paths that should never be timed out (health probes and long-lived SSE streams).
+_EXEMPT_PREFIXES = (
+    "/api/v1/system/live",
+    "/api/v1/system/health",
+    "/api/v1/system/readiness",
+    "/metrics",
+    "/api/v1/streaming/ticker",
+    "/api/v1/account/pnl/account/stream",
+    "/api/v1/account/pnl/position/stream",
+)
 
 
 class RequestTimeoutMiddleware:
@@ -42,14 +50,17 @@ class RequestTimeoutMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # Wire a cancelled-error handler into send so the timeout path can
-        # still emit a valid HTTP response instead of a broken connection.
+        # Track whether response headers have already been sent so the timeout
+        # path never emits a duplicate http.response.start (which crashes ASGI).
         timed_out = False
+        response_started = False
 
         async def _send_wrapper(message: Message) -> None:
-            if timed_out and message["type"] == "http.response.body":
-                # The downstream handler is still writing — ignore.
+            nonlocal response_started
+            if timed_out:
                 return
+            if message["type"] == "http.response.start":
+                response_started = True
             await send(message)
 
         async def _run_app() -> None:
@@ -60,7 +71,9 @@ class RequestTimeoutMiddleware:
         except asyncio.TimeoutError:
             timed_out = True
             logger.warning("request timed out after %.1fs: path=%s", self.timeout_seconds, path)
-            body = b'{"detail":"request timed out"}'
+            if response_started:
+                return
+            body = b'{"detail":"request timed out","code":"SERVICE_UNAVAILABLE","retryable":true}'
             await send({
                 "type": "http.response.start",
                 "status": 503,

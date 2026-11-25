@@ -169,7 +169,7 @@ Compose exposes:
 - Redis: `localhost:6379`
 - MySQL: `localhost:3306`
 
-Inside Docker, app services set `IBKR_HOST` from `IBKR_DOCKER_HOST`, defaulting to `host.docker.internal`, so containers can reach TWS or IB Gateway running on the host machine. If you run IB Gateway in another container or remote host, override `IBKR_DOCKER_HOST` and `IBKR_DOCKER_PORT` in `.env`.
+Compose clients use the bundled IB Gateway at `ib-gateway:4004` for paper sessions. Override `IBKR_DOCKER_HOST` and `IBKR_DOCKER_PORT` for an external Gateway.
 
 The scheduler uses `IBKR_DOCKER_REST_BASE_URL` inside Compose, defaulting to `http://ibkr-rest-app:8000`, so OHLCV snapshot jobs call FastAPI over the Docker network instead of container-local `localhost`.
 

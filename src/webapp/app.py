@@ -93,7 +93,15 @@ class APIBearerAuthMiddleware:
             return
 
         if scope.get("method") in {"GET", "HEAD"} and scope.get("path") in {
-            "/dashboard", "/dashboard/", "/dashboard/index.html", "/dashboard/style.css", "/dashboard/app.js",
+            "/dashboard",
+            "/dashboard/",
+            "/dashboard/index.html",
+            "/dashboard/style.css",
+            "/dashboard/app.js",
+            "/api/v1/system/live",
+            "/api/v1/system/health",
+            "/api/v1/system/readiness",
+            "/metrics",
         }:
             await self.app(scope, receive, send)
             return
@@ -118,7 +126,11 @@ class APIBearerAuthMiddleware:
     @staticmethod
     async def _send_401(send: Callable[[dict[str, Any]], Awaitable[None]], detail: str) -> None:
         import json as _json
-        body = _json.dumps({"detail": detail}).encode("utf-8")
+        body = _json.dumps({
+            "detail": detail,
+            "code": "UNAUTHORIZED",
+            "retryable": False,
+        }).encode("utf-8")
         await send({"type": "http.response.start", "status": 401, "headers": [
             [b"content-type", b"application/json"],
             [b"www-authenticate", b"Bearer"],
@@ -202,8 +214,8 @@ def create_app(
             "   — Token payload is read from Redis.\n\n"
             "| Endpoint group | Auth status |\n"
             "|---|---|\n"
-            "| API endpoints (when `IBKR_API_BEARER_TOKEN` is set) | `Authorization: Bearer <api-token>` required |\n"
-            "| Orders (place/cancel/modify/preview) | Requires additional `Authorization: Bearer <token>` via Redis key `IBKR_ORDER_AUTH_REDIS_KEY` |\n"
+            "| API endpoints (when `IBKR_API_BEARER_TOKEN` is set) | `Authorization: Bearer <api-token>` required (health probes, `/metrics`, and dashboard static files exempt) |\n"
+            "| Orders (place/cancel/modify/preview) | Requires order token via Redis key `IBKR_ORDER_AUTH_REDIS_KEY` in `X-Order-Authorization` (or `Authorization: Bearer <token>` when API-wide auth is off) |\n"
             "| All other endpoints (when `IBKR_API_BEARER_TOKEN` is empty/default) | **No authentication** — bind to trusted networks or add an upstream gateway before production |\n"
             "\n"
             "**Note:** The order bearer token payload is read from Redis using `IBKR_ORDER_AUTH_REDIS_KEY`\n"
@@ -246,9 +258,11 @@ def create_app(
             "showExtensions": True,
         },
     )
-    # Metrics middleware must wrap early (added last = wraps outermost)
-    fastapi_app.add_middleware(MetricsMiddleware)
-    fastapi_app.add_middleware(CorrelationIdMiddleware)
+    # Starlette add_middleware is LIFO (first added = innermost, last added = outermost).
+    # Execution order on incoming requests:
+    #   CORSMiddleware -> SecurityHeadersMiddleware -> CorrelationIdMiddleware
+    #   -> MetricsMiddleware -> RateLimiterMiddleware -> APIBearerAuthMiddleware
+    #   -> RequestBodyLimitMiddleware -> RequestTimeoutMiddleware -> route handler
     # Request deadline — prevents slow clients from occupying workers forever.
     fastapi_app.add_middleware(RequestTimeoutMiddleware, timeout_seconds=resolved_settings.ibkr_rest_request_timeout_seconds)
     # Reject oversized request bodies (10 MB).
@@ -274,10 +288,14 @@ def create_app(
         trusted_proxies=resolved_settings.ibkr_rest_trusted_proxies,
     )
 
+    # Metrics and correlation IDs wrap outside auth/rate-limit so 401/413/429 are traced and counted.
+    fastapi_app.add_middleware(MetricsMiddleware)
+    fastapi_app.add_middleware(CorrelationIdMiddleware)
+
     # Security response headers on every response
     fastapi_app.add_middleware(SecurityHeadersMiddleware)
 
-    # CORS — only added when IBKR_REST_CORS_ORIGINS is set (comma-separated origins)
+    # CORS — outermost so preflight OPTIONS and error responses carry CORS headers
     if resolved_settings.ibkr_rest_cors_origins:
         from starlette.middleware.cors import CORSMiddleware
 
@@ -287,7 +305,7 @@ def create_app(
                 CORSMiddleware,
                 allow_origins=cors_origins,
                 allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-                allow_headers=["Authorization", "Content-Type", "X-Request-ID", "Idempotency-Key"],
+                allow_headers=["Authorization", "X-Order-Authorization", "Content-Type", "X-Request-ID", "Idempotency-Key"],
             )
 
     fastapi_app.include_router(business.router, prefix="/api/v1")

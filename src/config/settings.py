@@ -241,6 +241,11 @@ class Settings(BaseSettings):
         alias=constants.IBKR_ORDERS_ENABLED_ENV,
         description="Master switch for all order-writing pathways (place/modify/cancel/bracket/OCA/preview/exercise). Default false: read-only.",
     )
+    mcp_toolsets: str = Field(
+        default=constants.DEFAULT_MCP_TOOLSETS,
+        alias=constants.MCP_TOOLSETS_ENV,
+        description="Comma-separated MCP toolset names or preset (full, research, options_desk, readonly_all).",
+    )
     mcp_ibkr_idle_disconnect_seconds: float = Field(
         default=constants.DEFAULT_MCP_IBKR_IDLE_DISCONNECT_SECONDS,
         alias=constants.MCP_IBKR_IDLE_DISCONNECT_SECONDS_ENV,
