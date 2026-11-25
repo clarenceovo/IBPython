@@ -1,6 +1,6 @@
 """Order pathway master switch (IBKR_ORDERS_ENABLED) behavior.
 
-Covers the disabled default, the service-layer guard, the REST 503 gate on all
+Covers the disabled default, the service-layer guard, the REST 403 gate on all
 order-writing endpoints, and the capabilities surface. Read-only order queries
 must stay reachable.
 """
@@ -147,11 +147,12 @@ ORDER_MUTATION_CASES = [
 
 
 @pytest.mark.parametrize(("method", "path", "payload"), ORDER_MUTATION_CASES)
-def test_order_mutation_endpoints_return_503_when_disabled(method: str, path: str, payload: Any) -> None:
+def test_order_mutation_endpoints_return_403_when_disabled(method: str, path: str, payload: Any) -> None:
     client, state = _make_client()
     with client:
         response = client.request(method, path, json=payload, headers={"Authorization": "Bearer test-order-token"})
-        assert response.status_code == 503, response.text
+        assert response.status_code == 403, response.text
+        assert response.json()["code"] == "ORDERS_DISABLED"
         assert "IBKR_ORDERS_ENABLED" in response.json()["detail"]
     assert state.feed.calls == []
 

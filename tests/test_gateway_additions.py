@@ -79,15 +79,15 @@ def test_mcp_uses_same_models_and_propagates_errors(monkeypatch):
 
     async def run():
         _, feed = make_app()
-        monkeypatch.setattr(server, '_state', lambda _: SimpleNamespace(feed=feed))
-        short = await server.load_equity_shortability(None, 'aapl')
+        ctx = SimpleNamespace(request_context=SimpleNamespace(lifespan_context={'ibkr_state': SimpleNamespace(feed=feed)}))
+        short = await server.load_equity_shortability(ctx, 'aapl')
         assert short['shortable_shares'] == 0
         request = feed.load_equity_shortability.call_args.args[0]
         assert request.symbol == 'AAPL'
-        dividend = await server.load_equity_dividends(None, 'AAPL', exchange='NYSE')
+        dividend = await server.load_equity_dividends(ctx, 'AAPL', exchange='NYSE')
         assert dividend['timed_out'] is True
         assert feed.load_equity_dividends.call_args.args[0].exchange == 'NYSE'
-        assert (await server.get_gateway_capabilities(None))['connected'] is False
+        assert (await server.get_gateway_capabilities(ctx))['connected'] is False
         result = await server.load_fundamentals(None, 'AAPL')
         assert result['code'] == 'FEATURE_REMOVED'
         assert '10.47' in result['error']
@@ -96,7 +96,7 @@ def test_mcp_uses_same_models_and_propagates_errors(monkeypatch):
         def _no_state(_ctx):
             raise AssertionError('load_fundamentals must not resolve app state')
 
-        monkeypatch.setattr(server, '_state', _no_state)
+        monkeypatch.setattr("src.mcp_app.tools.reference._state", _no_state)
         assert (await server.load_fundamentals(None, 'MSFT'))['code'] == 'FEATURE_REMOVED'
     asyncio.run(run())
 

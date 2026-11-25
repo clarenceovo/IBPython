@@ -7,6 +7,7 @@ without requiring live IBKR/QuestDB/Redis connections.
 from __future__ import annotations
 
 import ast
+import inspect
 import importlib
 import json
 import re
@@ -51,19 +52,8 @@ def test_tool_count():
 
 
 def test_resource_count():
-    tree = _parse_module()
-    resources = [
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
-        and any(
-            isinstance(d, ast.Call)
-            and isinstance(d.func, ast.Attribute)
-            and d.func.attr == "resource"
-            for d in node.decorator_list
-        )
-    ]
-    assert len(resources) >= 2, f"Expected >= 2 MCP resources, found {len(resources)}"
+    from src.mcp_server import mcp
+    assert len(mcp._resource_manager.list_resources()) >= 2
 
 
 def test_expected_tools_present():
@@ -115,58 +105,24 @@ def test_expected_tools_present():
 
 
 def test_expected_resources_present():
-    tree = _parse_module()
-    resources = {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
-        and any(
-            isinstance(d, ast.Call)
-            and isinstance(d.func, ast.Attribute)
-            and d.func.attr == "resource"
-            for d in node.decorator_list
-        )
-    }
-    expected = {"get_server_status", "get_table_schema"}
-    missing = expected - resources
-    assert not missing, f"Missing resources: {missing}"
+    from src.mcp_server import mcp
+    uris = {str(resource.uri) for resource in mcp._resource_manager.list_resources()}
+    assert {"ibpython://status", "ibpython://schema/tables"} <= uris
 
 
 def test_has_lifespan_function():
-    tree = _parse_module()
-    functions = {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
-    }
-    assert "mcp_lifespan" in functions, "mcp_lifespan async context manager must exist"
+    from src.mcp_app.runtime import mcp_lifespan
+    assert inspect.isasyncgenfunction(inspect.unwrap(mcp_lifespan))
 
 
 def test_has_entry_points():
-    tree = _parse_module()
-    functions = {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
-        and not node.decorator_list
-    }
-    assert "main_stdio" in functions, "main_stdio entry point must exist"
-    assert "main_streamable_http" in functions, "main_streamable_http entry point must exist"
-    assert "main" in functions, "module entry point must dispatch transport mode"
+    from src.mcp_server import main, main_stdio, main_streamable_http
+    assert all(callable(fn) for fn in (main, main_stdio, main_streamable_http))
 
 
 def test_fastmcp_constructor_uses_supported_kwargs():
-    tree = _parse_module()
-    fastmcp_calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "FastMCP"
-    ]
-    assert fastmcp_calls, "MCP server must instantiate FastMCP"
-    unsupported = {kw.arg for call in fastmcp_calls for kw in call.keywords if kw.arg == "version"}
-    assert not unsupported, "FastMCP in mcp>=1.27 does not accept version="
+    from src.mcp_server import create_mcp_server
+    assert create_mcp_server(toolsets="core").name == "IBPython Market Data"
 
 
 def test_mcp_dockerfile_starts_http_transport():
@@ -177,7 +133,7 @@ def test_mcp_dockerfile_starts_http_transport():
 
 def test_raw_sql_blocks_mutations():
     """Verify the raw SQL tool uses proper SQL injection protection."""
-    source = MCP_SERVER_PATH.read_text()
+    source = (MCP_SERVER_PATH.parent / "mcp_app/tools/storage.py").read_text()
     # Must enforce allowlist of permitted first keywords
     assert '"SELECT"' in source or "'SELECT'" in source, "Must allow SELECT queries"
     assert '"WITH"' in source or "'WITH'" in source, "Must allow WITH (CTE) queries"
@@ -192,15 +148,13 @@ def test_raw_sql_blocks_mutations():
 
 
 def test_query_limit_capped():
-    """Verify historical query has a max limit cap."""
-    source = MCP_SERVER_PATH.read_text()
-    assert "50_000" in source or "50000" in source, "Historical query limit must be capped"
+    from src.mcp_app.common import _clamp, MCP_MAX_BAR_LIMIT
+    assert _clamp(50_001, high=MCP_MAX_BAR_LIMIT) == 5000
 
 
 def test_live_ohlcv_tool_uses_auto_chunking_helper():
-    """Verify live MCP OHLCV protects IBKR from oversized single historical requests."""
-    source = MCP_SERVER_PATH.read_text()
-    function_source = source[source.index("async def load_historical_ohlcv_live") : source.index("async def search_contracts")]
+    from src.mcp_server import load_historical_ohlcv_live
+    function_source = inspect.getsource(load_historical_ohlcv_live)
 
     assert "plan_historical_auto_chunk" in function_source
     assert "ensure_historical_chunk_limit" in function_source
@@ -208,8 +162,8 @@ def test_live_ohlcv_tool_uses_auto_chunking_helper():
 
 
 def test_mcp_news_default_uses_documented_analyst_actions_provider_code():
-    source = MCP_SERVER_PATH.read_text()
-    function_source = source[source.index("async def load_news") : source.index("async def query_equity_snapshots")]
+    from src.mcp_server import load_news
+    function_source = inspect.getsource(load_news)
 
     assert '["BRFG", "BRFUPDN"]' in function_source
 
@@ -226,7 +180,7 @@ def test_server_status_resource_content():
 
 def test_table_schema_resource_content():
     """Verify table schema resource describes the OHLCV table."""
-    source = MCP_SERVER_PATH.read_text()
+    source = (MCP_SERVER_PATH.parent / "mcp_app/resources.py").read_text()
     assert "EquityOHLCV" in source
     assert "equity_snapshots" in source
     assert "fx_option_snapshots" in source
@@ -261,54 +215,25 @@ def test_mcp_server_has_docstring():
 # ── SQL injection protection tests ──────────────────────────────────────────
 
 
-def _get_query_raw_sql_function():
-    """Extract the query_raw_sql function source and exec it in isolation.
+def _query_sql(sql: str):
+    import asyncio
+    from types import SimpleNamespace
+    from src.mcp_app.tools.storage import query_raw_sql
 
-    Importing mcp_server directly fails in CI when FastMCP version mismatch.
-    Instead, we extract just the validation logic and test it.
-    """
-    source = MCP_SERVER_PATH.read_text()
-    import re as _re
-    # Extract the query_raw_sql function body using regex
-    # We need a simpler approach: just test the validation logic directly
-    return source
+    fetch = AsyncMock(return_value=[])
+    state = SimpleNamespace(loader=SimpleNamespace(questdb=SimpleNamespace(fetch_dicts=fetch)))
+    ctx = SimpleNamespace(request_context=SimpleNamespace(lifespan_context={
+        "ibkr_state": state, "questdb_connected": True,
+    }))
+    result = asyncio.run(query_raw_sql(ctx, sql, max_rows=2))
+    if "error" in result:
+        fetch.assert_not_awaited()
+    return result, fetch
 
 
 def _validate_sql(sql: str) -> dict[str, Any] | None:
-    """Replicate the SQL validation from mcp_server.py query_raw_sql.
-
-    Returns None if validation passes, or an error dict if it fails.
-    """
-    stripped = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL).strip()
-    stripped = re.sub(r"--.*?$", " ", stripped, flags=re.MULTILINE).strip()
-    normalized = re.sub(r"\s+", " ", stripped).strip()
-
-    if "/*" in normalized or "*/" in normalized:
-        return {"error": "Malformed SQL block comments are not permitted"}
-
-    if re.search(r";\s*\S", normalized):
-        return {"error": "Multi-statement queries are not permitted"}
-
-    first_keyword = normalized.split()[0].upper() if normalized else ""
-    if first_keyword not in ("SELECT", "WITH"):
-        return {"error": "Only SELECT and WITH (CTE) queries are permitted"}
-
-    dangerous_keywords = re.compile(
-        r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|EXECUTE|INTO)\b",
-        re.IGNORECASE,
-    )
-    match = dangerous_keywords.search(normalized)
-    if match:
-        return {"error": f"Keyword '{match.group(1).upper()}' is not permitted in queries"}
-
-    return None  # Validation passed
-
-
-def _strip_sql(sql: str) -> str:
-    """Replicate the SQL stripping logic from mcp_server.py."""
-    stripped = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL).strip()
-    stripped = re.sub(r"--.*?$", " ", stripped, flags=re.MULTILINE).strip()
-    return stripped
+    result, _ = _query_sql(sql)
+    return result if "error" in result else None
 
 
 def test_sql_validation_accepts_select():
@@ -373,9 +298,10 @@ def test_sql_validation_strips_block_comments():
     """Block comments are stripped before validation."""
     sql = "/* a comment */ SELECT 1"
     assert _validate_sql(sql) is None
-    stripped = _strip_sql(sql)
+    _, fetch = _query_sql(sql)
+    stripped = fetch.await_args.args[0]
     assert "/*" not in stripped
-    assert stripped == "SELECT 1"
+    assert stripped == "SELECT 1 LIMIT 3"
 
 
 def test_sql_validation_strips_inline_comments():
@@ -383,9 +309,10 @@ def test_sql_validation_strips_inline_comments():
     sql = "SELECT 1 --; DROP TABLE equity_snapshots"
     # After stripping -- comments, only "SELECT 1" remains
     assert _validate_sql(sql) is None
-    stripped = _strip_sql(sql)
+    _, fetch = _query_sql(sql)
+    stripped = fetch.await_args.args[0]
     assert "--" not in stripped
-    assert stripped == "SELECT 1"
+    assert stripped == "SELECT 1 LIMIT 3"
 
 
 def test_sql_validation_rejects_grant():
@@ -414,9 +341,9 @@ def test_sql_validation_rejects_malformed_block_comment():
 
 def test_sql_source_uses_stripped_for_execution():
     """Verify the source code passes stripped SQL to the query method, not original."""
-    source = MCP_SERVER_PATH.read_text()
+    source = (MCP_SERVER_PATH.parent / "mcp_app/tools/storage.py").read_text()
     # The query_raw_sql function should call fetch_dicts with stripped, not sql
-    assert "fetch_dicts(stripped)" in source, (
+    assert "sql_to_run = stripped.rstrip()" in source and "fetch_dicts(sql_to_run)" in source, (
         "Must pass stripped SQL to fetch_dicts, not the original sql variable"
     )
 
@@ -438,17 +365,12 @@ def test_sql_validation_rejects_select_into_with_columns():
 
 def test_sql_source_blocks_into_keyword():
     """Verify the source code has INTO in the dangerous keywords blocklist."""
-    source = MCP_SERVER_PATH.read_text()
+    source = (MCP_SERVER_PATH.parent / "mcp_app/tools/storage.py").read_text()
     assert "INTO" in source, "INTO must be in the dangerous keywords blocklist"
 
 
-def test_sql_source_notes_string_literal_false_positive():
-    """Verify the source has a comment noting the string literal false-positive limitation."""
-    source = MCP_SERVER_PATH.read_text()
-    # Check for a comment near the dangerous_keywords section about false positives
-    assert "false" in source.lower() or "string literal" in source.lower() or "NOTE" in source, (
-        "Source should document the string literal false-positive limitation"
-    )
+def test_sql_validator_rejects_blocked_keywords_in_literals():
+    assert _validate_sql("SELECT 'DROP'")["error"]
 
 
 # ── Lifespan resilience tests ────────────────────────────────────────────────
@@ -456,7 +378,7 @@ def test_sql_source_notes_string_literal_false_positive():
 
 def test_lifespan_tracks_connection_status():
     """Verify the lifespan function tracks connection status booleans."""
-    source = MCP_SERVER_PATH.read_text()
+    source = (MCP_SERVER_PATH.parent / "mcp_app/runtime.py").read_text()
     assert "questdb_connected" in source, "Must track questdb_connected status"
     assert "redis_connected" in source, "Must track redis_connected status"
     assert "ibkr_connected" in source, "Must track ibkr_connected status"
@@ -464,7 +386,7 @@ def test_lifespan_tracks_connection_status():
 
 def test_lifespan_yields_connection_flags():
     """Verify the lifespan yields connection flags in the context."""
-    source = MCP_SERVER_PATH.read_text()
+    source = (MCP_SERVER_PATH.parent / "mcp_app/runtime.py").read_text()
     # The yield should include the connection flags
     assert '"questdb_connected"' in source, "Must yield questdb_connected flag"
     assert '"redis_connected"' in source, "Must yield redis_connected flag"
@@ -473,28 +395,28 @@ def test_lifespan_yields_connection_flags():
 
 def test_tools_check_questdb_availability():
     """Verify QuestDB tools guard against unavailable QuestDB connection."""
-    source = MCP_SERVER_PATH.read_text()
+    source = (MCP_SERVER_PATH.parent / "mcp_app/common.py").read_text()
     assert "_require_questdb" in source, "Must have _require_questdb helper"
     assert "QuestDB is not available" in source, "Must return QuestDB unavailable error"
 
 
 def test_tools_check_redis_availability():
     """Verify Redis tools guard against unavailable Redis connection."""
-    source = MCP_SERVER_PATH.read_text()
+    source = (MCP_SERVER_PATH.parent / "mcp_app/common.py").read_text()
     assert "_require_redis" in source, "Must have _require_redis helper"
     assert "Redis is not available" in source, "Must return Redis unavailable error"
 
 
 def test_tools_check_ibkr_availability():
     """Verify IBKR tools guard against unavailable IBKR connection."""
-    source = MCP_SERVER_PATH.read_text()
+    source = (MCP_SERVER_PATH.parent / "mcp_app/common.py").read_text()
     assert "_require_ibkr" in source, "Must have _require_ibkr helper"
     assert "IBKR feed is not available" in source, "Must return IBKR unavailable error"
 
 
 def test_questdb_tools_use_loader_questdb():
     """Verify QuestDB tools access questdb through state.loader.questdb."""
-    source = MCP_SERVER_PATH.read_text()
+    source = (MCP_SERVER_PATH.parent / "mcp_app/tools/storage.py").read_text()
     assert "state.loader.questdb" in source, (
         "Must access QuestDB via state.loader.questdb (IBKRRestAppState has no .questdb)"
     )
@@ -516,7 +438,7 @@ def test_mcp_default_bind_is_localhost():
 
 def test_mcp_lifespan_uses_dedicated_ibkr_client_id():
     """Verify MCP replaces the shared IBKR client ID before building its feed."""
-    source = MCP_SERVER_PATH.read_text()
+    source = (MCP_SERVER_PATH.parent / "mcp_app/runtime.py").read_text()
 
     assert "settings.ibkr_mcp_client_id" in source
     assert 'model_copy(update={"ibkr_client_id": settings.ibkr_mcp_client_id})' in source
@@ -524,7 +446,7 @@ def test_mcp_lifespan_uses_dedicated_ibkr_client_id():
 
 def test_mcp_asset_class_parser_accepts_documented_enum_inputs():
     """Verify MCP does not uppercase enum values before constructing AssetClass."""
-    source = MCP_SERVER_PATH.read_text()
+    source = (MCP_SERVER_PATH.parent / "mcp_app/common.py").read_text()
 
     assert "def _parse_asset_class" in source
     assert "AssetClass(asset_class.upper())" not in source
@@ -647,47 +569,9 @@ def _fake_asgi_app(response_body: bytes = b"ok"):
 
 
 def _make_mcp_auth_middleware(api_key: str, inner_app: Any = None):
-    """Replicate MCPBearerAuthMiddleware for testing without importing mcp_server."""
-    import secrets as _secrets
+    from src.mcp_app.transport import MCPBearerAuthMiddleware
 
-    app = inner_app or _fake_asgi_app(b"ok")
-
-    class _Middleware:
-        def __init__(self, app, *, api_key):
-            self.app = app
-            self._api_key = api_key
-
-        async def __call__(self, scope, receive, send):
-            import json as _json
-            if scope["type"] != "http" or not self._api_key:
-                await self.app(scope, receive, send)
-                return
-            headers = dict(scope.get("headers", []))
-            auth_header = headers.get(b"authorization", b"")
-            if isinstance(auth_header, bytes):
-                auth_header = auth_header.decode("latin-1")
-            if not auth_header.lower().startswith("bearer "):
-                body = _json.dumps({"detail": "MCP API key required"}).encode()
-                await send({"type": "http.response.start", "status": 401, "headers": [
-                    [b"content-type", b"application/json"],
-                    [b"www-authenticate", b"Bearer"],
-                    [b"content-length", str(len(body)).encode()],
-                ]})
-                await send({"type": "http.response.body", "body": body})
-                return
-            token = auth_header[7:].strip()
-            if not token or not _secrets.compare_digest(token, self._api_key.strip()):
-                body = _json.dumps({"detail": "invalid MCP API key"}).encode()
-                await send({"type": "http.response.start", "status": 401, "headers": [
-                    [b"content-type", b"application/json"],
-                    [b"www-authenticate", b"Bearer"],
-                    [b"content-length", str(len(body)).encode()],
-                ]})
-                await send({"type": "http.response.body", "body": body})
-                return
-            await self.app(scope, receive, send)
-
-    return _Middleware(app, api_key=api_key)
+    return MCPBearerAuthMiddleware(inner_app or _fake_asgi_app(), api_key=api_key)
 
 
 def _run_asgi_middleware(middleware, scope):
@@ -715,7 +599,7 @@ def _run_asgi_middleware(middleware, scope):
 
 def test_mcp_auth_middleware_uses_compare_digest():
     """Verify the real MCPBearerAuthMiddleware uses timing-safe comparison."""
-    source = MCP_SERVER_PATH.read_text()
+    source = (MCP_SERVER_PATH.parent / "mcp_app/transport.py").read_text()
     assert "secrets.compare_digest" in source, (
         "MCPBearerAuthMiddleware must use secrets.compare_digest for timing-safe comparison"
     )
@@ -723,7 +607,7 @@ def test_mcp_auth_middleware_uses_compare_digest():
 
 def test_mcp_auth_middleware_compare_digest_pattern():
     """Verify the real middleware compares token against api_key.strip()."""
-    source = MCP_SERVER_PATH.read_text()
+    source = (MCP_SERVER_PATH.parent / "mcp_app/transport.py").read_text()
     assert "compare_digest(token, self._api_key.strip())" in source, (
         "MCPBearerAuthMiddleware must use compare_digest(token, self._api_key.strip())"
     )
@@ -731,7 +615,7 @@ def test_mcp_auth_middleware_compare_digest_pattern():
 
 def test_mcp_auth_middleware_401_has_www_authenticate():
     """Verify 401 responses include proper WWW-Authenticate header."""
-    source = MCP_SERVER_PATH.read_text()
+    source = (MCP_SERVER_PATH.parent / "mcp_app/transport.py").read_text()
     # Find the middleware's 401 sending code
     assert 'b"www-authenticate"' in source or "b'www-authenticate'" in source, (
         "401 responses must include WWW-Authenticate header"
@@ -741,48 +625,7 @@ def test_mcp_auth_middleware_401_has_www_authenticate():
 # ── Static tool list vs AST tool count (P1-9) ──────────────────────────────
 
 
-def test_server_status_tool_count_matches_ast():
-    """Verify the hardcoded tool list in get_server_status matches actual tool count."""
-    source = MCP_SERVER_PATH.read_text()
-    tree = ast.parse(source)
-
-    # Count actual @mcp.tool() decorated functions via AST
-    ast_tools = [
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
-        and any(
-            isinstance(d, ast.Call)
-            and isinstance(d.func, ast.Attribute)
-            and d.func.attr == "tool"
-            for d in node.decorator_list
-        )
-    ]
-
-    # Extract the tools list from get_server_status resource function
-    # Find the JSON string in the function body and parse it
-    status_func_start = source.index("def get_server_status()")
-    # Find the next function/class definition after get_server_status
-    next_def_match = re.search(r"\n(?:def |class |@mcp\.)", source[status_func_start + 1:])
-    if next_def_match:
-        status_func_source = source[status_func_start : status_func_start + 1 + next_def_match.start()]
-    else:
-        status_func_source = source[status_func_start:]
-
-    # Extract the JSON object from json.dumps({...})
-    json_match = re.search(r"json\.loads\((r?f?\"{3}|')(.+?)(\1)\)", status_func_source, re.DOTALL)
-    # Alternative: just extract the dict from json.dumps call
-    # Find the tools list directly
-    tools_list_match = re.search(r'"tools":\s*\[(.*?)\]', status_func_source, re.DOTALL)
-    assert tools_list_match, "Could not find tools list in get_server_status"
-    tools_list_str = tools_list_match.group(1)
-    # Count items — each tool entry is a quoted string
-    tool_entries = re.findall(r'"[^"]+—[^"]+"', tools_list_str)
-    if not tool_entries:
-        # Fallback: count entries separated by commas that contain descriptions
-        tool_entries = re.findall(r'"[^"]+ — [^"]+"', tools_list_str)
-
-    assert len(tool_entries) == len(ast_tools), (
-        f"get_server_status lists {len(tool_entries)} tools but AST finds {len(ast_tools)}: "
-        f"status={tool_entries}, ast={ast_tools}"
-    )
+def test_server_status_matches_registered_tools():
+    from src.mcp_server import get_server_status, mcp
+    reported = json.loads(get_server_status())["tools"]
+    assert {s.split(" — ", 1)[0] for s in reported} == {t.name for t in mcp._tool_manager.list_tools()}

@@ -554,7 +554,7 @@ If the Redis key is missing or Redis cannot be read, order endpoints fail closed
 
 All order-writing operations are disabled by default. The `IBKR_ORDERS_ENABLED` master switch gates three layers:
 
-- REST endpoints: `/orders/place`, `/orders/{id}/cancel`, `/orders/{id}/modify`, `/orders/preview`, `/orders/bracket`, `/orders/oca`, and `/business/event-contracts/orders/place` return `503` with a `IBKR_ORDERS_ENABLED` hint when the switch is off.
+- REST endpoints: `/orders/place`, `/orders/{id}/cancel`, `/orders/{id}/modify`, `/orders/preview`, `/orders/bracket`, `/orders/oca`, and `/business/event-contracts/orders/place` return `403` with an `IBKR_ORDERS_ENABLED` hint when the switch is off.
 - MCP tools: `place_bracket_order`, `place_oca_group`, `modify_order`, `preview_order`, `cancel_all_orders`, and `exercise_option` return an error payload instead of submitting.
 - Service layer: `IBKROrderClient` raises `IBKROrdersDisabledError` on every order-writing method, so no caller can bypass the entry layers.
 

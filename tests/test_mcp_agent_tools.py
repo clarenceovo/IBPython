@@ -18,7 +18,7 @@ from src.feeds.exceptions import IBKRConnectionError, IBKRPacingError
 from src.feeds.orders import BracketOrderRequest, BracketOrderResponse
 
 
-def _ctx(**flags: bool) -> SimpleNamespace:
+def _ctx(**flags: object) -> SimpleNamespace:
     """Fake MCP Context: request_context.lifespan_context is a plain dict."""
     request_context = SimpleNamespace(lifespan_context=flags)
     return SimpleNamespace(request_context=request_context)
@@ -84,24 +84,24 @@ def test_load_fundamentals_returns_feature_removed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_all_orders_requires_confirm(monkeypatch) -> None:
+async def test_cancel_all_orders_requires_confirm() -> None:
     feed = SimpleNamespace(cancel_all_orders=AsyncMock(return_value={"cancelled": 3}))
-    monkeypatch.setattr(server, "_state", lambda _: _state(feed, orders_enabled=True))
+    state = _state(feed, orders_enabled=True)
 
-    blocked = await server.cancel_all_orders(_ctx())
+    blocked = await server.cancel_all_orders(_ctx(ibkr_state=state))
     assert blocked["code"] == "CONFIRMATION_REQUIRED"
     feed.cancel_all_orders.assert_not_called()
 
-    result = await server.cancel_all_orders(_ctx(), confirm=True)
+    result = await server.cancel_all_orders(_ctx(ibkr_state=state), confirm=True)
     assert result == {"cancelled": 3}
     feed.cancel_all_orders.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_cancel_all_orders_disabled_beats_confirm(monkeypatch) -> None:
+async def test_cancel_all_orders_disabled_beats_confirm() -> None:
     feed = SimpleNamespace(cancel_all_orders=AsyncMock())
-    monkeypatch.setattr(server, "_state", lambda _: _state(feed, orders_enabled=False))
-    result = await server.cancel_all_orders(_ctx(), confirm=True)
+    state = _state(feed, orders_enabled=False)
+    result = await server.cancel_all_orders(_ctx(ibkr_state=state), confirm=True)
     assert result["code"] == "ORDERS_DISABLED"
     feed.cancel_all_orders.assert_not_called()
 
@@ -110,42 +110,42 @@ async def test_cancel_all_orders_disabled_beats_confirm(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_redis_key_truncates_long_values(monkeypatch) -> None:
+async def test_get_redis_key_truncates_long_values() -> None:
     class _Redis:
         async def get_raw(self, _key: str) -> str:
             return "x" * 30_000
 
-    monkeypatch.setattr(server, "_state", lambda _: SimpleNamespace(redis=_Redis()))
-    result = await server.get_redis_key(_ctx(redis_connected=True), "OHLCV:big")
+    state = SimpleNamespace(redis=_Redis())
+    result = await server.get_redis_key(_ctx(ibkr_state=state, redis_connected=True), "OHLCV:big")
     assert len(result["value"]) == 20_000
     assert result["truncated"] is True
 
 
 @pytest.mark.asyncio
-async def test_query_raw_sql_caps_rows(monkeypatch) -> None:
+async def test_query_raw_sql_caps_rows() -> None:
     class _QuestDB:
         async def fetch_dicts(self, _sql: str) -> list[dict[str, int]]:
             return [{"n": i} for i in range(10)]
 
     loader = SimpleNamespace(questdb=_QuestDB())
-    monkeypatch.setattr(server, "_state", lambda _: SimpleNamespace(loader=loader))
-    rows = await server.query_raw_sql(_ctx(questdb_connected=True), "SELECT n FROM t", max_rows=3)
-    assert rows == [{"n": 0}, {"n": 1}, {"n": 2}]
+    state = SimpleNamespace(loader=loader)
+    rows = await server.query_raw_sql(_ctx(ibkr_state=state, questdb_connected=True), "SELECT n FROM t", max_rows=3)
+    assert rows["truncated"] and rows["rows"] == [{"n": 0}, {"n": 1}, {"n": 2}]
 
 
 @pytest.mark.asyncio
-async def test_get_all_open_orders_slices(monkeypatch) -> None:
+async def test_get_all_open_orders_slices() -> None:
     feed = SimpleNamespace(get_all_open_orders=AsyncMock(return_value=[{"id": i} for i in range(10)]))
-    monkeypatch.setattr(server, "_state", lambda _: _state(feed))
-    orders = await server.get_all_open_orders(_ctx(), limit=4)
-    assert orders == [{"id": 0}, {"id": 1}, {"id": 2}, {"id": 3}]
+    state = _state(feed)
+    orders = await server.get_all_open_orders(_ctx(ibkr_state=state), limit=4)
+    assert orders["truncated"] and orders["orders"] == [{"id": 0}, {"id": 1}, {"id": 2}, {"id": 3}]
 
 
 # ── typed order pathway ───────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_place_bracket_order_uses_typed_client(monkeypatch) -> None:
+async def test_place_bracket_order_uses_typed_client() -> None:
     response = BracketOrderResponse(
         symbol="AAPL",
         action="BUY",
@@ -156,10 +156,10 @@ async def test_place_bracket_order_uses_typed_client(monkeypatch) -> None:
         stop_loss_order_id=103,
     )
     feed = SimpleNamespace(place_bracket_order=AsyncMock(return_value=response))
-    monkeypatch.setattr(server, "_state", lambda _: _state(feed, orders_enabled=True))
+    state = _state(feed, orders_enabled=True)
 
     result = await server.place_bracket_order(
-        _ctx(),
+        _ctx(ibkr_state=state),
         symbol="aapl",
         action="BUY",
         quantity=1.0,
@@ -175,11 +175,11 @@ async def test_place_bracket_order_uses_typed_client(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_place_bracket_order_rejects_missing_prices(monkeypatch) -> None:
+async def test_place_bracket_order_rejects_missing_prices() -> None:
     feed = SimpleNamespace(place_bracket_order=AsyncMock())
-    monkeypatch.setattr(server, "_state", lambda _: _state(feed, orders_enabled=True))
+    state = _state(feed, orders_enabled=True)
 
-    result = await server.place_bracket_order(_ctx(), symbol="AAPL", action="BUY", quantity=1.0)
+    result = await server.place_bracket_order(_ctx(ibkr_state=state), symbol="AAPL", action="BUY", quantity=1.0)
     assert result["code"] == "BAD_REQUEST"
     assert result["retryable"] is False
     feed.place_bracket_order.assert_not_called()

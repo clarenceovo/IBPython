@@ -7,6 +7,7 @@ against TestClient without an IBKR connection.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -165,22 +166,32 @@ def test_account_pnl_stream_returns_sse_events_then_ends() -> None:
     assert ("cancelPnL", ("DU123", "")) in state.ib.calls
 
 
-def test_account_pnl_stream_releases_subscription_on_client_disconnect() -> None:
+@pytest.mark.asyncio
+async def test_account_pnl_stream_releases_subscription_on_client_disconnect() -> None:
     state = _FakeState()
-    client = _make_client(state)
-    with client:
-        with client.stream(
-            "GET",
-            "/api/v1/account/pnl/account/stream",
-            params={"account_id": "DU123", "interval": 0.1},
-        ) as response:
-            assert response.status_code == 200
-            assert response.headers["content-type"].startswith("text/event-stream")
-            for line in response.iter_lines():
-                if line.startswith("data: "):
-                    assert json.loads(line[len("data: ") :])["account"] == "DU123"
-                    break
-    # Leaving the stream block disconnects the client. The endpoint must release the subscription.
+    app = _make_client(state).app
+    path = "/api/v1/account/pnl/account/stream"
+    scope = {
+        "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1", "method": "GET", "scheme": "http",
+        "path": path, "raw_path": path.encode(), "query_string": b"account_id=DU123&interval=0.1",
+        "headers": [], "client": ("testclient", 1234), "server": ("testserver", 80),
+    }
+    incoming = asyncio.Queue()
+    incoming.put_nowait({"type": "http.request", "body": b"", "more_body": False})
+    events = []
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            assert message["status"] == 200
+        elif message.get("body"):
+            events.extend(_parse_data_events(message["body"].decode()))
+            if events:
+                incoming.put_nowait({"type": "http.disconnect"})
+
+    async with app.router.lifespan_context(app):
+        await asyncio.wait_for(app(scope, incoming.get, send), timeout=5)
+    assert events[0]["account"] == "DU123"
     assert ("cancelPnL", ("DU123", "")) in state.ib.calls
 
 

@@ -734,7 +734,8 @@ def test_webapp_registers_domain_routers() -> None:
     assert "/api/v1/market-data/options/skew" in paths
     assert "/api/v1/snapshot/fx-options/capture" in paths
     assert "/api/v1/snapshot/fx-options/latest" in paths
-    assert "/api/v1/snapshot/fx-options/query" in paths
+    assert "/api/v1/snapshot/fx-options/query" not in paths
+    assert str(app.url_path_for("query_fx_option_snapshots")) == "/api/v1/snapshot/fx-options/query"
     assert "/api/v1/scanner/index-composition" in paths
     assert "/api/v1/account/positions" in paths
 
@@ -855,7 +856,8 @@ def test_event_contract_live_order_is_disabled_by_default() -> None:
             },
         )
 
-    assert response.status_code == 503
+    assert response.status_code == 403
+    assert response.json()["code"] == "ORDERS_DISABLED"
     assert state.event_contracts.order_requests == []
 
 
@@ -2470,7 +2472,7 @@ def test_api_bearer_auth_enabled_allows_valid_token() -> None:
 
     with TestClient(app) as client:
         response = client.get(
-            "/api/v1/system/health",
+            "/api/v1/system/version",
             headers={"Authorization": "Bearer secret-api-key"},
         )
 
@@ -2489,7 +2491,7 @@ def test_api_bearer_auth_enabled_rejects_missing_token() -> None:
     app = create_app(settings=state.settings, state=state)
 
     with TestClient(app) as client:
-        response = client.get("/api/v1/system/health")
+        response = client.get("/api/v1/system/version")
 
     assert response.status_code == 401
     assert response.json()["detail"] == "API bearer token required"
@@ -2509,7 +2511,7 @@ def test_api_bearer_auth_enabled_rejects_wrong_token() -> None:
 
     with TestClient(app) as client:
         response = client.get(
-            "/api/v1/system/health",
+            "/api/v1/system/version",
             headers={"Authorization": "Bearer wrong-key"},
         )
 
@@ -2530,7 +2532,7 @@ def test_api_bearer_auth_enabled_rejects_empty_token() -> None:
 
     with TestClient(app) as client:
         response = client.get(
-            "/api/v1/system/health",
+            "/api/v1/system/version",
             headers={"Authorization": "Bearer "},
         )
 

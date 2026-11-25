@@ -54,7 +54,7 @@ jobs:
           python -m pip install -r requirements-dev.txt
 
       - name: Run tests
-        run: python -m pytest -q
+        run: python -m pytest -q -o faulthandler_timeout=60
 
       - name: Run Ruff
         run: python -m ruff check src tests
