@@ -50,6 +50,11 @@ class IBKROrdersDisabledError(IBKROrderError):
     pass
 
 
+class IBKROrderSubmissionDisabledError(IBKROrdersDisabledError):
+    """Live order submission is blocked by the IBKR_DISABLE_ORDER_SUBMISSION flag."""
+    pass
+
+
 class QuestDBWriteError(Exception):
     """QuestDB write operation failed."""
     pass

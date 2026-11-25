@@ -62,7 +62,7 @@ def register_resources(mcp: FastMCP, enabled_toolsets: Iterable[str]) -> tuple:
             "tools": _registered_tool_summaries(mcp),
             "databases": {
                 "questdb": "Time-series OHLCV, snapshots, tick data",
-                "redis": "Latest bars cache, scheduler state, pacing bookmarks",
+                "redis": "Latest bars cache, pacing bookmarks",
                 "ibkr": "Live TWS/Gateway connection for real-time data",
             },
         }, indent=2)

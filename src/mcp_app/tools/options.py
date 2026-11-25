@@ -10,10 +10,32 @@ from src.mcp_app.common import (
     _AssetClassParam,
     _READ_TOOL,
     _RightParam,
+    _clamp,
     _parse_asset_class,
     _state,
     _tool_error,
 )
+
+
+def _select_strikes(
+    strikes: list[float],
+    *,
+    max_strikes: int,
+    strike_min: float | None,
+    strike_max: float | None,
+) -> tuple[list[float], int, bool]:
+    filtered = [
+        float(s)
+        for s in sorted(strikes)
+        if (strike_min is None or s >= strike_min) and (strike_max is None or s <= strike_max)
+    ]
+    total = len(filtered)
+    if total <= max_strikes:
+        return filtered, total, False
+    # Center the slice around the middle of the filtered strike range (approx ATM)
+    # instead of keeping only deep out-of-the-money low strikes.
+    start = max(0, (total - max_strikes) // 2)
+    return filtered[start : start + max_strikes], total, True
 
 
 async def load_option_chains(
@@ -22,21 +44,38 @@ async def load_option_chains(
     asset_class: _AssetClassParam = "EQUITY",
     exchange: str = "SMART",
     currency: str = "USD",
-) -> list[dict[str, Any]] | dict[str, Any]:
-    """Load option chain for a symbol from IBKR.
+    max_chains: int = 10,
+    max_expirations: int = 12,
+    max_strikes: int = 60,
+    strike_min: float | None = None,
+    strike_max: float | None = None,
+) -> dict[str, Any]:
+    """Load option chains for a symbol from IBKR with bounded expirations and strikes.
 
-    Returns all available expirations and strikes for the given underlying.
+    Caps expirations (nearest first) and strikes (centered around the middle of
+    the strike ladder or filtered by strike_min/strike_max) so multi-exchange
+    chains like SPX/SPY never flood agent context. Reports ``total_count`` and
+    ``truncated`` both top-level and per chain.
 
     Args:
         symbol: Underlying symbol (e.g. 'AAPL', 'SPY', 'SPX')
         asset_class: EQUITY or INDEX (default 'EQUITY')
         exchange: Exchange (default 'SMART')
         currency: Currency (default 'USD')
+        max_chains: Max exchange chains to return (default 10, max 50)
+        max_expirations: Max nearest expirations per chain (default 12, max 200)
+        max_strikes: Max strikes per chain (default 60, max 500)
+        strike_min: Optional minimum strike filter
+        strike_max: Optional maximum strike filter
     """
     state = _state(ctx)
     from src.feeds.contracts import OptionChainRequest
 
     try:
+        max_chains = _clamp(max_chains, low=1, high=50)
+        max_expirations = _clamp(max_expirations, low=1, high=200)
+        max_strikes = _clamp(max_strikes, low=1, high=500)
+
         request = OptionChainRequest(
             symbol=symbol,
             asset_class=_parse_asset_class(asset_class),
@@ -44,17 +83,47 @@ async def load_option_chains(
             currency=currency,
         )
         chains = await state.feed.load_option_chains(request)
-        return [
-            {
+        total_chains = len(chains)
+        chains_truncated = total_chains > max_chains
+        any_inner_truncated = False
+
+        formatted_chains: list[dict[str, Any]] = []
+        for chain in chains[:max_chains]:
+            sorted_exps = sorted(chain.expirations)
+            total_exps = len(sorted_exps)
+            exps_truncated = total_exps > max_expirations
+            kept_exps = sorted_exps[:max_expirations]
+
+            kept_strikes, total_strikes, strikes_truncated = _select_strikes(
+                list(chain.strikes),
+                max_strikes=max_strikes,
+                strike_min=strike_min,
+                strike_max=strike_max,
+            )
+            chain_truncated = exps_truncated or strikes_truncated
+            any_inner_truncated = any_inner_truncated or chain_truncated
+
+            formatted_chains.append({
                 "symbol": chain.symbol,
                 "exchange": chain.exchange,
-                "expirations": chain.expirations,
-                "strikes": chain.strikes,
                 "trading_class": getattr(chain, "trading_class", None),
                 "multiplier": getattr(chain, "multiplier", None),
-            }
-            for chain in chains
-        ]
+                "expirations": kept_exps,
+                "expirations_total_count": total_exps,
+                "expirations_truncated": exps_truncated,
+                "strikes": kept_strikes,
+                "strikes_total_count": total_strikes,
+                "strikes_truncated": strikes_truncated,
+                "truncated": chain_truncated,
+            })
+
+        return {
+            "symbol": symbol.upper(),
+            "chains": formatted_chains,
+            "returned_count": len(formatted_chains),
+            "total_count": total_chains,
+            "truncated": chains_truncated or any_inner_truncated,
+        }
     except Exception as e:
         return _tool_error(e)
 
@@ -122,7 +191,7 @@ async def load_option_skew_surface(
         asset_class: EQUITY or INDEX (default 'EQUITY')
         exchange: Exchange (default 'SMART')
         currency: Currency (default 'USD')
-        max_expirations: Max expirations to sample (default 6)
+        max_expirations: Max expirations to sample (default 6, max 24)
         strike_window_pct: Strike window around spot as percentage (default 0.30)
     """
     state = _state(ctx)
@@ -130,6 +199,7 @@ async def load_option_skew_surface(
     from src.feeds.options_models import OptionSkewSurfaceRequest
 
     try:
+        max_expirations = _clamp(max_expirations, low=1, high=24)
         chain_request = OptionChainRequest(
             symbol=symbol,
             asset_class=_parse_asset_class(asset_class),
@@ -142,7 +212,13 @@ async def load_option_skew_surface(
             strike_window_pct=strike_window_pct,
         )
         response = await state.feed.load_option_skew_surface(request)
-        return response.model_dump(mode="json")
+        payload = response.model_dump(mode="json")
+        expiries = payload.get("expirations") or payload.get("surface") or []
+        if isinstance(expiries, list):
+            payload.setdefault("total_count", len(expiries))
+            payload.setdefault("returned_count", len(expiries))
+            payload.setdefault("truncated", False)
+        return payload
     except Exception as e:
         return _tool_error(e)
 

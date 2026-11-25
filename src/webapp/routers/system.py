@@ -1,4 +1,4 @@
-"""System health, version, cache, IBKR rate-limits, and scheduler diagnostics.
+"""System health, version, cache, and IBKR rate-limits.
 
 NOTE (URL prefix consistency): Several market-data routers use legacy prefixes
 that could be grouped under /market-data/ in a future v2 API:
@@ -24,7 +24,6 @@ from src.feeds.exceptions import ConnectionStatus
 from src.feeds.capabilities import GatewayCapabilities
 from src.feeds.ibkr_connection import IBKRConnectionManager, IBKRConnectionSwitch
 from src.config.config_constant import APP_VERSION
-from src.transport.scheduler_health import SchedulerHealthReport
 
 router = APIRouter(prefix="/system", tags=["system"])
 # Secondary router for endpoints outside the /system/ prefix (migrated from alerts).
@@ -343,26 +342,6 @@ async def ibkr_rate_limits(
     if callable(snapshot):
         return await snapshot()
     return RateLimitsNotConfiguredResponse(enabled=False, reason="not_configured")
-
-
-@router.get(
-    "/scheduler/health",
-    summary="Get scheduler job health status",
-    response_model=SchedulerHealthReport,
-)
-async def scheduler_health(state: IBKRRestAppState = Depends(get_rest_state)) -> SchedulerHealthReport:
-    """Return scheduler health status for all tracked jobs.
-
-    Shows each job's last status, consecutive failures, last success time,
-    and last error. Requires a health monitor to be configured on the
-    scheduler; otherwise returns status 'not_configured' with an empty
-    jobs map.
-    """
-    scheduler = getattr(state, "scheduler", None)
-    if scheduler is None or getattr(scheduler, "_health_monitor", None) is None:
-        return SchedulerHealthReport(status="not_configured", jobs={})
-    report = scheduler._health_monitor.get_health_status()
-    return report
 
 
 # ------------------------------------------------------------------

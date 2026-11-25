@@ -1,11 +1,11 @@
 -r requirements.txt
+mcp[cli]
+uvicorn[standard]
 jupyterlab
 ipykernel
 matplotlib
-pandas
-python-dotenv
+pandas>=2.2
 pytest
 pytest-asyncio
-httpx
-ruff>=0.12
-mypy>=1.17
+ruff>=0.14
+mypy>=1.18.2

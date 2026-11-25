@@ -85,7 +85,7 @@ class OHLCVLoader:
         quality = await asyncio.to_thread(
             validate_ohlcv_bars, bars, request=request, sessions=intervals, stale_after_seconds=stale_after_seconds
         )
-        self.last_quality_report = quality  # Legacy scheduler compatibility; detailed results are per-call.
+        self.last_quality_report = quality  # Legacy caller compatibility; detailed results are per-call.
         if quality.issues:
             logger.warning("OHLCV data quality report: %s", quality.summary())
         status = "quarantined" if quality.has_fatal else ("no_store" if persist and self.store is None else "not_requested")

@@ -14,13 +14,58 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from main import build_market_data_store, configure_logging
+from src.transport.market_data_store import MarketOHLCVStore
+from src.transport.mysql_client import MySQLClient
+from src.transport.questdb_client import QuestDBClient
 from src.config.settings import load_settings
 from src.feeds.ibkr_historical import _ibkr_duration_to_seconds, _ibkr_max_duration_for_bar_size
 from src.feeds.models import AssetClass, OHLCVBar, OHLCVRequest
 from src.transport.redis_client import MarketDataRedisClient
 
 logger = logging.getLogger(__name__)
+
+
+def configure_logging(telegram_bot_token: str = "", telegram_chat_id: str = "", telegram_log_level: str = "WARNING") -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
+    # Attach Telegram handler if configured
+    if telegram_bot_token and telegram_chat_id:
+        import logging as _logging
+
+        from src.transport.telegram_client import TelegramLogHandler
+
+        level = getattr(_logging, telegram_log_level.upper(), _logging.WARNING)
+        tg_handler = TelegramLogHandler(
+            bot_token=telegram_bot_token,
+            chat_id=telegram_chat_id,
+            level=level,
+        )
+        _logging.getLogger().addHandler(tg_handler)
+        logger.info("Telegram logging enabled: chat_id=%s level=%s", telegram_chat_id, telegram_log_level)
+
+
+def build_market_data_store(settings: Any) -> MarketOHLCVStore:
+    backend = settings.market_data_db_backend.strip().lower()
+    if backend == "mysql":
+        logger.info("using MySQL as market OHLCV store")
+        return MySQLClient(
+            host=settings.mysql_host,
+            port=settings.mysql_port,
+            user=settings.mysql_user,
+            password=settings.mysql_password,
+            database=settings.mysql_database,
+        )
+    if backend == "questdb":
+        logger.info("using QuestDB as market OHLCV store")
+        return QuestDBClient(
+            host=settings.questdb_host,
+            port=settings.questdb_port,
+            write_port=settings.questdb_write_port,
+            user=settings.questdb_user,
+            password=settings.questdb_password,
+            database=settings.questdb_database,
+        )
+    raise ValueError(f"unsupported MARKET_DATA_DB_BACKEND={settings.market_data_db_backend!r}; expected questdb or mysql")
 
 
 @dataclass(frozen=True)

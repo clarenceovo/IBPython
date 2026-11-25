@@ -10,18 +10,26 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 
 from src.mcp_app.common import (
+    MCP_DEFAULT_BAR_LIMIT,
+    MCP_DEFAULT_SQL_ROWS,
+    MCP_DEFAULT_TEXT_CHARS,
+    MCP_MAX_BAR_LIMIT,
+    MCP_MAX_SQL_ROWS,
     _AssetClassParam,
     _BarSizeParam,
     _READ_TOOL,
     _RightOptParam,
     _RightParam,
     _SENSITIVE_KEY_PATTERNS,
+    _clamp,
     _error,
     _parse_asset_class,
     _require_questdb,
     _require_redis,
     _state,
     _tool_error,
+    _truncate_items,
+    _truncate_text,
 )
 
 
@@ -33,9 +41,13 @@ async def query_historical_ohlcv(
     contract_key: str | None = None,
     start: str | None = None,
     end: str | None = None,
-    limit: int = 5000,
+    limit: int = MCP_DEFAULT_BAR_LIMIT,
 ) -> dict[str, Any]:
-    """Query historical OHLCV bars from QuestDB.
+    """Query historical OHLCV bars from QuestDB with bounded output.
+
+    Fetches up to ``limit + 1`` rows to detect truncation without running a
+    separate ``COUNT(*)`` scan, reporting ``returned_count``, ``total_count``
+    (exact when untruncated), and ``truncated``.
 
     Args:
         symbol: Ticker symbol (e.g. 'BTCUSDT', 'ES', 'EUR.USD')
@@ -44,7 +56,7 @@ async def query_historical_ohlcv(
         contract_key: Specific contract key for futures/options
         start: Start datetime in ISO format (e.g. '2026-05-01T00:00:00Z')
         end: End datetime in ISO format
-        limit: Max rows to return (default 5000, max 50000)
+        limit: Max rows to return (default 500, max 5000)
     """
     if err := _require_questdb(ctx):
         return err
@@ -57,7 +69,7 @@ async def query_historical_ohlcv(
     )
 
     try:
-        limit = max(1, min(limit, 50_000))
+        limit = _clamp(limit, low=1, high=MCP_MAX_BAR_LIMIT)
         start_dt = datetime.fromisoformat(start) if start else None
         end_dt = datetime.fromisoformat(end) if end else None
 
@@ -69,11 +81,13 @@ async def query_historical_ohlcv(
             contract_key=contract_key,
             start=start_dt,
             end=end_dt,
-            limit=limit,
+            limit=limit + 1,
         )
         latency_ms = (_time.monotonic() - t0) * 1000.0
 
-        bars = [OHLCVBar.model_validate(r) if isinstance(r, dict) else r for r in rows]
+        truncated = len(rows) > limit
+        kept_rows = rows[:limit]
+        bars = [OHLCVBar.model_validate(r) if isinstance(r, dict) else r for r in kept_rows]
         request_meta = OHLCVRequestMeta(
             symbol=symbol,
             asset_class=asset_class or "unknown",
@@ -89,7 +103,11 @@ async def query_historical_ohlcv(
             chunk_count=1,
             source="questdb",
         )
-        return envelope.model_dump(mode="json")
+        payload = envelope.model_dump(mode="json")
+        payload["returned_count"] = len(bars)
+        payload["total_count"] = len(rows)
+        payload["truncated"] = truncated
+        return payload
     except Exception as e:
         return _tool_error(e)
 
@@ -109,7 +127,7 @@ async def query_latest_bars(
         asset_class: Filter by asset class
         bar_size: Filter by bar size
         contract_key: Filter by contract key
-        limit: Max rows (default 100)
+        limit: Max rows (default 100, max 1000)
     """
     state = _state(ctx)
     if err := _require_questdb(ctx):
@@ -122,16 +140,19 @@ async def query_latest_bars(
     )
 
     try:
+        limit = _clamp(limit, low=1, high=1000)
         t0 = _time.monotonic()
         rows = await state.loader.questdb.query_latest_bars(
             asset_class=asset_class,
             bar_size=bar_size,
             contract_key=contract_key,
-            limit=limit,
+            limit=limit + 1,
         )
         latency_ms = (_time.monotonic() - t0) * 1000.0
 
-        bars = [OHLCVBar.model_validate(r) if isinstance(r, dict) else r for r in rows]
+        truncated = len(rows) > limit
+        kept_rows = rows[:limit]
+        bars = [OHLCVBar.model_validate(r) if isinstance(r, dict) else r for r in kept_rows]
         request_meta = OHLCVRequestMeta(
             symbol="*",
             asset_class=asset_class or "unknown",
@@ -147,7 +168,11 @@ async def query_latest_bars(
             chunk_count=1,
             source="questdb",
         )
-        return envelope.model_dump(mode="json")
+        payload = envelope.model_dump(mode="json")
+        payload["returned_count"] = len(bars)
+        payload["total_count"] = len(rows)
+        payload["truncated"] = truncated
+        return payload
     except Exception as e:
         return _tool_error(e)
 
@@ -155,16 +180,17 @@ async def query_latest_bars(
 async def query_raw_sql(
     ctx: Context,
     sql: str,
-    max_rows: int = 1000,
-) -> dict[str, Any] | list[dict[str, Any]]:
-    """Execute a raw SQL query against QuestDB.
+    max_rows: int = MCP_DEFAULT_SQL_ROWS,
+) -> dict[str, Any]:
+    """Execute a raw SQL query against QuestDB with bounded output.
 
     Use for ad-hoc analytics, aggregations, and JOINs that the structured tools don't cover.
-    SELECT only — no INSERT/UPDATE/DELETE/CLEAR/ALTER/DROP.
+    SELECT only — no INSERT/UPDATE/DELETE/CLEAR/ALTER/DROP. Returns ``rows``,
+    ``returned_count``, ``total_count``, and ``truncated``.
 
     Args:
         sql: QuestDB SQL query (SELECT only)
-        max_rows: Max rows returned (default 1000, max 5000; add your own LIMIT for less)
+        max_rows: Max rows returned (default 500, max 5000; add your own LIMIT for less)
     """
     state = _state(ctx)
     if err := _require_questdb(ctx):
@@ -192,16 +218,17 @@ async def query_raw_sql(
     if match:
         return _error(f"Keyword '{match.group(1).upper()}' is not permitted in queries", code="QUERY_REJECTED")
 
-    max_rows = min(max(max_rows, 1), 5000)
+    max_rows = _clamp(max_rows, low=1, high=MCP_MAX_SQL_ROWS)
     sql_to_run = stripped.rstrip().rstrip(";").rstrip()
     if not re.search(r"\bLIMIT\b", normalized, re.IGNORECASE):
-        sql_to_run = f"{sql_to_run} LIMIT {max_rows}"
+        # Fetch max_rows + 1 so we accurately set truncated=True when more rows exist.
+        sql_to_run = f"{sql_to_run} LIMIT {max_rows + 1}"
 
     try:
         rows = await state.loader.questdb.fetch_dicts(sql_to_run)
         if isinstance(rows, list):
-            return rows[:max_rows]
-        return rows
+            return _truncate_items(rows, max_rows, key="rows")
+        return {"rows": rows, "returned_count": 0, "total_count": 0, "truncated": False}
     except Exception as e:
         return _tool_error(e)
 
@@ -212,22 +239,24 @@ async def query_equity_snapshots(
     start: str | None = None,
     end: str | None = None,
     limit: int = 100,
-) -> list[dict[str, Any]] | dict[str, Any]:
+) -> dict[str, Any]:
     """Query recent equity snapshots from QuestDB.
 
     Args:
         symbol: Optional ticker symbol filter (e.g. 'AAPL')
         start: Optional start datetime in ISO format
         end: Optional end datetime in ISO format
-        limit: Max snapshots to return (default 100)
+        limit: Max snapshots to return (default 100, max 1000)
     """
     if err := _require_questdb(ctx):
         return err
     state = _state(ctx)
     try:
+        limit = _clamp(limit, low=1, high=1000)
         start_dt = datetime.fromisoformat(start) if start else None
         end_dt = datetime.fromisoformat(end) if end else None
-        return await state.loader.questdb.query_snapshots(symbol=symbol, start=start_dt, end=end_dt, limit=limit)
+        rows = await state.loader.questdb.query_snapshots(symbol=symbol, start=start_dt, end=end_dt, limit=limit + 1)
+        return _truncate_items(rows, limit, key="snapshots")
     except Exception as e:
         return _tool_error(e)
 
@@ -241,7 +270,7 @@ async def query_fx_option_snapshots(
     start: str | None = None,
     end: str | None = None,
     limit: int = 100,
-) -> list[dict[str, Any]] | dict[str, Any]:
+) -> dict[str, Any]:
     """Query FX option snapshots from QuestDB.
 
     Args:
@@ -251,23 +280,25 @@ async def query_fx_option_snapshots(
         right: Optional right filter ('C'/'CALL' or 'P'/'PUT')
         start: Optional start datetime in ISO format
         end: Optional end datetime in ISO format
-        limit: Max snapshots to return (default 100)
+        limit: Max snapshots to return (default 100, max 1000)
     """
     if err := _require_questdb(ctx):
         return err
     state = _state(ctx)
     try:
+        limit = _clamp(limit, low=1, high=1000)
         start_dt = datetime.fromisoformat(start) if start else None
         end_dt = datetime.fromisoformat(end) if end else None
-        return await state.loader.questdb.query_fx_option_snapshots(
+        rows = await state.loader.questdb.query_fx_option_snapshots(
             symbol=symbol,
             expiry=expiry,
             strike=strike,
             right=right,
             start=start_dt,
             end=end_dt,
-            limit=limit,
+            limit=limit + 1,
         )
+        return _truncate_items(rows, limit, key="snapshots")
     except Exception as e:
         return _tool_error(e)
 
@@ -275,7 +306,7 @@ async def query_fx_option_snapshots(
 async def get_all_latest_equity_snapshots(
     ctx: Context,
     limit: int = 100,
-) -> list[dict[str, Any]] | dict[str, Any]:
+) -> dict[str, Any]:
     """Get the latest snapshot for ALL tracked equity symbols from QuestDB.
 
     Uses QuestDB LATEST ON to return the most recent snapshot per symbol.
@@ -285,11 +316,12 @@ async def get_all_latest_equity_snapshots(
         limit: Max snapshots to return (default 100, max 1000)
     """
     if err := _require_questdb(ctx):
-        return [err]  # type: ignore[list-item]
+        return err
     state = _state(ctx)
     try:
-        limit = max(1, min(limit, 1000))
-        return await state.loader.questdb.query_latest_snapshots(limit=limit)
+        limit = _clamp(limit, low=1, high=1000)
+        rows = await state.loader.questdb.query_latest_snapshots(limit=limit + 1)
+        return _truncate_items(rows, limit, key="snapshots")
     except Exception as e:
         return _tool_error(e)
 
@@ -403,21 +435,6 @@ async def get_latest_fx_option_snapshot(
         return _tool_error(e)
 
 
-async def list_scheduler_jobs(ctx: Context) -> dict[str, Any]:
-    """List all registered scheduler jobs from Redis.
-
-    Returns job names that can be used with other scheduler tools.
-    """
-    state = _state(ctx)
-    if err := _require_redis(ctx):
-        return err
-    try:
-        keys = await state.redis.scan_scheduler_jobs()
-        return {"jobs": keys, "count": len(keys)}
-    except Exception as e:
-        return _tool_error(e)
-
-
 async def list_snapshot_watchlists(ctx: Context) -> dict[str, Any]:
     """List all snapshot watchlist names stored in Redis.
 
@@ -428,7 +445,7 @@ async def list_snapshot_watchlists(ctx: Context) -> dict[str, Any]:
     state = _state(ctx)
     try:
         keys = await state.redis.scan_snapshot_watchlists()
-        return {"watchlists": keys, "count": len(keys)}
+        return {"watchlists": keys, "count": len(keys), "total_count": len(keys), "truncated": False}
     except Exception as e:
         return _tool_error(e)
 
@@ -458,13 +475,19 @@ async def get_snapshot_watchlist(ctx: Context, name: str) -> dict[str, Any]:
         return _tool_error(e)
 
 
-async def get_redis_key(ctx: Context, key: str) -> dict[str, Any]:
+async def get_redis_key(
+    ctx: Context,
+    key: str,
+    max_chars: int = MCP_DEFAULT_TEXT_CHARS,
+) -> dict[str, Any]:
     """Read a raw Redis key. For debugging and inspection.
 
-    Values longer than 20,000 characters are truncated; 'truncated' is true then.
+    Values longer than ``max_chars`` are truncated; ``truncated`` and
+    ``total_count`` (character length) are reported.
 
     Args:
         key: Full Redis key to read
+        max_chars: Max characters returned (default 20000, max 100000)
     """
     if _SENSITIVE_KEY_PATTERNS.search(key):
         return _error("Access to this key is restricted", code="FORBIDDEN")
@@ -481,8 +504,7 @@ async def get_redis_key(ctx: Context, key: str) -> dict[str, Any]:
                 raw = raw.decode("utf-8")
             except UnicodeDecodeError:
                 raw = raw.hex()
-        truncated = len(raw) > 20_000
-        return {"key": key, "value": raw[:20_000], "truncated": truncated}
+        return _truncate_text(str(raw), max_chars, key="value", extra={"key": key})
     except Exception as e:
         return _tool_error(e)
 
@@ -498,7 +520,6 @@ def register(mcp: FastMCP) -> None:
         get_latest_bar_from_cache,
         get_latest_equity_snapshots,
         get_latest_fx_option_snapshot,
-        list_scheduler_jobs,
         list_snapshot_watchlists,
         get_snapshot_watchlist,
         get_redis_key,

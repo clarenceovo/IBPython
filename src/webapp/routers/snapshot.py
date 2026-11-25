@@ -44,7 +44,7 @@ class CaptureSnapshotsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     symbols: list[str] = Field(min_length=1, description="List of equity symbols to snapshot")
-    persist: bool = Field(default=False, description="Deprecated: API snapshot persistence is disabled; use the scheduler snapshotter")
+    persist: bool = Field(default=False, description="Deprecated: API snapshot persistence is disabled")
     cache_latest: bool = Field(default=True, description="Cache latest snapshots in Redis")
 
     @classmethod
@@ -69,7 +69,7 @@ class WatchlistCreateRequest(BaseModel):
     exchange: str = Field(default="SMART", min_length=1, description="Default IBKR exchange for the watchlist symbols.")
     currency: str = Field(default="USD", min_length=1, description="Default IBKR currency for the watchlist symbols.")
     snapshot_interval_seconds: float = Field(
-        default=60, gt=0, description="Suggested capture cadence in seconds used by scheduler-driven captures."
+        default=60, gt=0, description="Suggested capture cadence in seconds for repeated captures."
     )
 
 
@@ -81,7 +81,7 @@ class WatchlistCaptureRequest(BaseModel):
     name: str = Field(min_length=1, description="Watchlist name to capture.")
     persist: bool = Field(
         default=False,
-        description="Deprecated: API snapshot persistence is disabled (501 when true); use the scheduler snapshotter.",
+        description="Deprecated: API snapshot persistence is disabled (501 when true).",
     )
     cache_latest: bool = Field(default=True, description="Cache captured snapshots in Redis as the latest values.")
 
@@ -171,7 +171,7 @@ class FXOptionCaptureRequest(BaseModel):
     )
     persist: bool = Field(
         default=False,
-        description="Deprecated: API snapshot persistence is disabled (501 when true); use the scheduler snapshotter.",
+        description="Deprecated: API snapshot persistence is disabled (501 when true).",
     )
     cache_latest: bool = Field(default=True, description="Cache captured snapshots in Redis as the latest values.")
 
@@ -263,7 +263,7 @@ FX_OPTION_CAPTURE_EXAMPLES = {
     description=(
         "Captures point-in-time market data snapshots for a list of equity symbols. "
         "Resolves exchange/currency automatically from symbol suffixes (.HK, .T, .L, and similar). "
-        "Caches latest snapshots in Redis. Durable persistence is owned by the scheduler snapshotter."
+        "Caches latest snapshots in Redis. Durable writes are disabled for this endpoint."
     ),
 )
 async def capture_snapshots(
@@ -276,13 +276,13 @@ async def capture_snapshots(
     resolves exchange/currency from symbol suffixes (.HK, .T, .L, and similar),
     and caches the latest values in Redis. Symbols whose snapshot fails
     validation or arrives empty are listed in failed_symbols. Durable
-    persistence is owned by the scheduler snapshotter (persist=true
+    persistence is disabled (persist=true
     returns 501).
     """
     if payload.persist:
         raise HTTPException(
             status_code=501,
-            detail="API snapshot persistence is disabled; use the scheduler snapshotter",
+            detail="API snapshot persistence is disabled",
         )
 
     t0 = monotonic_time.monotonic()
@@ -395,7 +395,7 @@ async def capture_fx_option_snapshots(
     if payload.persist:
         raise HTTPException(
             status_code=501,
-            detail="API FX option snapshot persistence is disabled; use the scheduler snapshotter",
+            detail="API FX option snapshot persistence is disabled",
         )
 
     symbols: list[str] = []
@@ -470,12 +470,12 @@ async def get_latest_fx_option_snapshot(
     "/fx-options/query",
     summary="Query historical FX option snapshots",
     description=(
-        "Removed: historical FX option snapshot queries moved to the scheduler/snapshotter layer. "
+        "Removed: historical FX option snapshot queries are available through the storage client. "
         "This endpoint always responds 410 Gone."
     ),
     deprecated=True,
     status_code=410,
-    responses={410: {"description": "Gone: QuestDB historical snapshot queries are owned by the scheduler/snapshotter layer."}},
+    responses={410: {"description": "Gone: QuestDB historical snapshot queries are available through the storage client."}},
 )
 async def query_fx_option_snapshots(
     query: FXOptionSnapshotQuery,
@@ -483,7 +483,7 @@ async def query_fx_option_snapshots(
 ):
     """Historical FX option snapshot queries are gone (410)."""
     _ = (query, state)
-    raise HTTPException(status_code=410, detail="QuestDB historical snapshot queries are owned by the scheduler/snapshotter layer")
+    raise HTTPException(status_code=410, detail="QuestDB historical snapshot queries are available through the storage client")
 
 
 @router.get(
@@ -519,12 +519,12 @@ async def get_latest_snapshots(
     "/query",
     summary="Query historical snapshots from QuestDB",
     description=(
-        "Removed: historical equity snapshot queries moved to the scheduler/snapshotter layer. "
+        "Removed: historical equity snapshot queries are available through the storage client. "
         "This endpoint always responds 410 Gone."
     ),
     deprecated=True,
     status_code=410,
-    responses={410: {"description": "Gone: QuestDB historical snapshot queries are owned by the scheduler/snapshotter layer."}},
+    responses={410: {"description": "Gone: QuestDB historical snapshot queries are available through the storage client."}},
 )
 async def query_historical_snapshots(
     query: SnapshotQuery,
@@ -532,19 +532,19 @@ async def query_historical_snapshots(
 ):
     """Historical equity snapshot queries are gone (410)."""
     _ = (query, state)
-    raise HTTPException(status_code=410, detail="QuestDB historical snapshot queries are owned by the scheduler/snapshotter layer")
+    raise HTTPException(status_code=410, detail="QuestDB historical snapshot queries are available through the storage client")
 
 
 @router.get(
     "/latest-all",
     summary="Get latest snapshots for all tracked symbols",
     description=(
-        "Removed: latest-all snapshot queries moved to the scheduler/snapshotter layer (QuestDB LATEST ON). "
+        "Removed: latest-all snapshot queries are available through the storage client (QuestDB LATEST ON). "
         "This endpoint always responds 410 Gone."
     ),
     deprecated=True,
     status_code=410,
-    responses={410: {"description": "Gone: QuestDB latest-all snapshot queries are owned by the scheduler/snapshotter layer."}},
+    responses={410: {"description": "Gone: QuestDB latest-all snapshot queries are available through the storage client."}},
 )
 async def get_all_latest_snapshots(
     limit: int = Query(default=100, ge=1, le=1000, description="Unused: the endpoint always returns 410."),
@@ -552,7 +552,7 @@ async def get_all_latest_snapshots(
 ):
     """Latest-all snapshot queries are gone (410)."""
     _ = (limit, state)
-    raise HTTPException(status_code=410, detail="QuestDB latest-all snapshot queries are owned by the scheduler/snapshotter layer")
+    raise HTTPException(status_code=410, detail="QuestDB latest-all snapshot queries are available through the storage client")
 
 
 # ---------------------------------------------------------------------------

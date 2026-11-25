@@ -527,7 +527,7 @@ async def load_index_ohlcv(
     summary="Read the latest cached OHLCV bar",
     description=(
         "Reads Redis only; it does not call IBKR or QuestDB. "
-        "Populate this cache by loading OHLCV with cache_latest=true or by running a scheduler snapshot job. "
+        "Populate this cache by loading OHLCV with cache_latest=true. "
         "Use symbol for the production symbol-scoped key. If symbol is omitted, the legacy asset-class latest key is used."
     ),
 )
@@ -559,8 +559,7 @@ async def get_latest_bar(
 ) -> OHLCVBar | None:
     """Read the latest cached OHLCV bar from Redis without touching IBKR.
 
-    Serves the bar stored by earlier loads with cache_latest=true or by
-    scheduler snapshot jobs. Returns null when the key has no cached bar.
+    Serves the bar stored by earlier loads with cache_latest=true. Returns null when the key has no cached bar.
     """
     return await state.redis.get_latest_bar(asset_class, bar_size, symbol=symbol)
 

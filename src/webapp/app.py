@@ -11,20 +11,21 @@ from typing import Any, Callable, Awaitable
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from src.config.settings import Settings, load_settings
 from src.config.config_constant import APP_VERSION
 from src.transport.metrics import MetricsMiddleware, metrics
 from src.webapp import matrix
-from src.webapp.api_error import error_response, http_exception_response
+from src.webapp.api_error import error_response, http_exception_response, validation_exception_response
 from src.webapp.dependencies import IBKRRestAppState, build_rest_app_state
 from src.webapp.middleware.correlation import CorrelationIdFilter, CorrelationIdMiddleware
 from src.webapp.middleware.request_timeout import RequestTimeoutMiddleware
 from src.webapp.middleware.body_limit import RequestBodyLimitMiddleware
 from src.webapp.middleware.security import SecurityHeadersMiddleware
 from src.webapp.middleware.rate_limit import RateLimiterMiddleware, RateLimitGatekeeper
-from src.webapp.openapi_agent import enhance_openapi_for_agents
+from src.webapp.openapi_agent import enhance_openapi_for_agents, render_llms_txt
 from src.webapp.ws_broker import broker
 from src.webapp.routers import (
     account,
@@ -63,6 +64,7 @@ from src.feeds.exceptions import (
     IBKRMarketDataUnavailableError,
     IBKRPacingError,
     IBKROrderError,
+    IBKROrderSubmissionDisabledError,
     IBKROrdersDisabledError,
     QuestDBWriteError,
     QuestDBConnectionError,
@@ -102,6 +104,7 @@ class APIBearerAuthMiddleware:
             "/api/v1/system/health",
             "/api/v1/system/readiness",
             "/metrics",
+            "/llms.txt",
         }:
             await self.app(scope, receive, send)
             return
@@ -344,6 +347,12 @@ def create_app(
         """Expose Prometheus-compatible metrics in text format."""
         return metrics.expose().encode("utf-8")
 
+    @fastapi_app.get("/llms.txt", include_in_schema=False, response_class=PlainTextResponse)
+    async def llms_txt_endpoint() -> PlainTextResponse:
+        """Expose a compact, token-efficient Markdown API index for AI agents."""
+        content = render_llms_txt(fastapi_app.openapi())
+        return PlainTextResponse(content, media_type="text/markdown; charset=utf-8")
+
     # Simple exception→status mappings: one handler factory covers them all.
     # Each entry: (HTTP status, log level, stable machine-readable error code).
     _exc_map = {
@@ -353,6 +362,7 @@ def create_app(
         IBKRCircuitOpenError: (503, logging.WARNING, "IBKR_CIRCUIT_OPEN"),
         IBKRContractResolutionError: (422, logging.WARNING, "CONTRACT_RESOLUTION_FAILED"),
         IBKRMarketDataUnavailableError: (503, logging.WARNING, "MARKET_DATA_UNAVAILABLE"),
+        IBKROrderSubmissionDisabledError: (403, logging.WARNING, "ORDER_SUBMISSION_DISABLED"),
         IBKROrdersDisabledError: (403, logging.WARNING, "ORDERS_DISABLED"),
         IBKROrderError: (502, logging.WARNING, "ORDER_REJECTED"),
         HistoricalRequestTooLargeError: (422, logging.WARNING, "REQUEST_TOO_LARGE"),
@@ -392,6 +402,10 @@ def create_app(
             return error_response(503, msg, code="IBKR_UNAVAILABLE", retryable=True)
         logger.exception("unhandled RuntimeError in request: %s", exc)
         return error_response(500, "Internal error", code="INTERNAL_ERROR")
+
+    @fastapi_app.exception_handler(RequestValidationError)
+    async def request_validation_exception_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        return validation_exception_response(exc)
 
     @fastapi_app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:

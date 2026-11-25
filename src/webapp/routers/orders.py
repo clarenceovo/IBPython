@@ -40,11 +40,23 @@ ORDERS_DISABLED_DETAIL = (
     "place/modify/cancel/bracket/OCA/preview operations"
 )
 
+ORDER_SUBMISSION_DISABLED_DETAIL = (
+    "order submission is disabled by IBKR_DISABLE_ORDER_SUBMISSION=true; "
+    "preview (what-if) and cancel remain available"
+)
+
 
 async def require_orders_enabled(state: IBKRRestAppState = Depends(get_rest_state)) -> IBKRRestAppState:
     """Reject order-writing endpoints when the IBKR_ORDERS_ENABLED master switch is off."""
     if not state.settings.ibkr_orders_enabled:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ORDERS_DISABLED_DETAIL)
+    return state
+
+
+async def require_order_submission_allowed(state: IBKRRestAppState = Depends(require_orders_enabled)) -> IBKRRestAppState:
+    """Reject live order submission/modification when IBKR_DISABLE_ORDER_SUBMISSION=true."""
+    if state.settings.ibkr_disable_order_submission:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ORDER_SUBMISSION_DISABLED_DETAIL)
     return state
 
 
@@ -158,7 +170,7 @@ async def transaction_cost_analysis(
     envelopes, executions = await state.analytics_store.execution_inputs(account_id)
     return build_tca_report(account_id, envelopes, executions, strategy_id=strategy_id, start=start, end=end)
 
-@router.post("/place", response_model=OrderResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_orders_enabled)])
+@router.post("/place", response_model=OrderResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_order_submission_allowed)])
 async def place_order(
     request: PlaceOrderRequest,
     idempotency_key: str | None = Header(
@@ -194,7 +206,7 @@ async def cancel_order(
     return await state.feed.cancel_order(account_id, order_id)
 
 
-@router.post("/{order_id}/modify", response_model=OrderResponse, dependencies=[Depends(require_orders_enabled)])
+@router.post("/{order_id}/modify", response_model=OrderResponse, dependencies=[Depends(require_order_submission_allowed)])
 async def modify_order(
     order_id: int = Path(description="IBKR order id (permId-based orderId) to modify."),
     modifications: ModifyOrderRequest = Body(
@@ -319,7 +331,7 @@ BRACKET_ORDER_EXAMPLES = {
 }
 
 
-@router.post("/bracket", response_model=BracketOrderResponse, status_code=status.HTTP_201_CREATED, summary="Place a bracket order", dependencies=[Depends(require_orders_enabled)])
+@router.post("/bracket", response_model=BracketOrderResponse, status_code=status.HTTP_201_CREATED, summary="Place a bracket order", dependencies=[Depends(require_order_submission_allowed)])
 async def place_bracket_order(
     payload: Annotated[BracketOrderRequest, Body(openapi_examples=BRACKET_ORDER_EXAMPLES)],  # noqa: F821
     state: IBKRRestAppState = Depends(require_order_bearer_token),
@@ -350,7 +362,7 @@ OCA_GROUP_EXAMPLES = {
 }
 
 
-@router.post("/oca", response_model=list[OcaOrderResponse], status_code=status.HTTP_201_CREATED, summary="Place an OCA order group", dependencies=[Depends(require_orders_enabled)])
+@router.post("/oca", response_model=list[OcaOrderResponse], status_code=status.HTTP_201_CREATED, summary="Place an OCA order group", dependencies=[Depends(require_order_submission_allowed)])
 async def place_oca_group(
     payload: Annotated[OcaGroupRequest, Body(openapi_examples=OCA_GROUP_EXAMPLES)],  # noqa: F821
     state: IBKRRestAppState = Depends(require_order_bearer_token),

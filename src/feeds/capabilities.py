@@ -27,7 +27,12 @@ class GatewayCapabilities(BaseModel):
     features: dict[str, FeatureCapability]
 
 
-def gateway_capabilities(connection: Any, *, orders_enabled: bool = True) -> GatewayCapabilities:
+def gateway_capabilities(
+    connection: Any,
+    *,
+    orders_enabled: bool = True,
+    disable_order_submission: bool = False,
+) -> GatewayCapabilities:
     ib = connection.ib
     connected = connection.is_connected
     protocol = ib.client.serverVersion() if connected else None
@@ -57,6 +62,17 @@ def gateway_capabilities(connection: Any, *, orders_enabled: bool = True) -> Gat
         reason=(
             "Order-writing pathways (place/modify/cancel/bracket/OCA/preview/exercise) are gated by the "
             "IBKR_ORDERS_ENABLED master switch; read-only order queries stay available."
+        ),
+    )
+    submission_allowed = orders_enabled and not disable_order_submission
+    features["order_submission"] = FeatureCapability(
+        implemented=True,
+        client_supported=True,
+        availability="unknown" if submission_allowed else "disabled",
+        reason=(
+            "Live order submission (place/modify/bracket/OCA/exercise and live Event Contracts) is blocked "
+            "when IBKR_DISABLE_ORDER_SUBMISSION=true or IBKR_ORDERS_ENABLED=false; preview (what-if) and "
+            "cancel remain available when IBKR_ORDERS_ENABLED=true."
         ),
     )
     features.update(_tws_modern_features())

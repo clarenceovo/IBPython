@@ -269,18 +269,6 @@ class MetricsCollector:
             label_names=("name",),
         )
 
-        # Scheduler metrics
-        self.scheduler_job_duration: _Histogram = _Histogram(
-            "scheduler_job_duration_seconds",
-            "Duration of scheduler job executions in seconds",
-            label_names=("job_name",),
-        )
-        self.scheduler_job_failures: _Counter = _Counter(
-            "scheduler_job_failures_total",
-            "Total scheduler job failures",
-            label_names=("job_name",),
-        )
-
         # HTTP request metrics
         self.http_request_duration: _Histogram = _Histogram(
             "http_request_duration_seconds",
@@ -350,8 +338,6 @@ class MetricsCollector:
             self.cache_miss_total,
             self.streaming_subscriptions_active,
             self.circuit_breaker_state,
-            self.scheduler_job_duration,
-            self.scheduler_job_failures,
             self.http_request_duration,
             self.market_data_snapshot_total,
             self.market_data_snapshot_cleanup_failures_total,

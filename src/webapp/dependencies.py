@@ -97,6 +97,7 @@ def build_rest_app_state(settings: Settings) -> IBKRRestAppState:
         client_role="api",
         analytics_store=analytics_store,
         orders_enabled=settings.ibkr_orders_enabled,
+        disable_order_submission=settings.ibkr_disable_order_submission,
     )
     loader = OHLCVLoader(feed, store=None, redis=redis, analytics_store=analytics_store)
     market_data_cache = AsyncTTLCache(
@@ -108,6 +109,7 @@ def build_rest_app_state(settings: Settings) -> IBKRRestAppState:
         bearer_token=settings.ibkr_web_api_bearer_token,
         cookie=settings.ibkr_web_api_cookie,
         verify_ssl=settings.ibkr_web_api_verify_ssl,
+        disable_order_submission=settings.ibkr_disable_order_submission,
     )
     fixed_income_reference_provider = build_fixed_income_reference_provider(settings.fixed_income_reference_provider)
     return IBKRRestAppState(

@@ -13,10 +13,6 @@ from src.transport.redis_client import (
     ohlcv_snapshot_calendar_key,
     ohlcv_snapshot_last_ts_key,
     ohlcv_snapshot_status_key,
-    scheduler_lease_key,
-    scheduler_job_key,
-    scheduler_run_history_key,
-    scheduler_run_latest_key,
 )
 
 
@@ -28,16 +24,6 @@ def test_latest_bar_key_format() -> None:
 
 def test_index_composition_key_format() -> None:
     assert index_composition_key("spx") == "GlobalIndex:SPX:composition"
-
-
-def test_scheduler_job_key_format() -> None:
-    assert scheduler_job_key("snapshot_spy_1m") == "SchedulerJob::snapshot_spy_1m"
-
-
-def test_scheduler_lease_and_run_key_formats() -> None:
-    assert scheduler_lease_key("snapshot_spy_1m") == "SchedulerLease::SNAPSHOT_SPY_1M"
-    assert scheduler_run_latest_key("snapshot_spy_1m") == "SchedulerRun::SNAPSHOT_SPY_1M:latest"
-    assert scheduler_run_history_key("snapshot_spy_1m") == "SchedulerRun::SNAPSHOT_SPY_1M:history"
 
 
 def test_ohlcv_snapshot_bookmark_key_formats() -> None:
@@ -173,32 +159,3 @@ def test_redis_client_sets_latest_fx_option_snapshot() -> None:
     assert key in store
     assert loaded is not None
     assert loaded.symbol == "EURUSD"
-
-
-def test_redis_client_records_scheduler_run_history() -> None:
-    class FakeRedis:
-        def __init__(self) -> None:
-            self.store: dict[str, str] = {}
-            self.lists: dict[str, list[str]] = {}
-
-        async def set(self, key: str, value: str, **kwargs: object) -> bool:
-            self.store[key] = value
-            return True
-
-        async def lpush(self, key: str, value: str) -> None:
-            self.lists.setdefault(key, []).insert(0, value)
-
-        async def ltrim(self, key: str, start: int, stop: int) -> None:
-            self.lists[key] = self.lists.get(key, [])[start : stop + 1]
-
-    async def run() -> tuple[dict[str, str], dict[str, list[str]]]:
-        fake = FakeRedis()
-        client = MarketDataRedisClient(client=fake)
-        await client.record_scheduler_run("snapshot_spy_1m", {"status": "success", "run_id": "r1"})
-        return fake.store, fake.lists
-
-    store, lists = asyncio.run(run())
-
-    assert "SchedulerRun::SNAPSHOT_SPY_1M:latest" in store
-    assert "SchedulerRun::SNAPSHOT_SPY_1M:history" in lists
-    assert '"status": "success"' in lists["SchedulerRun::SNAPSHOT_SPY_1M:history"][0]

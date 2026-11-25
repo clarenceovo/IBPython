@@ -11,6 +11,10 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 
 from src.mcp_app.common import (
+    MCP_DEFAULT_BAR_LIMIT,
+    MCP_DEFAULT_TICK_LIMIT,
+    MCP_MAX_BAR_LIMIT,
+    MCP_MAX_TICK_LIMIT,
     _AssetClassParam,
     _BarSizeParam,
     _MarketDataTypeOptParam,
@@ -18,9 +22,11 @@ from src.mcp_app.common import (
     _RightOptParam,
     _WRITE_TOOL,
     _WhatToShowParam,
+    _clamp,
     _parse_asset_class,
     _state,
     _tool_error,
+    _truncate_items,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,10 +42,13 @@ async def load_historical_ohlcv_live(
     duration: str = "1 M",
     what_to_show: _WhatToShowParam = "TRADES",
     use_rth: bool = True,
+    max_bars: int = MCP_DEFAULT_BAR_LIMIT,
 ) -> dict[str, Any]:
     """Load historical OHLCV bars directly from IBKR (not QuestDB).
 
     Use this when you need data not yet persisted, or for real-time snapshots.
+    When more than ``max_bars`` arrive, keeps the most recent ``max_bars`` bars
+    and sets ``truncated=True`` with ``total_count`` reflecting the full load.
 
     Args:
         symbol: Ticker symbol
@@ -50,6 +59,7 @@ async def load_historical_ohlcv_live(
         duration: IBKR duration string: '30 D', '1 M', '1 Y', etc
         what_to_show: TRADES, MIDPOINT, BID, ASK, BID_ASK (default 'TRADES')
         use_rth: Use regular trading hours only (default True)
+        max_bars: Max most-recent bars returned (default 500, max 5000)
     """
     state = _state(ctx)
     from src.feeds.ibkr_historical import ensure_historical_chunk_limit, plan_historical_auto_chunk
@@ -62,6 +72,7 @@ async def load_historical_ohlcv_live(
     from src.transport.metrics import metrics
 
     try:
+        max_bars = _clamp(max_bars, low=1, high=MCP_MAX_BAR_LIMIT)
         request = OHLCVRequest(
             symbol=symbol,
             asset_class=_parse_asset_class(asset_class),
@@ -98,6 +109,10 @@ async def load_historical_ohlcv_live(
             bars = await state.feed.load_historical_ohlcv(request, max_chunks=state.settings.ibkr_historical_max_chunks)
         latency_ms = (_time.monotonic() - t0) * 1000.0
 
+        total_bars = len(bars)
+        truncated = total_bars > max_bars
+        kept_bars = bars[-max_bars:] if truncated else bars
+
         request_meta = OHLCVRequestMeta(
             symbol=request.symbol,
             asset_class=request.asset_class.value,
@@ -109,7 +124,7 @@ async def load_historical_ohlcv_live(
             duration=request.duration,
         )
         envelope = OHLCVResponseEnvelope(
-            bars=bars,
+            bars=kept_bars,
             request=request_meta,
             quality=compute_ohlcv_quality(bars),
             latency_ms=latency_ms,
@@ -117,7 +132,11 @@ async def load_historical_ohlcv_live(
             chunk_count=1,
             source="ibkr",
         )
-        return envelope.model_dump(mode="json")
+        payload = envelope.model_dump(mode="json")
+        payload["returned_count"] = len(kept_bars)
+        payload["total_count"] = total_bars
+        payload["truncated"] = truncated
+        return payload
     except Exception as e:
         return _tool_error(e)
 
@@ -128,7 +147,7 @@ async def get_latest_ticks(
     sec_type: str = "STK",
     exchange: str = "SMART",
     n: int = 100,
-) -> list[dict[str, Any]] | dict[str, Any]:
+) -> dict[str, Any]:
     """Get latest N ticks from in-memory tick buffer.
 
     Requires an active tick-by-tick subscription (start_tick_by_tick) for the symbol.
@@ -137,12 +156,24 @@ async def get_latest_ticks(
         symbol: Ticker symbol
         sec_type: Security type (default 'STK')
         exchange: Exchange (default 'SMART')
-        n: Number of ticks to return (default 100)
+        n: Number of ticks to return (default 100, max 1000)
     """
     state = _state(ctx)
     try:
-        ticks = state.feed.get_latest_ticks(symbol, sec_type, exchange, n)
-        return [t.model_dump(mode="json") for t in ticks]
+        n = _clamp(n, low=1, high=1000)
+        ticks = state.feed.get_latest_ticks(symbol, sec_type, exchange, n + 1)
+        has_more = len(ticks) > n
+        kept = ticks[-n:] if has_more else ticks
+        serialized = [t.model_dump(mode="json") for t in kept]
+        return {
+            "symbol": symbol,
+            "sec_type": sec_type,
+            "exchange": exchange,
+            "ticks": serialized,
+            "returned_count": len(serialized),
+            "total_count": len(ticks),
+            "truncated": has_more,
+        }
     except Exception as e:
         return _tool_error(e)
 
@@ -157,11 +188,12 @@ async def load_historical_ticks(
     currency: str = "USD",
     what_to_show: _WhatToShowParam = "TRADES",
     use_rth: bool = True,
-    max_ticks: int = 10000,
+    max_ticks: int = MCP_DEFAULT_TICK_LIMIT,
 ) -> dict[str, Any]:
-    """Load historical tick data from IBKR.
+    """Load historical tick data from IBKR with bounded output.
 
-    Returns timestamped ticks with price, size, bid/ask, etc.
+    Returns timestamped ticks alongside ``returned_count``, ``total_count``,
+    and ``truncated`` (True when IBKR or ``max_ticks`` caps the window).
 
     Args:
         symbol: Ticker symbol
@@ -172,12 +204,13 @@ async def load_historical_ticks(
         currency: Currency (default 'USD')
         what_to_show: TRADES, BID_ASK, or MIDPOINT (default 'TRADES')
         use_rth: Regular trading hours only (default True)
-        max_ticks: Max ticks to return (default 10000)
+        max_ticks: Max ticks to return (default 500, max 5000)
     """
     state = _state(ctx)
     from src.feeds.tick_data import HistoricalTickRequest
 
     try:
+        max_ticks = _clamp(max_ticks, low=1, high=MCP_MAX_TICK_LIMIT)
         request = HistoricalTickRequest(
             symbol=symbol,
             sec_type=sec_type,
@@ -190,7 +223,15 @@ async def load_historical_ticks(
             max_ticks=max_ticks,
         )
         response = await state.feed.load_historical_ticks(request)
-        return response.model_dump(mode="json")
+        serialized = [t.model_dump(mode="json") for t in response.ticks]
+        return _truncate_items(
+            serialized,
+            max_ticks,
+            key="ticks",
+            upstream_truncated=response.truncated,
+            total_count=response.total_count,
+            extra={"symbol": response.symbol},
+        )
     except Exception as e:
         return _tool_error(e)
 
@@ -244,7 +285,8 @@ async def load_bond_yield_history(
     duration: str = "1 D",
     bar_size: _BarSizeParam = "1 day",
     use_rth: bool = True,
-) -> dict[str, Any] | list[dict[str, Any]]:
+    max_bars: int = MCP_DEFAULT_BAR_LIMIT,
+) -> dict[str, Any]:
     """Load historical bond yields from IBKR.
 
     Args:
@@ -254,11 +296,13 @@ async def load_bond_yield_history(
         duration: IBKR duration string (default '1 D')
         bar_size: Bar size (default '1 day')
         use_rth: Regular trading hours only (default True)
+        max_bars: Max most-recent bars returned (default 500, max 5000)
     """
     state = _state(ctx)
     from src.feeds.bonds import BondInstrument, BondYieldHistoryRequest
 
     try:
+        max_bars = _clamp(max_bars, low=1, high=MCP_MAX_BAR_LIMIT)
         bond = BondInstrument(symbol=symbol, exchange=exchange, currency=currency)
         request = BondYieldHistoryRequest(
             bond=bond,
@@ -267,7 +311,14 @@ async def load_bond_yield_history(
             use_rth=use_rth,
         )
         bars = await state.feed.load_bond_yield_history(request)
-        return [b.model_dump(mode="json") for b in bars]
+        serialized = [b.model_dump(mode="json") for b in bars]
+        return _truncate_items(
+            serialized,
+            max_bars,
+            key="bars",
+            keep_tail=True,
+            extra={"symbol": symbol},
+        )
     except Exception as e:
         return _tool_error(e)
 
@@ -324,6 +375,7 @@ async def request_histogram(
     currency: str = "USD",
     use_rth: bool = True,
     time_period: str = "1 day",
+    max_buckets: int = 200,
 ) -> dict[str, Any]:
     """Request price histogram data from IBKR.
 
@@ -336,9 +388,11 @@ async def request_histogram(
         currency: Currency (default 'USD')
         use_rth: Use regular trading hours only (default True)
         time_period: IBKR time period string (e.g. '1 day', '1 week')
+        max_buckets: Max price buckets returned (default 200, max 2000)
     """
     state = _state(ctx)
     try:
+        max_buckets = _clamp(max_buckets, low=1, high=2000)
         buckets_raw = await state.feed.request_histogram(
             symbol=symbol,
             asset_class=asset_class,
@@ -351,16 +405,19 @@ async def request_histogram(
             {"price": b["price"], "count": b["count"]} if isinstance(b, dict) else b
             for b in buckets_raw
         ]
-        return {
-            "symbol": symbol,
-            "asset_class": asset_class,
-            "exchange": exchange,
-            "currency": currency,
-            "time_period": time_period,
-            "use_rth": use_rth,
-            "buckets": buckets,
-            "total_count": len(buckets),
-        }
+        return _truncate_items(
+            buckets,
+            max_buckets,
+            key="buckets",
+            extra={
+                "symbol": symbol,
+                "asset_class": asset_class,
+                "exchange": exchange,
+                "currency": currency,
+                "time_period": time_period,
+                "use_rth": use_rth,
+            },
+        )
     except Exception as e:
         return _tool_error(e)
 
@@ -374,10 +431,10 @@ async def subscribe_realtime_bars(
     what_to_show: _WhatToShowParam = "TRADES",
     use_rth: bool = True,
     duration_seconds: float = 60.0,
-) -> list[dict[str, Any]] | dict[str, Any]:
+) -> dict[str, Any]:
     """Subscribe to 5-second real-time bars from IBKR.
 
-    Returns collected 5-second bars over the specified duration.
+    Returns collected 5-second bars over the specified duration (at most 60 bars for 300s).
     Use for intraday signal generation and execution quality analysis.
 
     Args:
@@ -415,18 +472,33 @@ async def subscribe_realtime_bars(
                     "trade_count": raw_bar.get("count", 0) if isinstance(raw_bar, dict) else getattr(raw_bar, "count", 0),
                 }
                 bars.append(bar)
-        return bars
     except TimeoutError:
-        return bars if bars else [{"message": f"collected {len(bars)} bars in {duration_seconds}s"}]
+        pass
     except Exception as e:
         return _tool_error(e)
 
+    return _truncate_items(
+        bars,
+        100,
+        key="bars",
+        extra={"symbol": symbol, "duration_seconds": duration_seconds},
+    )
 
-async def get_depth_exchanges(ctx: Context) -> list[dict[str, Any]] | dict[str, Any]:
-    """Get available Level 2 market depth exchanges from IBKR."""
+
+async def get_depth_exchanges(
+    ctx: Context,
+    max_exchanges: int = 100,
+) -> dict[str, Any]:
+    """Get available Level 2 market depth exchanges from IBKR.
+
+    Args:
+        max_exchanges: Max exchanges returned (default 100, max 500)
+    """
     state = _state(ctx)
     try:
-        return await state.feed.get_depth_exchanges()
+        max_exchanges = _clamp(max_exchanges, low=1, high=500)
+        exchanges = await state.feed.get_depth_exchanges()
+        return _truncate_items(exchanges, max_exchanges, key="exchanges")
     except Exception as e:
         return _tool_error(e)
 
@@ -459,7 +531,8 @@ async def get_historical_volatility(
     bar_size: _BarSizeParam = "1 day",
     duration: str = "1 Y",
     use_rth: bool = True,
-) -> list[dict[str, Any]] | dict[str, Any]:
+    max_bars: int = MCP_DEFAULT_BAR_LIMIT,
+) -> dict[str, Any]:
     """Get historical volatility time series from IBKR.
 
     Uses IBKR's built-in HISTORICAL_VOLATILITY whatToShow — no manual computation needed.
@@ -472,12 +545,14 @@ async def get_historical_volatility(
         bar_size: '1 min', '5 mins', '1 hour', '1 day' (default '1 day')
         duration: IBKR duration string (default '1 Y')
         use_rth: Regular trading hours only (default True)
+        max_bars: Max most-recent bars returned (default 500, max 5000)
     """
     state = _state(ctx)
     from src.feeds.ibkr_historical import ensure_historical_chunk_limit, plan_historical_auto_chunk
     from src.feeds.models import OHLCVRequest, normalize_bar_size
 
     try:
+        max_bars = _clamp(max_bars, low=1, high=MCP_MAX_BAR_LIMIT)
         request = OHLCVRequest(
             symbol=symbol,
             asset_class=_parse_asset_class(asset_class),
@@ -499,7 +574,7 @@ async def get_historical_volatility(
             )
         else:
             bars = await state.feed.load_historical_ohlcv(request, max_chunks=state.settings.ibkr_historical_max_chunks)
-        return [
+        serialized = [
             {
                 "timestamp": bar.timestamp.isoformat(),
                 "open": bar.open,
@@ -511,6 +586,7 @@ async def get_historical_volatility(
             }
             for bar in bars
         ]
+        return _truncate_items(serialized, max_bars, key="bars", keep_tail=True, extra={"symbol": symbol})
     except Exception as e:
         return _tool_error(e)
 
@@ -524,7 +600,8 @@ async def get_option_implied_volatility_series(
     bar_size: _BarSizeParam = "1 day",
     duration: str = "6 M",
     use_rth: bool = True,
-) -> list[dict[str, Any]] | dict[str, Any]:
+    max_bars: int = MCP_DEFAULT_BAR_LIMIT,
+) -> dict[str, Any]:
     """Get option implied volatility time series from IBKR.
 
     Uses IBKR's built-in OPTION_IMPLIED_VOLATILITY whatToShow for the underlying.
@@ -537,12 +614,14 @@ async def get_option_implied_volatility_series(
         bar_size: Bar size (default '1 day')
         duration: IBKR duration string (default '6 M')
         use_rth: Regular trading hours only (default True)
+        max_bars: Max most-recent bars returned (default 500, max 5000)
     """
     state = _state(ctx)
     from src.feeds.ibkr_historical import ensure_historical_chunk_limit, plan_historical_auto_chunk
     from src.feeds.models import OHLCVRequest, normalize_bar_size
 
     try:
+        max_bars = _clamp(max_bars, low=1, high=MCP_MAX_BAR_LIMIT)
         request = OHLCVRequest(
             symbol=symbol,
             asset_class=_parse_asset_class(asset_class),
@@ -564,7 +643,7 @@ async def get_option_implied_volatility_series(
             )
         else:
             bars = await state.feed.load_historical_ohlcv(request, max_chunks=state.settings.ibkr_historical_max_chunks)
-        return [
+        serialized = [
             {
                 "timestamp": bar.timestamp.isoformat(),
                 "open": bar.open,
@@ -576,6 +655,7 @@ async def get_option_implied_volatility_series(
             }
             for bar in bars
         ]
+        return _truncate_items(serialized, max_bars, key="bars", keep_tail=True, extra={"symbol": symbol})
     except Exception as e:
         return _tool_error(e)
 
@@ -589,7 +669,8 @@ async def get_yield_data(
     exchange: str = "SMART",
     currency: str = "USD",
     use_rth: bool = True,
-) -> list[dict[str, Any]] | dict[str, Any]:
+    max_bars: int = MCP_DEFAULT_BAR_LIMIT,
+) -> dict[str, Any]:
     """Get bond yield time series from IBKR.
 
     Uses IBKR yield-specific whatToShow values.
@@ -602,12 +683,14 @@ async def get_yield_data(
         exchange: Exchange (default 'SMART')
         currency: Currency (default 'USD')
         use_rth: Regular trading hours (default True)
+        max_bars: Max most-recent bars returned (default 500, max 5000)
     """
     state = _state(ctx)
     from src.feeds.ibkr_historical import ensure_historical_chunk_limit, plan_historical_auto_chunk
     from src.feeds.models import OHLCVRequest, normalize_bar_size
 
     try:
+        max_bars = _clamp(max_bars, low=1, high=MCP_MAX_BAR_LIMIT)
         request = OHLCVRequest(
             symbol=symbol,
             asset_class=_parse_asset_class("BOND"),
@@ -629,7 +712,7 @@ async def get_yield_data(
             )
         else:
             bars = await state.feed.load_historical_ohlcv(request, max_chunks=state.settings.ibkr_historical_max_chunks)
-        return [
+        serialized = [
             {
                 "timestamp": bar.timestamp.isoformat(),
                 "open": bar.open,
@@ -641,6 +724,7 @@ async def get_yield_data(
             }
             for bar in bars
         ]
+        return _truncate_items(serialized, max_bars, key="bars", keep_tail=True, extra={"symbol": symbol})
     except Exception as e:
         return _tool_error(e)
 
@@ -653,7 +737,7 @@ async def get_trading_schedule(
     currency: str = "USD",
     end_date: str = "",
     num_days: int = 7,
-) -> list[dict[str, Any]] | dict[str, Any]:
+) -> dict[str, Any]:
     """Get trading schedule for any instrument from IBKR.
 
     Returns session open/close times, overnight flags, and trading status.
@@ -663,14 +747,15 @@ async def get_trading_schedule(
         asset_class: Asset class (default 'EQUITY')
         exchange: Exchange (default 'SMART')
         currency: Currency (default 'USD')
-        end_date: End date YYYYMMDD (default today)
-        num_days: Number of days to return (default 7)
+        end_date: End date YYYYMMDD or YYYY-MM-DD (default today)
+        num_days: Number of days to return (default 7, max 60)
     """
     state = _state(ctx)
     from datetime import date as date_type
     from src.feeds.models import OHLCVRequest
 
     try:
+        num_days = _clamp(num_days, low=1, high=60)
         ref_date = date_type.fromisoformat(end_date) if end_date else date_type.today()
         request = OHLCVRequest(
             symbol=symbol,
@@ -683,12 +768,12 @@ async def get_trading_schedule(
             use_rth=True,
         )
         schedule = await state.feed.load_trading_schedule(request, ref_date=ref_date, use_rth=True)
-        if isinstance(schedule, (list, tuple)):
-            return [
-                item.model_dump(mode="json") if hasattr(item, "model_dump") else item
-                for item in schedule
-            ]
-        return [schedule.model_dump(mode="json")] if hasattr(schedule, "model_dump") else [schedule]
+        items = (
+            [item.model_dump(mode="json") if hasattr(item, "model_dump") else item for item in schedule]
+            if isinstance(schedule, (list, tuple))
+            else ([schedule.model_dump(mode="json")] if hasattr(schedule, "model_dump") else [schedule])
+        )
+        return _truncate_items(items, num_days, key="sessions", extra={"symbol": symbol})
     except Exception as e:
         return _tool_error(e)
 

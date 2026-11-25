@@ -1,6 +1,6 @@
 """Durable single-host analytics archive, separate from mutable latest-bar stores.
 
-SQLite WAL supports the API and scheduler sharing a local disk. Operations run
+SQLite WAL supports concurrent clients sharing a local disk. Operations run
 off the event loop with separate connections. Do not place this file on NFS.
 """
 

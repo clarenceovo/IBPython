@@ -2,7 +2,7 @@
 name = "ibpython-market-data"
 version = "0.1.0"
 description = "Async market data feed and transport foundation for systematic trading research and live workflows."
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
   "pydantic>=2.10",
   "pydantic-settings>=2.6",
@@ -10,13 +10,21 @@ dependencies = [
   "psycopg[binary]>=3.2",
   "psycopg-pool>=3.2",
   "questdb>=4.1",
+  "aiomysql>=0.2.0",
   "ib-async>=2.1.0",
-  "pandas>=2.2",
   "python-dotenv>=1.0",
   "fastapi==0.142.2",
-  "uvicorn[standard]>=0.30",
+  "uvicorn>=0.30",
+  "websockets>=10.4",
+  "PyYAML>=5.1",
   "httpx>=0.27",
-  "mcp[cli]>=1.0,<2",
+  "mcp>=1.0,<2",
+  "opentelemetry-api>=1.30",
+  "opentelemetry-sdk>=1.30",
+  "opentelemetry-exporter-otlp-proto-http>=1.30",
+  "opentelemetry-instrumentation-fastapi>=0.66b0",
+  "opentelemetry-instrumentation-httpx>=0.66b0",
+  "opentelemetry-instrumentation-redis>=0.66b0",
 ]
 
 [tool.pytest.ini_options]
@@ -24,7 +32,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.ruff]
-target-version = "py313"
+target-version = "py314"
 line-length = 140
 
 [tool.ruff.lint]
@@ -35,7 +43,7 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.14"
 ignore_missing_imports = true
 warn_unused_ignores = false
 show_error_codes = true

@@ -455,6 +455,7 @@ class IBKRWebAPIClient:
         verify_ssl: bool = False,
         timeout_seconds: float = 20.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        disable_order_submission: bool = False,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.bearer_token = bearer_token.strip()
@@ -462,6 +463,7 @@ class IBKRWebAPIClient:
         self.verify_ssl = verify_ssl
         self.timeout_seconds = timeout_seconds
         self._transport = transport
+        self.disable_order_submission = disable_order_submission
         self._client: httpx.AsyncClient | None = None
 
     def _headers(self) -> dict[str, str]:
@@ -564,6 +566,12 @@ class IBKRWebAPIClient:
         return EventContractHistoryResponse.from_payload(request.con_id, payload)
 
     async def place_order(self, request: EventContractOrderRequest) -> EventContractOrderResponse:
+        if self.disable_order_submission:
+            from src.feeds.exceptions import IBKROrderSubmissionDisabledError
+
+            raise IBKROrderSubmissionDisabledError(
+                "Live Event Contract order submission is disabled by IBKR_DISABLE_ORDER_SUBMISSION=true"
+            )
         ticket = request.to_ticket()
         payload = await self._request(
             "POST",

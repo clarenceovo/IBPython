@@ -1,4 +1,4 @@
-"""Core MCP tools: symbol resolution, capabilities, server time, rate limits, cache & scheduler health."""
+"""Core MCP tools: symbol resolution, capabilities, server time, rate limits, and cache."""
 
 from __future__ import annotations
 
@@ -74,19 +74,6 @@ async def get_ibkr_rate_limits(ctx: Context) -> dict[str, Any]:
         return _tool_error(e)
 
 
-async def get_scheduler_health(ctx: Context) -> dict[str, Any]:
-    """Get scheduler health status for all tracked jobs."""
-    state = _state(ctx)
-    try:
-        scheduler = getattr(state, "scheduler", None)
-        if scheduler is None or getattr(scheduler, "_health_monitor", None) is None:
-            return {"status": "not_configured", "jobs": {}}
-        report = scheduler._health_monitor.get_health_status()
-        return report.model_dump(mode="json")
-    except Exception as e:
-        return _tool_error(e)
-
-
 async def get_cache_stats(ctx: Context) -> dict[str, Any]:
     """Get market data TTL cache statistics."""
     state = _state(ctx)
@@ -103,7 +90,6 @@ def register(mcp: FastMCP) -> None:
         get_gateway_capabilities,
         get_server_time,
         get_ibkr_rate_limits,
-        get_scheduler_health,
         get_cache_stats,
     ):
         mcp.tool(annotations=_READ_TOOL)(fn)

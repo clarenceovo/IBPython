@@ -6,7 +6,7 @@ from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from src.mcp_app.common import _READ_TOOL, _state, _tool_error
+from src.mcp_app.common import _READ_TOOL, _clamp, _state, _tool_error, _truncate_items
 
 
 async def load_account_summary(
@@ -28,12 +28,20 @@ async def load_account_summary(
         return _tool_error(e)
 
 
-async def load_live_positions(ctx: Context) -> list[dict[str, Any]] | dict[str, Any]:
-    """Load all live positions from IBKR."""
+async def load_live_positions(
+    ctx: Context,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """Load live positions from IBKR with bounded output.
+
+    Args:
+        limit: Max positions returned (default 200, max 1000)
+    """
     state = _state(ctx)
     try:
+        limit = _clamp(limit, low=1, high=1000)
         positions = await state.feed.load_live_positions()
-        return [
+        serialized = [
             {
                 "symbol": p.symbol,
                 "sec_type": p.sec_type,
@@ -46,6 +54,7 @@ async def load_live_positions(ctx: Context) -> list[dict[str, Any]] | dict[str, 
             }
             for p in positions
         ]
+        return _truncate_items(serialized, limit, key="positions")
     except Exception as e:
         return _tool_error(e)
 
@@ -53,19 +62,23 @@ async def load_live_positions(ctx: Context) -> list[dict[str, Any]] | dict[str, 
 async def load_portfolio_items(
     ctx: Context,
     account: str = "",
-) -> dict[str, Any] | list[dict[str, Any]]:
-    """Load portfolio items (positions with market data) from IBKR.
+    limit: int = 200,
+) -> dict[str, Any]:
+    """Load portfolio items (positions with market data) from IBKR with bounded output.
 
-    Returns a list of portfolio items with symbol, position, market price,
-    market value, average cost, unrealized PnL, realized PnL, etc.
+    Returns portfolio items with symbol, position, market price, market value,
+    average cost, unrealized PnL, realized PnL, plus ``total_count`` and ``truncated``.
 
     Args:
         account: Account ID (empty string for default account)
+        limit: Max portfolio items returned (default 200, max 1000)
     """
     state = _state(ctx)
     try:
+        limit = _clamp(limit, low=1, high=1000)
         items = await state.feed.load_portfolio_items(account=account)
-        return [item.model_dump() for item in items]
+        serialized = [item.model_dump(mode="json") for item in items]
+        return _truncate_items(serialized, limit, key="items", extra={"account": account})
     except Exception as e:
         return _tool_error(e)
 
@@ -129,7 +142,7 @@ async def load_position_pnl(
 async def get_all_open_orders(
     ctx: Context,
     limit: int = 100,
-) -> list[dict[str, Any]] | dict[str, Any]:
+) -> dict[str, Any]:
     """Get all open orders across ALL API clients and TWS (not just current session).
 
     Unlike load_open_orders which returns only current client's orders,
@@ -140,9 +153,10 @@ async def get_all_open_orders(
     """
     state = _state(ctx)
     try:
+        limit = _clamp(limit, low=1, high=1000)
         orders = await state.feed.get_all_open_orders()
-        limit = min(max(limit, 1), 1000)
-        return [o.model_dump(mode="json") if hasattr(o, "model_dump") else o for o in orders[:limit]]
+        serialized = [o.model_dump(mode="json") if hasattr(o, "model_dump") else o for o in orders]
+        return _truncate_items(serialized, limit, key="orders")
     except Exception as e:
         return _tool_error(e)
 

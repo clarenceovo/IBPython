@@ -19,7 +19,7 @@ async def run_quality_repairs(store: AnalyticsStore, loader: OHLCVLoader, *, lim
         try:
             original = await store.get_dataset(job.dataset_id)
             if original and original.manifest.primary_persistence == "failed" and not persist:
-                raise ValueError("primary persistence repair requires the scheduler with persist=true")
+                raise ValueError("primary persistence repair requires a configured store and persist=true")
             if job.request.continuous:
                 raise ValueError("bounded repair of vendor continuous futures is unsupported; capture dated contracts")
             result = await loader.load_detailed(job.request, persist=persist, cache_latest=False, enqueue_repair=False)

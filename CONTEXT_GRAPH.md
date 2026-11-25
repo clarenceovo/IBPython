@@ -4,7 +4,7 @@ Project map for IBPython (IBKR data + trading bridge). ASD-STE100 style: short s
 
 ## Purpose
 
-Python service over TWS API (ib_async) plus IBKR Web API. It serves market data, reference data, research, and guarded order access. Three front ends share one state: REST (FastAPI), MCP server, scheduler.
+Python service over TWS API (ib_async) plus IBKR Web API. It serves market data, reference data, research, and guarded order access. REST (FastAPI) and the MCP server expose these capabilities.
 
 ## Layers
 
@@ -24,7 +24,7 @@ Python service over TWS API (ib_async) plus IBKR Web API. It serves market data,
 - `src/webapp/middleware/rate_limit.py` — rate-limit gatekeeper. Per-IP 60s fixed window; over-limit strikes escalate blocks (60s/5m/15m) and decay after 10 clean minutes; blocked IPs get fast 429s with `Retry-After`; allowed responses carry `X-RateLimit-*` headers. Redis-backed state (`RateLimit:ip/strikes/block:{ip}`) with in-process fallback; snapshot feeds the Matrix publisher.
 - `src/mcp_server.py` — MCP tools over the same feed state.
 - `src/feeds/` — IBKR clients. `ibkr_feed.py` is the facade. Sub-clients: `ibkr_order_client.py` (orders), `ibkr_account_feed.py`, `ibkr_options_feed.py`, `ibkr_historical.py`, `event_contracts.py` (Web API).
-- `src/transport/` — Redis, QuestDB, MySQL, metrics, scheduler.
+- `src/transport/` — Redis, QuestDB, MySQL, metrics.
 - `src/config/` — settings (pydantic, env-driven) and constants.
 - `tests/` — pytest. Router tests fake the IB connection.
 

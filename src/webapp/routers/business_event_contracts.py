@@ -129,7 +129,11 @@ async def build_event_contract_order(
     )
     return EventContractOrderBuildResponse(
         account_id=payload.account_id,
-        live_order_enabled=state.settings.ibkr_event_contracts_live_orders_enabled,
+        live_order_enabled=(
+            state.settings.ibkr_orders_enabled
+            and state.settings.ibkr_event_contracts_live_orders_enabled
+            and not state.settings.ibkr_disable_order_submission
+        ),
         ticket=payload.to_ticket(),
         warnings=warnings,
     )
@@ -149,6 +153,11 @@ async def place_event_contract_order(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="order pathways are disabled; set IBKR_ORDERS_ENABLED=true to enable all order operations",
+        )
+    if state.settings.ibkr_disable_order_submission:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="order submission is disabled by IBKR_DISABLE_ORDER_SUBMISSION=true",
         )
     if not state.settings.ibkr_event_contracts_live_orders_enabled:
         raise HTTPException(

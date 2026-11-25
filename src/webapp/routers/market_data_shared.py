@@ -37,7 +37,7 @@ class HistoricalOHLCVLoadRequest(BaseModel):
     )
     persist: bool = Field(
         default=False,
-        description="Deprecated: API OHLCV persistence is disabled (501 when true); durable writes are owned by the scheduler backfiller.",
+        description="Deprecated: API OHLCV persistence is disabled (501 when true); durable writes are owned by the backfiller.",
     )
     cache_latest: bool = Field(default=True, description="Also store the newest bar in Redis for the latest-bar endpoint.")
     use_ttl_cache: bool = Field(default=True, description="Serve identical repeated requests from the TTL cache.")
@@ -143,7 +143,7 @@ class UnifiedOHLCVLoadRequest(BaseModel):
     )
     persist: bool = Field(
         default=False,
-        description="Deprecated: API OHLCV persistence is disabled (501 when true); durable writes are owned by the scheduler backfiller.",
+        description="Deprecated: API OHLCV persistence is disabled (501 when true); durable writes are owned by the backfiller.",
     )
     cache_latest: bool = Field(default=True, description="Also store the newest bar in Redis for the latest-bar endpoint.")
     use_ttl_cache: bool = Field(default=True, description="Serve identical repeated requests from the TTL cache.")
@@ -306,7 +306,7 @@ class MinimalOHLCVLoadControls(BaseModel):
     use_rth: bool = Field(default=True, description="Restrict bars to regular trading hours.")
     persist: bool = Field(
         default=False,
-        description="Deprecated: API OHLCV persistence is disabled (501 when true); durable writes are owned by the scheduler backfiller.",
+        description="Deprecated: API OHLCV persistence is disabled (501 when true); durable writes are owned by the backfiller.",
     )
     cache_latest: bool = Field(default=True, description="Also store the newest bar in Redis for the latest-bar endpoint.")
     use_ttl_cache: bool = Field(default=True, description="Serve identical repeated requests from the TTL cache.")
@@ -499,7 +499,7 @@ async def load_ohlcv_with_controls(
     if persist:
         raise HTTPException(
             status_code=501,
-            detail="API OHLCV persistence is disabled; use the scheduler/backfiller persistence path",
+            detail="API OHLCV persistence is disabled; use the backfiller",
         )
     if request.asset_class is AssetClass.FUTURE and request.continuous and (
         start_datetime is not None or request.start_datetime is not None or request.end_datetime is not None

@@ -9,7 +9,10 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
-from backfiller import api_bar_to_ohlcv_bar, build_requests, chunk_ranges, fetch_chunk, load_symbol_specs, parse_datetime
+from src.config.settings import load_settings
+from src.transport.mysql_client import MySQLClient
+from src.transport.questdb_client import QuestDBClient
+from backfiller import build_market_data_store, api_bar_to_ohlcv_bar, build_requests, chunk_ranges, fetch_chunk, load_symbol_specs, parse_datetime
 from src.feeds.models import AssetClass, OHLCVRequest
 from src.transport.questdb_queries import bar_to_row
 
@@ -178,3 +181,15 @@ async def test_fetch_chunk_disables_api_persistence_and_latest_cache() -> None:
     assert payload["cache_latest"] is False
     assert payload["use_ttl_cache"] is False
     assert bars[0].timestamp == datetime(2026, 5, 28, 13, 30, tzinfo=timezone.utc)
+
+
+def test_build_market_data_store_selects_questdb_by_default() -> None:
+    settings = load_settings(env_file=None, include_os_environ=False)
+
+    assert isinstance(build_market_data_store(settings), QuestDBClient)
+
+
+def test_build_market_data_store_selects_mysql() -> None:
+    settings = load_settings(env_file=None, include_os_environ=False, market_data_db_backend="mysql")
+
+    assert isinstance(build_market_data_store(settings), MySQLClient)

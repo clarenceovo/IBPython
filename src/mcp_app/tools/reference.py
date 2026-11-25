@@ -7,13 +7,51 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 
 from src.mcp_app.common import (
+    MCP_DEFAULT_TEXT_CHARS,
     _AssetClassParam,
     _READ_TOOL,
+    _clamp,
     _error,
     _parse_asset_class,
     _state,
     _tool_error,
+    _truncate_items,
+    _truncate_text,
 )
+
+
+def _bound_wsh_report(report: Any, *, max_events: int, max_chars: int) -> dict[str, Any]:
+    """Bound WSH/calendar payloads (list or large dict/JSON) with {returned_count, total_count, truncated}."""
+    payload = report.payload
+    extra = {
+        "received_at": report.received_at.isoformat(),
+        "source": report.source,
+        "metadata": report.metadata,
+    }
+    if isinstance(payload, list):
+        return _truncate_items(payload, max_events, key="payload", extra=extra)
+    if isinstance(payload, dict):
+        # Some WSH responses nest events under a single list key (e.g. 'events' or 'data').
+        for list_key in ("events", "data", "items", "results"):
+            inner = payload.get(list_key)
+            if isinstance(inner, list):
+                env = _truncate_items(inner, max_events, key="items")
+                bounded_dict = {**payload, list_key: env["items"]}
+                return {
+                    **extra,
+                    "payload": bounded_dict,
+                    "returned_count": env["returned_count"],
+                    "total_count": env["total_count"],
+                    "truncated": env["truncated"],
+                }
+        return {
+            **extra,
+            "payload": payload,
+            "returned_count": len(payload),
+            "total_count": len(payload),
+            "truncated": False,
+        }
+    return _truncate_text(str(payload or ""), max_chars, key="payload", extra=extra)
 
 
 async def load_fundamentals(
@@ -42,13 +80,13 @@ async def load_news(
     asset_class: _AssetClassParam = "EQUITY",
     exchange: str = "SMART",
     currency: str = "USD",
-) -> dict[str, Any] | list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Load recent news headlines for a symbol from IBKR.
 
     Args:
         symbol: Ticker symbol (e.g. 'AAPL', 'BTC')
         provider_codes: News provider codes (default ['BRFG', 'BRFUPDN'])
-        limit: Max articles to return (default 20, max 300)
+        limit: Max articles to return (default 20, max 100)
         asset_class: Asset class (CRYPTO, FUTURES, INDEX, FX, EQUITY, BOND, OPTION; default 'EQUITY')
         exchange: Exchange (default 'SMART')
         currency: Currency (default 'USD')
@@ -70,19 +108,21 @@ async def load_news(
         return _error(f"Could not resolve contract for {symbol}", code="CONTRACT_RESOLUTION_FAILED")
 
     try:
+        limit = _clamp(limit, low=1, high=100)
         providers = tuple(provider_codes or ["BRFG", "BRFUPDN"])
         request = HistoricalNewsRequest(
             con_id=con_id,
             provider_codes=providers,
-            total_results=min(limit, 300),
+            total_results=min(limit + 1, 300),
         )
         articles = await state.feed.load_historical_news(request)
-        return [a.model_dump() for a in articles]
+        serialized = [a.model_dump(mode="json") for a in articles]
+        return _truncate_items(serialized, limit, key="articles", extra={"symbol": symbol, "con_id": con_id})
     except Exception as e:
         return _tool_error(e)
 
 
-async def load_news_providers(ctx: Context) -> dict[str, Any] | list[dict[str, Any]]:
+async def load_news_providers(ctx: Context) -> dict[str, Any]:
     """Load available IBKR news providers for the current account.
 
     Returns a list of news providers the account is entitled to access,
@@ -91,10 +131,8 @@ async def load_news_providers(ctx: Context) -> dict[str, Any] | list[dict[str, A
     state = _state(ctx)
     try:
         providers = await state.feed.load_news_providers()
-        return [
-            {"provider_code": p.provider_code, "provider_name": p.provider_name}
-            for p in providers
-        ]
+        items = [{"provider_code": p.provider_code, "provider_name": p.provider_name} for p in providers]
+        return _truncate_items(items, 200, key="providers")
     except Exception as e:
         return _tool_error(e)
 
@@ -103,16 +141,18 @@ async def load_news_article(
     ctx: Context,
     provider_code: str,
     article_id: str,
+    max_chars: int = MCP_DEFAULT_TEXT_CHARS,
 ) -> dict[str, Any]:
     """Load the full text of a news article from IBKR.
 
     Use load_news first to get headlines and article IDs, then call this
-    tool to retrieve the full article body. Bodies longer than 20,000
-    characters are truncated; 'truncated' is true then.
+    tool to retrieve the full article body. Bodies longer than ``max_chars``
+    characters are truncated with ``total_count`` and ``truncated``.
 
     Args:
         provider_code: News provider code (e.g. 'BRFG', 'BRFUPDN')
         article_id: Article ID from a news headline
+        max_chars: Max article body characters returned (default 20000, max 100000)
     """
     state = _state(ctx)
     from src.feeds.news import NewsArticleRequest
@@ -120,15 +160,17 @@ async def load_news_article(
     try:
         request = NewsArticleRequest(provider_code=provider_code, article_id=article_id)
         article = await state.feed.load_news_article(request)
-        text = article.article_text
-        return {
-            "provider_code": article.provider_code,
-            "article_id": article.article_id,
-            "article_type": article.article_type,
-            "article_text": text[:20_000],
-            "truncated": len(text) > 20_000,
-            "received_at": article.received_at.isoformat(),
-        }
+        return _truncate_text(
+            article.article_text,
+            max_chars,
+            key="article_text",
+            extra={
+                "provider_code": article.provider_code,
+                "article_id": article.article_id,
+                "article_type": article.article_type,
+                "received_at": article.received_at.isoformat(),
+            },
+        )
     except Exception as e:
         return _tool_error(e)
 
@@ -136,20 +178,27 @@ async def load_news_article(
 async def get_news_bulletins(
     ctx: Context,
     all_messages: bool = True,
-) -> list[dict[str, Any]] | dict[str, Any]:
+    max_bulletins: int = 50,
+) -> dict[str, Any]:
     """Get IBKR system news bulletins (exchange halts, margin changes, etc).
 
     Args:
         all_messages: Return all historical bulletins (default True)
+        max_bulletins: Max bulletins returned (default 50, max 200)
     """
     state = _state(ctx)
     try:
-        return await state.feed.get_news_bulletins(all_messages=all_messages)
+        max_bulletins = _clamp(max_bulletins, low=1, high=200)
+        bulletins = await state.feed.get_news_bulletins(all_messages=all_messages)
+        return _truncate_items(bulletins, max_bulletins, key="bulletins")
     except Exception as e:
         return _tool_error(e)
 
 
-async def load_wsh_metadata(ctx: Context) -> dict[str, Any]:
+async def load_wsh_metadata(
+    ctx: Context,
+    max_chars: int = MCP_DEFAULT_TEXT_CHARS,
+) -> dict[str, Any]:
     """Load Wall Street Horizon (WSH) metadata from IBKR.
 
     Returns the WSH metadata report including available event types,
@@ -158,12 +207,7 @@ async def load_wsh_metadata(ctx: Context) -> dict[str, Any]:
     state = _state(ctx)
     try:
         report = await state.feed.load_wsh_metadata()
-        return {
-            "received_at": report.received_at.isoformat(),
-            "source": report.source,
-            "payload": report.payload,
-            "metadata": report.metadata,
-        }
+        return _bound_wsh_report(report, max_events=200, max_chars=max_chars)
     except Exception as e:
         return _tool_error(e)
 
@@ -185,13 +229,14 @@ async def load_wsh_event_data(
         con_id: Single IBKR contract ID to query events for
         con_ids: List of IBKR contract IDs to query events for
         country: Country filter (default 'All')
-        limit: Max events to return per region (default 10)
+        limit: Max events to return per region (default 10, max 100)
         event_types: WSH event type tags (e.g. ['EARN'], ['DIVIDEND'])
     """
     state = _state(ctx)
     from src.feeds.fundamental_data import WSHEventDataRequest
 
     try:
+        limit = _clamp(limit, low=1, high=100)
         request = WSHEventDataRequest(
             con_id=con_id,
             con_ids=con_ids or [],
@@ -200,12 +245,7 @@ async def load_wsh_event_data(
             event_types=event_types or [],
         )
         report = await state.feed.load_wsh_event_data(request)
-        return {
-            "received_at": report.received_at.isoformat(),
-            "source": report.source,
-            "payload": report.payload,
-            "metadata": report.metadata,
-        }
+        return _bound_wsh_report(report, max_events=limit, max_chars=MCP_DEFAULT_TEXT_CHARS)
     except Exception as e:
         return _tool_error(e)
 
@@ -225,7 +265,7 @@ async def load_economic_calendar(
 
     Args:
         country: Country code (default 'US')
-        limit: Max events to return (default 20)
+        limit: Max events to return (default 20, max 100)
         start_date: Optional start date in ISO format (e.g. '2026-06-01')
         end_date: Optional end date in ISO format (e.g. '2026-06-30')
     """
@@ -234,6 +274,7 @@ async def load_economic_calendar(
     from src.feeds.fundamental_data import WSHEventDataRequest
 
     try:
+        limit = _clamp(limit, low=1, high=100)
         sd = date_type.fromisoformat(start_date) if start_date else None
         ed = date_type.fromisoformat(end_date) if end_date else None
         request = WSHEventDataRequest(
@@ -243,12 +284,7 @@ async def load_economic_calendar(
             end_date=ed,
         )
         report = await state.feed.load_wsh_event_data(request)
-        return {
-            "received_at": report.received_at.isoformat(),
-            "source": report.source,
-            "payload": report.payload,
-            "metadata": report.metadata,
-        }
+        return _bound_wsh_report(report, max_events=limit, max_chars=MCP_DEFAULT_TEXT_CHARS)
     except Exception as e:
         return _tool_error(e)
 

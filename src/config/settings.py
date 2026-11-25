@@ -241,6 +241,15 @@ class Settings(BaseSettings):
         alias=constants.IBKR_ORDERS_ENABLED_ENV,
         description="Master switch for all order-writing pathways (place/modify/cancel/bracket/OCA/preview/exercise). Default false: read-only.",
     )
+    ibkr_disable_order_submission: bool = Field(
+        default=constants.DEFAULT_IBKR_DISABLE_ORDER_SUBMISSION,
+        alias=constants.IBKR_DISABLE_ORDER_SUBMISSION_ENV,
+        description=(
+            "Kill switch that blocks live order submission (place/bracket/OCA/modify/exercise and "
+            "live Event Contracts) even when IBKR_ORDERS_ENABLED=true, while keeping preview/what-if "
+            "and order cancellation available."
+        ),
+    )
     mcp_toolsets: str = Field(
         default=constants.DEFAULT_MCP_TOOLSETS,
         alias=constants.MCP_TOOLSETS_ENV,

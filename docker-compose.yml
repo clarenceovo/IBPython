@@ -6,14 +6,14 @@ x-app-env: &app-env
   IBKR_CONNECTION_CONTROL_POLL_SECONDS: ${IBKR_CONNECTION_CONTROL_POLL_SECONDS:-1}
   REDIS_URL: ${REDIS_DOCKER_URL:-redis://redisinsight.novatradingtech.com:6379/0}
   REDIS_PASSWORD: ${REDIS_PASSWORD:-}
-  QUESTDB_HOST: questdb
-  QUESTDB_PORT: 8812
-  QUESTDB_WRITE_PORT: 9009
+  QUESTDB_HOST: ${QUESTDB_DOCKER_HOST:-questdb}
+  QUESTDB_PORT: ${QUESTDB_PORT:-8812}
+  QUESTDB_WRITE_PORT: ${QUESTDB_WRITE_PORT:-9009}
   QUESTDB_USER: ${QUESTDB_USER:-admin}
   QUESTDB_PASSWORD: ${QUESTDB_PASSWORD:-quest}
   QUESTDB_DATABASE: ${QUESTDB_DATABASE:-qdb}
-  MYSQL_HOST: mysql
-  MYSQL_PORT: 3306
+  MYSQL_HOST: ${MYSQL_DOCKER_HOST:-mysql}
+  MYSQL_PORT: ${MYSQL_PORT:-3306}
   MYSQL_USER: ${MYSQL_USER:-root}
   MYSQL_PASSWORD: ${MYSQL_PASSWORD:-}
   MYSQL_DATABASE: ${MYSQL_DATABASE:-trading}
@@ -46,7 +46,7 @@ services:
     image: ibpython-fastapi:latest
     init: true
     ports:
-      - "8000:8000"
+      - "${IBPYTHON_BIND_IP:-127.0.0.1}:8000:8000"
     env_file:
       - path: .env
         required: false
@@ -85,7 +85,7 @@ services:
     image: ibpython-mcp:latest
     init: true
     ports:
-      - "${MCP_HTTP_HOST_PORT:-9685}:${MCP_HTTP_PORT:-9000}"
+      - "${IBPYTHON_BIND_IP:-127.0.0.1}:${MCP_HTTP_HOST_PORT:-9685}:${MCP_HTTP_PORT:-9000}"
     env_file:
       - path: .env
         required: false
@@ -105,7 +105,7 @@ services:
           cpus: "0.25"
           memory: 128M
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1', 9000)); s.close()"]
+      test: ["CMD", "python", "-c", "import os, socket; socket.create_connection(('127.0.0.1', int(os.environ['MCP_HTTP_PORT'])), timeout=3).close()"]
       interval: 30s
       timeout: 5s
       retries: 3

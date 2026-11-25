@@ -37,6 +37,7 @@ from src.mcp_app import (
 )
 from src.mcp_app.common import (
     MCP_ORDERS_DISABLED_ERROR,
+    MCP_ORDER_SUBMISSION_DISABLED_ERROR,
     _DESTRUCTIVE_TOOL,
     _ORDER_TOOL,
     _READ_TOOL,
@@ -74,7 +75,6 @@ from src.mcp_app.tools.core import (
     get_cache_stats,
     get_gateway_capabilities,
     get_ibkr_rate_limits,
-    get_scheduler_health,
     get_server_time,
     resolve_symbol,
 )
@@ -127,7 +127,6 @@ from src.mcp_app.tools.storage import (
     get_latest_fx_option_snapshot,
     get_redis_key,
     get_snapshot_watchlist,
-    list_scheduler_jobs,
     list_snapshot_watchlists,
     query_equity_snapshots,
     query_fx_option_snapshots,
@@ -156,7 +155,7 @@ def get_server_status() -> str:
         "tools": _registered_tool_summaries(mcp),
         "databases": {
             "questdb": "Time-series OHLCV, snapshots, tick data",
-            "redis": "Latest bars cache, scheduler state, pacing bookmarks",
+            "redis": "Latest bars cache, pacing bookmarks",
             "ibkr": "Live TWS/Gateway connection for real-time data",
         },
     }, indent=2)

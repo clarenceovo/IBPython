@@ -1,8 +1,9 @@
-"""Shared helpers, error builders, annotations, and typed parameters for MCP tools."""
+"""Shared helpers, error builders, truncation envelopes, annotations, and typed parameters for MCP tools."""
 
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import Annotated, Any
 
 from mcp.server.fastmcp import Context
@@ -15,6 +16,21 @@ MCP_ORDERS_DISABLED_ERROR = (
     "order pathways are disabled; set IBKR_ORDERS_ENABLED=true to enable "
     "place/modify/cancel/bracket/OCA/preview/exercise operations"
 )
+
+MCP_ORDER_SUBMISSION_DISABLED_ERROR = (
+    "order submission is disabled by IBKR_DISABLE_ORDER_SUBMISSION=true; "
+    "preview_order (what-if) and order cancellation remain available"
+)
+
+#: Default and ceiling limits to protect LLM context windows from runaway payloads.
+MCP_DEFAULT_BAR_LIMIT = 500
+MCP_MAX_BAR_LIMIT = 5000
+MCP_DEFAULT_TICK_LIMIT = 500
+MCP_MAX_TICK_LIMIT = 5000
+MCP_DEFAULT_SQL_ROWS = 500
+MCP_MAX_SQL_ROWS = 5000
+MCP_DEFAULT_TEXT_CHARS = 20_000
+MCP_MAX_TEXT_CHARS = 100_000
 
 _READ_TOOL = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
 _WRITE_TOOL = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
@@ -61,6 +77,58 @@ def _state(ctx: Context) -> IBKRRestAppState:
     return ctx.request_context.lifespan_context["ibkr_state"]
 
 
+def _clamp(value: int, *, low: int = 1, high: int) -> int:
+    """Clamp an integer limit into ``[low, high]``."""
+    return min(max(int(value), low), high)
+
+
+def _truncate_items(
+    items: Sequence[Any],
+    max_items: int,
+    *,
+    key: str = "items",
+    keep_tail: bool = False,
+    upstream_truncated: bool = False,
+    total_count: int | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a bounded collection envelope with ``total_count``, ``returned_count``, and ``truncated``."""
+    seq = list(items)
+    known_total = total_count if total_count is not None else len(seq)
+    cap = max(1, int(max_items))
+    local_truncated = len(seq) > cap
+    sliced = seq[-cap:] if (local_truncated and keep_tail) else seq[:cap]
+    payload: dict[str, Any] = {}
+    if extra:
+        payload.update(extra)
+    payload[key] = sliced
+    payload["returned_count"] = len(sliced)
+    payload["total_count"] = max(known_total, len(seq))
+    payload["truncated"] = bool(local_truncated or upstream_truncated or known_total > len(sliced))
+    return payload
+
+
+def _truncate_text(
+    text: str,
+    max_chars: int = MCP_DEFAULT_TEXT_CHARS,
+    *,
+    key: str = "text",
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a bounded string envelope with ``total_count`` (char length), ``returned_count``, and ``truncated``."""
+    cap = _clamp(max_chars, low=100, high=MCP_MAX_TEXT_CHARS)
+    total = len(text)
+    sliced = text[:cap]
+    payload: dict[str, Any] = {}
+    if extra:
+        payload.update(extra)
+    payload[key] = sliced
+    payload["returned_count"] = len(sliced)
+    payload["total_count"] = total
+    payload["truncated"] = total > cap
+    return payload
+
+
 def _error(message: str, *, code: str, retryable: bool = False) -> dict[str, Any]:
     """Build the shared MCP error payload: message, stable code, retry flag."""
     return {"error": message, "code": code, "retryable": retryable}
@@ -75,12 +143,15 @@ def _tool_error(exc: BaseException) -> dict[str, Any]:
         IBKRContractResolutionError,
         IBKRMarketDataUnavailableError,
         IBKROrderError,
+        IBKROrderSubmissionDisabledError,
         IBKROrdersDisabledError,
         IBKRPacingError,
         IBKRUnsupportedFeatureError,
         QuestDBConnectionError,
     )
 
+    if isinstance(exc, IBKROrderSubmissionDisabledError):
+        return _error(MCP_ORDER_SUBMISSION_DISABLED_ERROR, code="ORDER_SUBMISSION_DISABLED")
     if isinstance(exc, IBKROrdersDisabledError):
         return _error(MCP_ORDERS_DISABLED_ERROR, code="ORDERS_DISABLED")
     if isinstance(exc, IBKRConnectionDisabledError):

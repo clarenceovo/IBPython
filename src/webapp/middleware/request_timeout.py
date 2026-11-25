@@ -27,9 +27,11 @@ _EXEMPT_PREFIXES = (
     "/api/v1/system/health",
     "/api/v1/system/readiness",
     "/metrics",
+    "/llms.txt",
     "/api/v1/streaming/ticker",
     "/api/v1/account/pnl/account/stream",
     "/api/v1/account/pnl/position/stream",
+    "/api/v1/realtime-bars/stream/",
 )
 
 

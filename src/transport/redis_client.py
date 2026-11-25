@@ -32,22 +32,6 @@ def index_composition_key(index_symbol: str) -> str:
     return constants.REDIS_INDEX_COMPOSITION_KEY_TEMPLATE.format(index_symbol=index_symbol.upper())
 
 
-def scheduler_job_key(job_name: str) -> str:
-    return constants.REDIS_SCHEDULER_JOB_KEY_TEMPLATE.format(job_name=job_name)
-
-
-def scheduler_lease_key(job_name: str) -> str:
-    return constants.REDIS_SCHEDULER_LEASE_KEY_TEMPLATE.format(job_name=_redis_token(job_name))
-
-
-def scheduler_run_latest_key(job_name: str) -> str:
-    return constants.REDIS_SCHEDULER_RUN_LATEST_KEY_TEMPLATE.format(job_name=_redis_token(job_name))
-
-
-def scheduler_run_history_key(job_name: str) -> str:
-    return constants.REDIS_SCHEDULER_RUN_HISTORY_KEY_TEMPLATE.format(job_name=_redis_token(job_name))
-
-
 def ohlcv_snapshot_last_ts_key(job_name: str, symbol: str, bar_size: str) -> str:
     return constants.REDIS_OHLCV_SNAPSHOT_LAST_TS_KEY_TEMPLATE.format(
         job_name=_redis_token(job_name),
@@ -114,7 +98,7 @@ def order_envelope_key(order_uuid: str) -> str:
 
 
 class MarketDataRedisClient:
-    """Async Redis transport for latest bars, index composition, and scheduler jobs."""
+    """Async Redis transport for latest bars and index composition."""
 
     def __init__(
         self,
@@ -192,19 +176,6 @@ class MarketDataRedisClient:
             payload = payload.decode("utf-8")
         return IndexCompositionPayload.model_validate_json(payload)
 
-    async def set_scheduler_job(self, job_name: str, payload_json: str) -> str:
-        await self.connect()
-        key = scheduler_job_key(job_name)
-        await self._client.set(key, payload_json)
-        return key
-
-    async def scan_scheduler_jobs(self) -> list[str]:
-        await self.connect()
-        keys: list[str] = []
-        async for key in self._client.scan_iter(constants.REDIS_SCHEDULER_JOB_SCAN_PATTERN):
-            keys.append(key.decode("utf-8") if isinstance(key, bytes) else key)
-        return keys
-
     async def get_raw(self, key: str) -> bytes | str | None:
         await self.connect()
         return await self._client.get(key)
@@ -252,32 +223,6 @@ class MarketDataRedisClient:
                     "last_error": "Invalid client heartbeat",
                 }
         return list(records.values())
-
-    async def acquire_scheduler_lease(self, job_name: str, owner_token: str, *, ttl_seconds: float) -> bool:
-        await self.connect()
-        key = scheduler_lease_key(job_name)
-        ttl = max(1, int(ttl_seconds))
-        return bool(await self._client.set(key, owner_token, nx=True, ex=ttl))
-
-    async def release_scheduler_lease(self, job_name: str, owner_token: str) -> bool:
-        await self.connect()
-        key = scheduler_lease_key(job_name)
-        script = """
-        if redis.call("GET", KEYS[1]) == ARGV[1] then
-            return redis.call("DEL", KEYS[1])
-        end
-        return 0
-        """
-        return bool(await self._client.eval(script, 1, key, owner_token))
-
-    async def record_scheduler_run(self, job_name: str, payload: dict[str, Any]) -> None:
-        await self.connect()
-        encoded = json.dumps(payload, sort_keys=True, default=str)
-        latest_key = scheduler_run_latest_key(job_name)
-        history_key = scheduler_run_history_key(job_name)
-        await self._client.set(latest_key, encoded)
-        await self._client.lpush(history_key, encoded)
-        await self._client.ltrim(history_key, 0, constants.REDIS_SCHEDULER_RUN_HISTORY_MAXLEN - 1)
 
     async def raw_client(self) -> Any:
         await self.connect()

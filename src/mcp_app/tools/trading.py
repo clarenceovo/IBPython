@@ -8,6 +8,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from src.mcp_app.common import (
     MCP_ORDERS_DISABLED_ERROR,
+    MCP_ORDER_SUBMISSION_DISABLED_ERROR,
     _AssetClassParam,
     _DESTRUCTIVE_TOOL,
     _ExerciseActionParam,
@@ -24,12 +25,21 @@ from src.mcp_app.common import (
 )
 
 
+def _require_mcp_submission_allowed(state: Any) -> dict[str, Any] | None:
+    if not state.settings.ibkr_orders_enabled:
+        return _error(MCP_ORDERS_DISABLED_ERROR, code="ORDERS_DISABLED")
+    if state.settings.ibkr_disable_order_submission:
+        return _error(MCP_ORDER_SUBMISSION_DISABLED_ERROR, code="ORDER_SUBMISSION_DISABLED")
+    return None
+
+
 async def cancel_all_orders(ctx: Context, confirm: bool = False) -> dict[str, Any]:
     """Cancel ALL open orders across all accounts. Use with extreme caution.
 
     Destructive and idempotent. Requires an explicit opt-in: pass
     confirm=true, otherwise the tool returns CONFIRMATION_REQUIRED and
-    cancels nothing.
+    cancels nothing. Remains available when IBKR_DISABLE_ORDER_SUBMISSION=true
+    so open risk can still be flattened.
     """
     state = _state(ctx)
     if not state.settings.ibkr_orders_enabled:
@@ -73,8 +83,8 @@ async def exercise_option(
         override: Override exercise restrictions (default False)
     """
     state = _state(ctx)
-    if not state.settings.ibkr_orders_enabled:
-        return _error(MCP_ORDERS_DISABLED_ERROR, code="ORDERS_DISABLED")
+    if err := _require_mcp_submission_allowed(state):
+        return err
     try:
         return await state.feed.exercise_option(
             symbol=symbol,
@@ -112,8 +122,8 @@ async def modify_order(
     from src.feeds.orders import ModifyOrderRequest, TIF as TIFEnum
 
     state = _state(ctx)
-    if not state.settings.ibkr_orders_enabled:
-        return _error(MCP_ORDERS_DISABLED_ERROR, code="ORDERS_DISABLED")
+    if err := _require_mcp_submission_allowed(state):
+        return err
     try:
         tif_enum = TIFEnum(tif) if tif is not None else None
         modifications = ModifyOrderRequest(price=price, quantity=quantity, tif=tif_enum)
@@ -143,6 +153,9 @@ async def preview_order(
     outside_rth: bool = False,
 ) -> dict[str, Any]:
     """Preview an order without submitting (whatIfOrder). Returns margin and commission impact.
+
+    Remains available when IBKR_DISABLE_ORDER_SUBMISSION=true as long as
+    IBKR_ORDERS_ENABLED=true.
 
     Args:
         symbol: Ticker symbol
@@ -219,11 +232,11 @@ async def place_bracket_order(
         account: IBKR account ID
 
     Validation and placement go through the same guarded order client as
-    POST /api/v1/orders/bracket (master switch, risk config, typed responses).
+    POST /api/v1/orders/bracket (master switch, submission kill-switch, typed responses).
     """
     state = _state(ctx)
-    if not state.settings.ibkr_orders_enabled:
-        return _error(MCP_ORDERS_DISABLED_ERROR, code="ORDERS_DISABLED")
+    if err := _require_mcp_submission_allowed(state):
+        return err
     try:
         from src.feeds.orders import BracketOrderRequest
 
@@ -265,11 +278,11 @@ async def place_oca_group(
         account: IBKR account ID
 
     Validation and placement go through the same guarded order client as
-    POST /api/v1/orders/oca (master switch, risk config, typed responses).
+    POST /api/v1/orders/oca (master switch, submission kill-switch, typed responses).
     """
     state = _state(ctx)
-    if not state.settings.ibkr_orders_enabled:
-        return _error(MCP_ORDERS_DISABLED_ERROR, code="ORDERS_DISABLED")
+    if err := _require_mcp_submission_allowed(state):
+        return err
     try:
         from src.feeds.orders import OcaGroupRequest
 

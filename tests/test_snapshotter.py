@@ -400,10 +400,10 @@ class TestSnapshotEndpoints:
         assert "/api/v1/snapshot/capture" in paths
         assert "/api/v1/snapshot/fx-options/capture" in paths
         assert "/api/v1/snapshot/fx-options/latest" in paths
-        assert "/api/v1/snapshot/fx-options/query" in paths
+        assert str(app.url_path_for("query_fx_option_snapshots")) == "/api/v1/snapshot/fx-options/query"
         assert "/api/v1/snapshot/latest" in paths
-        assert "/api/v1/snapshot/latest-all" in paths
-        assert "/api/v1/snapshot/query" in paths
+        assert str(app.url_path_for("get_all_latest_snapshots")) == "/api/v1/snapshot/latest-all"
+        assert str(app.url_path_for("query_historical_snapshots")) == "/api/v1/snapshot/query"
         assert "/api/v1/snapshot/watchlists" in paths
         assert "/api/v1/snapshot/watchlists/{name}" in paths
         assert "/api/v1/snapshot/watchlists/{name}/capture" in paths

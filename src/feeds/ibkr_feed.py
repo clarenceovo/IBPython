@@ -208,8 +208,10 @@ class IBKRFeedClient:
         client_role: str = "notebook",
         analytics_store: Any | None = None,
         orders_enabled: bool = True,
+        disable_order_submission: bool = False,
     ) -> None:
         self._orders_enabled = orders_enabled
+        self._disable_order_submission = disable_order_submission
         self._circuit_breaker = CircuitBreaker(
             failure_threshold=5,
             recovery_timeout_seconds=30.0,
@@ -251,7 +253,13 @@ class IBKRFeedClient:
         self._options = IBKROptionsFeedClient(self._connection, self._historical)
         self._account = IBKRAccountFeedClient(self._connection)
         self._reference = IBKRReferenceFeedClient(self._connection, self._historical)
-        self._order_client = IBKROrderClient(self._connection, redis=redis, analytics_store=analytics_store, orders_enabled=orders_enabled)
+        self._order_client = IBKROrderClient(
+            self._connection,
+            redis=redis,
+            analytics_store=analytics_store,
+            orders_enabled=orders_enabled,
+            disable_order_submission=disable_order_submission,
+        )
         self._marketdata_ext = IBKRMarketDataExtClient(self._connection)
         self._equity_reference = EquityReferenceClient(self._connection, self._historical)
 
@@ -1001,7 +1009,11 @@ class IBKRFeedClient:
     # ------------------------------------------------------------------
 
     def get_capabilities(self) -> GatewayCapabilities:
-        return gateway_capabilities(self._connection, orders_enabled=self._orders_enabled)
+        return gateway_capabilities(
+            self._connection,
+            orders_enabled=self._orders_enabled,
+            disable_order_submission=self._disable_order_submission,
+        )
 
     async def load_equity_shortability(self, request: EquityReferenceRequest) -> ShortabilityResponse:
         return await self._equity_reference.load_shortability(request)

@@ -1,17 +1,9 @@
-.git
-.idea
-.pytest_cache
-.venv
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.env
-.env.ibgateway
-tests
-docs
-notebooks
-.ruff_cache
-notebooks/.ipynb_checkpoints
-questdb-data
-redis-data
+# Inputs used by the API and MCP Dockerfiles.
+**
+!Dockerfile
+!Dockerfile.*
+!requirements.txt
+!src/
+!src/**
+**/__pycache__/
+**/*.py[cod]

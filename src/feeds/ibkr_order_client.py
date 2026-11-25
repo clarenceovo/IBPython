@@ -30,7 +30,11 @@ from src.feeds.ibkr_connection import (
 )
 from src.feeds.contracts import ContractSpec, build_ibkr_contract
 from src.feeds.models import AssetClass
-from src.feeds.exceptions import IBKROrderError, IBKROrdersDisabledError
+from src.feeds.exceptions import (
+    IBKROrderError,
+    IBKROrderSubmissionDisabledError,
+    IBKROrdersDisabledError,
+)
 from src.feeds.orders import (
     BracketOrderRequest,
     BracketOrderResponse,
@@ -74,6 +78,11 @@ ORDERS_DISABLED_MESSAGE = (
     "Set IBKR_ORDERS_ENABLED=true to enable place/modify/cancel/bracket/OCA/preview/exercise operations."
 )
 
+ORDER_SUBMISSION_DISABLED_MESSAGE = (
+    "Live order submission is disabled by IBKR_DISABLE_ORDER_SUBMISSION=true; "
+    "order preview (what-if) and cancellation remain available."
+)
+
 
 def _require_orders_enabled(method: Any) -> Any:
     """Guard decorator: refuse order-writing operations when the master switch is off."""
@@ -82,6 +91,20 @@ def _require_orders_enabled(method: Any) -> Any:
     async def wrapper(self: "IBKROrderClient", *args: Any, **kwargs: Any) -> Any:
         if not self._orders_enabled:
             raise IBKROrdersDisabledError(ORDERS_DISABLED_MESSAGE)
+        return await method(self, *args, **kwargs)
+
+    return wrapper
+
+
+def _require_order_submission_allowed(method: Any) -> Any:
+    """Guard decorator: refuse live order submission/modification/exercise when kill switch is on."""
+
+    @functools.wraps(method)
+    async def wrapper(self: "IBKROrderClient", *args: Any, **kwargs: Any) -> Any:
+        if not self._orders_enabled:
+            raise IBKROrdersDisabledError(ORDERS_DISABLED_MESSAGE)
+        if self._disable_order_submission:
+            raise IBKROrderSubmissionDisabledError(ORDER_SUBMISSION_DISABLED_MESSAGE)
         return await method(self, *args, **kwargs)
 
     return wrapper
@@ -118,11 +141,13 @@ class IBKROrderClient:
         redis: Any | None = None,
         analytics_store: AnalyticsStore | None = None,
         orders_enabled: bool = True,
+        disable_order_submission: bool = False,
     ) -> None:
         self._connection = connection
         self._redis = redis
         self._analytics_store = analytics_store
         self._orders_enabled = orders_enabled
+        self._disable_order_submission = disable_order_submission
         self._analytics_tasks: set[asyncio.Task[Any]] = set()
         self._analytics_ib: Any | None = None
         if analytics_store is not None:
@@ -527,7 +552,7 @@ class IBKROrderClient:
     # Public methods — order lifecycle
     # ------------------------------------------------------------------
 
-    @_require_orders_enabled
+    @_require_order_submission_allowed
     async def place_order(self, request: PlaceOrderRequest) -> OrderResponse:
         """Submit a new order to IBKR.
 
@@ -718,7 +743,7 @@ class IBKROrderClient:
         await self._cache_envelope(envelope, ttl_seconds=0)
         return result
 
-    @_require_orders_enabled
+    @_require_order_submission_allowed
     async def modify_order(
         self,
         account_id: str,
@@ -998,7 +1023,7 @@ class IBKROrderClient:
             logger.debug("ib_async Contract unavailable; using simple contract namespace", exc_info=True)
             return SimpleNamespace(symbol=symbol, secType=sec_type, exchange=exchange, currency=currency, conId=0)
 
-    @_require_orders_enabled
+    @_require_order_submission_allowed
     async def place_bracket_order(self, request: BracketOrderRequest) -> BracketOrderResponse:
         """Place a parent order with attached take-profit and stop-loss orders."""
         await self._connection.ensure_connected()
@@ -1089,7 +1114,7 @@ class IBKROrderClient:
         await self._cache_envelope(envelope, ttl_seconds=0)
         return response
 
-    @_require_orders_enabled
+    @_require_order_submission_allowed
     async def place_oca_group(self, request: OcaGroupRequest) -> list[OcaOrderResponse]:
         """Place an OCA group after qualifying every leg up front."""
         await self._connection.ensure_connected()
@@ -1242,7 +1267,7 @@ class IBKROrderClient:
     # Option exercise / lapse
     # ------------------------------------------------------------------
 
-    @_require_orders_enabled
+    @_require_order_submission_allowed
     async def exercise_option(
         self,
         symbol: str,

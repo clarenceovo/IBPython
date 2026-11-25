@@ -199,6 +199,7 @@ class RateLimiterMiddleware:
         "/redoc",
         "/openapi.json",
         "/api/v1/openapi.json",
+        "/llms.txt",
         "/metrics",
     })
 

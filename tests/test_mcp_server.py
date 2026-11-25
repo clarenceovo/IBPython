@@ -38,20 +38,16 @@ def test_mcp_server_is_valid_python():
     assert isinstance(tree, ast.Module)
 
 
+def _registered_tool_names():
+    from src.mcp_server import create_mcp_server
+
+    return {tool.name for tool in create_mcp_server(toolsets="full")._tool_manager.list_tools()}
+
+
 def test_tool_count():
-    tree = _parse_module()
-    tools = [
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
-        and any(
-            isinstance(d, ast.Call)
-            and isinstance(d.func, ast.Attribute)
-            and d.func.attr == "tool"
-            for d in node.decorator_list
-        )
-    ]
-    assert len(tools) == 65, f"Expected 65 MCP tools, found {len(tools)}: {tools}"
+    tools = _registered_tool_names()
+    assert len(tools) == 63
+    assert tools.isdisjoint({"get_scheduler_health", "list_scheduler_jobs"})
 
 
 def test_resource_count():
@@ -71,24 +67,12 @@ def test_resource_count():
 
 
 def test_expected_tools_present():
-    tree = _parse_module()
-    tools = {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
-        and any(
-            isinstance(d, ast.Call)
-            and isinstance(d.func, ast.Attribute)
-            and d.func.attr == "tool"
-            for d in node.decorator_list
-        )
-    }
+    tools = _registered_tool_names()
     expected = {
         "query_historical_ohlcv",
         "query_latest_bars",
         "query_raw_sql",
         "get_latest_bar_from_cache",
-        "list_scheduler_jobs",
         "get_redis_key",
         "load_option_chains",
         "load_account_summary",
@@ -123,7 +107,6 @@ def test_expected_tools_present():
         "load_bond_yield_history",
         "get_market_depth",
         "get_ibkr_rate_limits",
-        "get_scheduler_health",
         "get_cache_stats",
         "resolve_symbol",
     }

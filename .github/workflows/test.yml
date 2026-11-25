@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   python:
-    name: Python 3.13 Tests
+    name: Python 3.14 Tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -35,6 +35,18 @@ jobs:
             requirements.txt
             requirements-dev.txt
             pyproject.toml
+
+      - name: Check runtime requirements match project metadata
+        run: |
+          python - <<'PYTHON'
+          import tomllib
+          from pathlib import Path
+
+          dependencies = tomllib.loads(Path("pyproject.toml").read_text())["project"]["dependencies"]
+          requirements = Path("requirements.txt").read_text().splitlines()
+          if set(dependencies) != {line.strip() for line in requirements if line.strip() and not line.lstrip().startswith("#")}:
+              raise SystemExit("Sync requirements.txt with [project].dependencies in pyproject.toml")
+          PYTHON
 
       - name: Install dependencies
         run: |
@@ -55,7 +67,6 @@ jobs:
 
       - name: Validate JSON operational files
         run: |
-          python -m json.tool schedulejob/reload_g10_index_composition.json >/dev/null
           python -m json.tool notebooks/00_environment_check.ipynb >/dev/null
           python -m json.tool notebooks/01_ibkr_connection_test.ipynb >/dev/null
           python -m json.tool notebooks/02_load_ohlcv.ipynb >/dev/null
@@ -64,4 +75,12 @@ jobs:
           python -m json.tool notebooks/05_index_composition_sync.ipynb >/dev/null
 
       - name: Validate Docker Compose config
-        run: docker compose config
+        run: |
+          cp .env.ibgateway.example .env.ibgateway
+          make docker-config
+
+      - name: Build and smoke-test Compose app images
+        run: |
+          make docker-build
+          docker compose run --rm --no-deps ibkr-rest-app python -c "from src.webapp.app import get_app; get_app()"
+          docker compose run --rm --no-deps mcp-server python -c "import src.mcp_server"
