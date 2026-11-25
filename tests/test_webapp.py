@@ -166,6 +166,9 @@ class FakeRedis:
     async def get_index_composition(self, index_symbol: str) -> IndexCompositionPayload | None:
         return self.compositions.get(index_symbol.upper())
 
+    async def set_raw(self, key: str, value: str, *, ex: int | None = None) -> None:
+        self.values[key] = value
+
     async def get_raw(self, key: str) -> str | None:
         return self.values.get(key)
 

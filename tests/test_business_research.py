@@ -337,10 +337,12 @@ def test_dashboard_static_files_auth_and_api_route_precedence():
         for path in ('/dashboard', '/dashboard/', '/dashboard/index.html', '/dashboard/style.css', '/dashboard/app.js'):
             assert client.get(path).status_code == 200
             assert client.head(path).status_code == 200
-        assert client.get('/api/v1/system/health').status_code == 401
-        assert client.get('/api/v1/system/health', headers={'Authorization': 'Bearer bad'}).status_code == 401
+        assert client.get('/api/v1/system/health').status_code == 200
+        assert client.get('/api/v1/system/version').status_code == 401
+        assert client.get('/api/v1/system/version', headers={'Authorization': 'Bearer bad'}).status_code == 401
         assert client.post('/dashboard/app.js').status_code == 401
         headers = {'Authorization': 'Bearer test-api-token', 'Accept': 'text/html'}
+        assert client.get('/api/v1/system/version', headers=headers).status_code == 200
         for path in ('/dashboard/missing.js', '/dashboard/missing', '/api/v1/missing'):
             assert client.get(path, headers=headers).status_code == 404
         assert client.post('/dashboard/app.js', headers=headers).status_code in (404, 405)

@@ -28,7 +28,7 @@ def make_app():
         load_fundamental_data=real_feed.load_fundamental_data,
     )
     state = SimpleNamespace(settings=settings, feed=feed, close=AsyncMock(),
-                            redis=SimpleNamespace(get_raw=AsyncMock(return_value=b'order-token')))
+                            redis=SimpleNamespace(get_raw=AsyncMock(return_value=b'order-token'), set_raw=AsyncMock()))
     return create_app(settings=settings, state=state), feed
 
 
@@ -43,7 +43,7 @@ def test_rest_capabilities_and_removed_fundamentals():
         assert response.status_code == 410
         assert '10.47' in response.json()['detail']
         schema = client.get('/api/v1/openapi.json').json()
-        assert schema['paths']['/api/v1/reference-data/fundamentals']['post']['deprecated'] is True
+        assert '/api/v1/reference-data/fundamentals' not in schema['paths']
 
 
 def test_rest_reference_responses_and_validation():

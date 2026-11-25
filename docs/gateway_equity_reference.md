@@ -60,7 +60,7 @@ Shortable shares are indicative, not reserved. Dividend values are estimates and
 
 ## Removed fundamental reports
 
-`POST /api/v1/reference-data/fundamentals` is deprecated in OpenAPI and returns **410 Gone**, without connecting or retrying. The legacy `load_fundamentals` MCP tool raises an explicit unsupported-feature error. This is a gateway policy for the upstream removal, including when an older client still has the method; no release number is guessed from the negotiated protocol. WSH events and dividend ticks continue as separate data products. [IBKR 10.47 removal](https://www.ibkrguides.com/releasenotes/prod-2026.htm).
+`POST /api/v1/reference-data/fundamentals` is omitted from the published OpenAPI schema and returns **410 Gone**, without connecting or retrying. The legacy `load_fundamentals` MCP tool raises an explicit unsupported-feature error. This is a gateway policy for the upstream removal, including when an older client still has the method; no release number is guessed from the negotiated protocol. WSH events and dividend ticks continue as separate data products. [IBKR 10.47 removal](https://www.ibkrguides.com/releasenotes/prod-2026.htm).
 
 ## Verification
 
